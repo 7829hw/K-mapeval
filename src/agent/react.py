@@ -4,15 +4,15 @@ import json
 import time
 from typing import Any
 
-from k_mapeval.agents.base import (
+from src.agent.base import (
     AgentResult,
     BenchmarkAgent,
     find_provider_failure,
     format_question,
 )
-from k_mapeval.evaluation.parsing import parse_answer
-from k_mapeval.llm import ChatClient
-from k_mapeval.tools import ToolRegistry
+from src.llm import ChatClient
+from src.parsing import parse_answer
+from src.tools import ToolRegistry
 
 REACT_SYSTEM_PROMPT = """You are the MapEval-style ReAct baseline for Korean spatial questions.
 Use the map tools to gather evidence and reason over only the question and candidate options.

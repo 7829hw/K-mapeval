@@ -4,16 +4,22 @@ import argparse
 import json
 from pathlib import Path
 
-from k_mapeval.agents import ReactAgent, SpatialAgent
-from k_mapeval.config import Settings
-from k_mapeval.evaluation import Evaluator, load_dataset
-from k_mapeval.llm import OpenAIChatClient
-from k_mapeval.providers import KakaoMapProvider
-from k_mapeval.tools import ToolRegistry
+from src.agent import ReactAgent, SpatialAgent
+from src.config import Settings
+from src.dataset import load_dataset
+from src.evaluator import Evaluator
+from src.llm import OpenAIChatClient
+from src.tools import KakaoMapProvider, ToolRegistry
 
 
-def parser(description: str) -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(description=description)
+def build_parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(description="Run the K-MapEval benchmark")
+    result.add_argument(
+        "--agent",
+        choices=("react", "spatial", "both"),
+        default="both",
+        help="Agent architecture to evaluate (default: both)",
+    )
     result.add_argument("--dataset", default="dataset/sample.jsonl")
     result.add_argument("--output-dir", default="results")
     result.add_argument("--ids", nargs="*", help="Optional question IDs")
@@ -44,9 +50,31 @@ def run(agent_type: str, args: argparse.Namespace) -> dict:
             if agent_type == "react"
             else SpatialAgent(llm, tools, max_steps=settings.max_reasoning_steps)
         )
-        report = Evaluator(agent, dataset, output_dir=Path(args.output_dir)).run()
+        report = Evaluator(
+            agent,
+            dataset,
+            output_dir=Path(args.output_dir),
+            dataset_path=args.dataset,
+        ).run()
         summary = report.summary
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return summary
     finally:
         provider.close()
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    agent_types = ("react", "spatial_agent") if args.agent == "both" else (
+        "spatial_agent" if args.agent == "spatial" else "react",
+    )
+    summaries = {agent_type: run(agent_type, args) for agent_type in agent_types}
+    if len(summaries) == 2:
+        print(
+            f"ReAct accuracy={summaries['react']['accuracy']:.3f} | "
+            f"Spatial-Agent accuracy={summaries['spatial_agent']['accuracy']:.3f}"
+        )
+
+
+if __name__ == "__main__":
+    main()

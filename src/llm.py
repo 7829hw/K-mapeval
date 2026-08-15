@@ -6,7 +6,7 @@ from typing import Any, Protocol
 
 from openai import OpenAI
 
-from k_mapeval.config import Settings
+from src.config import Settings
 
 
 @dataclass(frozen=True)

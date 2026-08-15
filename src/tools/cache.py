@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from k_mapeval.schemas import Place, Route
+from src.models import Place, Route
 
 SCHEMA_VERSION = 1
 

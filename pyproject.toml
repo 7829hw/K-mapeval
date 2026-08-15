@@ -24,7 +24,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["k_mapeval"]
+packages = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -36,4 +36,3 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
-

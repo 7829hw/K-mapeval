@@ -4,16 +4,21 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from k_mapeval.providers.base import MapProvider
-from k_mapeval.schemas import Place
+from src.models import Place
+from src.tools.map import MapProvider
 
 
 class PlaceSearchArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
     query: str = Field(description="Korean place name, optionally with a region")
     limit: int = Field(default=5, ge=1, le=15)
+
+    @field_validator("limit", mode="before")
+    @classmethod
+    def clamp_limit(cls, value: Any) -> int:
+        return _clamp_int(value, minimum=1, maximum=15)
 
 
 class PlaceDetailsArgs(BaseModel):
@@ -25,6 +30,11 @@ class GeocodeArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
     address: str = Field(description="Korean road-name or land-lot address")
     limit: int = Field(default=5, ge=1, le=15)
+
+    @field_validator("limit", mode="before")
+    @classmethod
+    def clamp_limit(cls, value: Any) -> int:
+        return _clamp_int(value, minimum=1, maximum=15)
 
 
 class NearbyPlacesArgs(BaseModel):
@@ -39,6 +49,16 @@ class NearbyPlacesArgs(BaseModel):
     )
     radius_m: int = Field(default=2000, ge=1, le=20000)
     limit: int = Field(default=15, ge=1, le=15)
+
+    @field_validator("radius_m", mode="before")
+    @classmethod
+    def clamp_radius(cls, value: Any) -> int:
+        return _clamp_int(value, minimum=1, maximum=20_000)
+
+    @field_validator("limit", mode="before")
+    @classmethod
+    def clamp_limit(cls, value: Any) -> int:
+        return _clamp_int(value, minimum=1, maximum=15)
 
     @model_validator(mode="after")
     def require_search_selector(self) -> NearbyPlacesArgs:
@@ -194,3 +214,8 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: _jsonable(item) for key, item in value.items()}
     return value
+
+
+def _clamp_int(value: Any, *, minimum: int, maximum: int) -> int:
+    number = int(value)
+    return max(minimum, min(number, maximum))

@@ -5,7 +5,9 @@ from typing import Any
 
 import httpx
 
-from k_mapeval.providers.base import (
+from src.models import Place, Route, RouteStep
+from src.tools.cache import SQLiteMapCache
+from src.tools.map import (
     MapProvider,
     PlaceNotFoundError,
     ProviderAuthError,
@@ -15,8 +17,6 @@ from k_mapeval.providers.base import (
     RouteNotFoundError,
     UnsupportedTravelModeError,
 )
-from k_mapeval.providers.cache import SQLiteMapCache
-from k_mapeval.schemas import Place, Route, RouteStep
 
 LOCAL_BASE_URL = "https://dapi.kakao.com/v2/local"
 MOBILITY_DIRECTIONS_URL = "https://apis-navi.kakaomobility.com/v1/directions"

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from k_mapeval.schemas import Place, Route
+from src.models import Place, Route
 
 
 class ProviderError(RuntimeError):

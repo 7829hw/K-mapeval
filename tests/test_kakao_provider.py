@@ -3,8 +3,8 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from k_mapeval.providers.base import PlaceNotFoundError, UnsupportedTravelModeError
-from k_mapeval.providers.kakao import KakaoMapProvider
+from src.tools.kakao import KakaoMapProvider
+from src.tools.map import PlaceNotFoundError, UnsupportedTravelModeError
 
 
 def _document(place_id: str, name: str, x: float, y: float) -> dict:

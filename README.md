@@ -5,15 +5,18 @@ Kakao 지도 정보 위에서 MapEval 방식 ReAct와 Spatial-Agent의 공간 �
 ## 구조
 
 ```text
-Question / Options
-   ├─ MapEval-style ReAct
-   └─ Route → Plan → Execute → Evaluate → Generate
-                 │
-          Common ToolRegistry
-                 │
-          KakaoMapProvider
-          ├─ Kakao Local API
-          └─ Kakao Mobility Directions
+K-MapEval/
+├── main.py              # 단일 실행 진입점
+├── src/
+│   ├── agent/           # ReAct / Spatial-Agent
+│   ├── tools/           # Kakao provider, SQLite cache, 공간 연산
+│   ├── config.py        # .env 설정
+│   ├── dataset.py       # JSONL 로더
+│   ├── evaluator.py     # 평가 및 결과 기록
+│   └── models.py        # Place / Route 스키마
+├── dataset/             # 평가 데이터셋
+├── tests/               # 단위 테스트
+└── results/             # 실행 결과(자동 생성)
 ```
 
 두 에이전트 모두 `Place`와 `Route` 정규화 스키마만 봅니다. 정답, classification, region, difficulty, verified_at은 에이전트 입력에 포함되지 않습니다.
@@ -56,18 +59,21 @@ cp example.env .env
 ## 실행
 
 ```bash
-python -m scripts.run_react
-python -m scripts.run_spatial
-python -m scripts.run_benchmark
+python main.py --agent react
+python main.py --agent spatial
+python main.py --agent both
 ```
 
 일부 문항만 실행할 수 있습니다.
 
 ```bash
-python -m scripts.run_benchmark --ids nearby_001 poi_001
+python main.py --agent both --dataset dataset/test.jsonl --ids nearby_001 poi_001
 ```
 
 결과는 기본적으로 `results/` 아래에 에이전트별 summary와 문항별 trace로 저장됩니다. 로그에는 API 키가 들어가지 않습니다.
+실행 중에는 각 QA의 시작·완료, 전체 진행률, 정답 여부와 소요시간이 터미널에 표시됩니다.
+`results/<agent>_report.json`은 QA 하나가 끝날 때마다 누적 갱신되므로 중간에 실행이
+중단되어도 완료된 문항까지의 summary와 trace를 확인할 수 있습니다.
 
 ## 평가 항목
 

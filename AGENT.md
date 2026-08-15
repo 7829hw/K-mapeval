@@ -104,7 +104,9 @@ Keep live API tests separate and optional.
 
 ## Repository Guidance
 
-Prefer folders for `providers`, `schemas`, `tools`, `agents`, `evaluation`, `dataset`, `scripts`, and `tests`.
+Keep one root entry point (`main.py`) and a compact `src/` package modeled after Spatial-Agent.
+Use only `src/agent/` and `src/tools/` as source subdirectories; keep config, models, dataset,
+evaluation, metrics, and parsing modules directly under `src/`.
 Keep Kakao-specific logic inside the provider layer.
 Keep agent-facing interfaces provider-neutral.
 Avoid unnecessary databases, web UIs, distributed systems, or production infrastructure.

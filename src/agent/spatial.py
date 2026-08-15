@@ -4,15 +4,15 @@ import json
 import time
 from typing import Any
 
-from k_mapeval.agents.base import (
+from src.agent.base import (
     AgentResult,
     BenchmarkAgent,
     find_provider_failure,
     format_question,
 )
-from k_mapeval.evaluation.parsing import parse_answer, parse_json_object
-from k_mapeval.llm import ChatClient
-from k_mapeval.tools import SpatialOperatorRegistry, ToolRegistry
+from src.llm import ChatClient
+from src.parsing import parse_answer, parse_json_object
+from src.tools import SpatialOperatorRegistry, ToolRegistry
 
 ROUTER_PROMPT = """Classify this Korean spatial multiple-choice question into exactly one intent:
 nearby, poi, routing, or trip. Return JSON only: {"intent":"nearby"}. Do not answer the question."""

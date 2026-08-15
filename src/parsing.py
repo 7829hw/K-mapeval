@@ -11,7 +11,7 @@ def parse_answer(text: str, *, option_count: int) -> int | None:
     if not text:
         return None
     patterns = (
-        r"\^\^\s*(?:option\s*)?(\d+)\s*\^\^",
+        r"\^\^\s*(?:option[\s_-]*)?(\d+)\s*\^\^",
         r'"predicted_(?:option|answer)"\s*:\s*"?(\d+)',
         r"(?:option|답|정답)\s*[:：]?\s*(\d+)",
     )
@@ -46,4 +46,3 @@ def parse_json_object(text: str) -> dict[str, Any]:
         except json.JSONDecodeError:
             return {}
     return {}
-

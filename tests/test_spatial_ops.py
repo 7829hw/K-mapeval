@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from k_mapeval.tools.spatial_ops import SpatialOperatorRegistry
+from src.tools.spatial import SpatialOperatorRegistry
 
 
 def test_haversine_and_bearing() -> None:

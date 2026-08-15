@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from k_mapeval.agents import ReactAgent, SpatialAgent
-from k_mapeval.llm import LLMResponse, LLMToolCall
-from k_mapeval.providers.base import MapProvider
-from k_mapeval.schemas import Place, Route
-from k_mapeval.tools import ToolRegistry
+from src.agent import ReactAgent, SpatialAgent
+from src.llm import LLMResponse, LLMToolCall
+from src.models import Place, Route
+from src.tools import MapProvider, ToolRegistry
 
 
 class FakeProvider(MapProvider):
@@ -101,6 +100,20 @@ def test_registry_returns_error_observation_instead_of_raising() -> None:
     execution = registry.invoke("nearby_places", {"center": "경복궁"})
     assert execution.status == "error"
     assert "requires query or category_code" in (execution.error or "")
+
+
+def test_registry_clamps_llm_generated_kakao_limits() -> None:
+    registry = ToolRegistry(FakeProvider())
+    search = registry.invoke("place_search", {"query": "경복궁", "limit": 20})
+    nearby = registry.invoke(
+        "nearby_places",
+        {"center": "경복궁", "query": "식당", "radius_m": 50_000, "limit": 20},
+    )
+    assert search.status == "ok"
+    assert search.arguments["limit"] == 15
+    assert nearby.status == "ok"
+    assert nearby.arguments["radius_m"] == 20_000
+    assert nearby.arguments["limit"] == 15
 
 
 def test_directions_accepts_a_normalized_place_from_a_plan_reference() -> None:

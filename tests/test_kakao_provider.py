@@ -20,7 +20,10 @@ def _document(place_id: str, name: str, x: float, y: float) -> dict:
 
 
 def test_search_nearby_details_and_route_are_normalized() -> None:
+    requests: list[httpx.Request] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
         if request.url.host == "dapi.kakao.com":
             query = request.url.params.get("query")
             if query == "경복궁":
@@ -77,6 +80,57 @@ def test_search_nearby_details_and_route_are_normalized() -> None:
     assert route.duration_s == 900
     assert route.steps[0].road_name == "세종대로"
     assert provider.api_call_count == 4
+    nearby_request = next(
+        request for request in requests if request.url.params.get("sort") == "distance"
+    )
+    assert nearby_request.url.path == "/v2/local/search/keyword.json"
+    assert nearby_request.url.params["radius"] == "2000"
+    assert nearby_request.url.params["x"] == str(palace.longitude)
+    assert nearby_request.url.params["y"] == str(palace.latitude)
+    directions_request = next(
+        request for request in requests if request.url.host == "apis-navi.kakaomobility.com"
+    )
+    assert directions_request.url.path == "/v1/directions"
+    assert directions_request.url.params["summary"] == "true"
+    assert directions_request.headers["Authorization"] == "KakaoAK test-key"
+    assert directions_request.headers["Content-Type"] == "application/json"
+
+
+def test_nearby_query_with_category_uses_keyword_filter() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"documents": []})
+
+    center = KakaoMapProvider.normalize_place(_document("1", "서울역", 126.9707, 37.5547))
+    provider = KakaoMapProvider(
+        "test-key",
+        cache_path=":memory:",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    assert provider.nearby_search(center, query="카페", category_code="ce7") == []
+    assert len(requests) == 1
+    request = requests[0]
+    assert request.url.path == "/v2/local/search/keyword.json"
+    assert request.url.params["query"] == "카페"
+    assert request.url.params["category_group_code"] == "CE7"
+    assert request.url.params["sort"] == "distance"
+
+
+def test_nearby_rejects_non_kakao_category_without_calling_api() -> None:
+    def fail_if_called(_: httpx.Request) -> httpx.Response:
+        raise AssertionError("An invalid category code must not reach Kakao")
+
+    center = KakaoMapProvider.normalize_place(_document("1", "서울역", 126.9707, 37.5547))
+    provider = KakaoMapProvider(
+        "test-key",
+        cache_path=":memory:",
+        client=httpx.Client(transport=httpx.MockTransport(fail_if_called)),
+    )
+    with pytest.raises(ValueError, match="official category group code"):
+        provider.nearby_search(center, category_code="LIBRARY")
+    assert provider.api_call_count == 0
 
 
 def test_place_details_requires_a_prior_retrieval() -> None:
@@ -178,4 +232,56 @@ def test_directions_uses_cached_places_and_route_after_restart(tmp_path) -> None
     assert second.directions("서울역", "경복궁").duration_s == 900
     assert second.api_call_count == 0
     assert second.cache_hit_count == 3
+    second.close()
+
+
+def test_directions_resolves_persisted_place_ids_without_local_api_calls(tmp_path) -> None:
+    cache_path = tmp_path / "place-ids.db"
+
+    def local_handler(request: httpx.Request) -> httpx.Response:
+        query = request.url.params["query"]
+        document = (
+            _document("origin-id", "서울역", 126.9707, 37.5547)
+            if query == "서울역"
+            else _document("destination-id", "경복궁", 126.977, 37.5796)
+        )
+        return httpx.Response(200, json={"documents": [document]})
+
+    first = KakaoMapProvider(
+        "test-key",
+        cache_path=str(cache_path),
+        client=httpx.Client(transport=httpx.MockTransport(local_handler)),
+    )
+    first.search_place("서울역", limit=1)
+    first.search_place("경복궁", limit=1)
+    first.close()
+
+    requests: list[httpx.Request] = []
+
+    def route_only_handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.url.host == "apis-navi.kakaomobility.com"
+        return httpx.Response(
+            200,
+            json={
+                "routes": [
+                    {
+                        "result_code": 0,
+                        "summary": {"distance": 4100, "duration": 900},
+                        "sections": [],
+                    }
+                ]
+            },
+        )
+
+    second = KakaoMapProvider(
+        "test-key",
+        cache_path=str(cache_path),
+        client=httpx.Client(transport=httpx.MockTransport(route_only_handler)),
+    )
+    route = second.directions("origin-id", "destination-id")
+    assert route.distance_m == 4100
+    assert len(requests) == 1
+    assert second.api_call_count == 1
+    assert second.cache_hit_count == 2
     second.close()

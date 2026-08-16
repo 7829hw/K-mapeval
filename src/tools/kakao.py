@@ -20,6 +20,28 @@ from src.tools.map import (
 
 LOCAL_BASE_URL = "https://dapi.kakao.com/v2/local"
 MOBILITY_DIRECTIONS_URL = "https://apis-navi.kakaomobility.com/v1/directions"
+KAKAO_CATEGORY_CODES = frozenset(
+    {
+        "MT1",
+        "CS2",
+        "PS3",
+        "SC4",
+        "AC5",
+        "PK6",
+        "OL7",
+        "SW8",
+        "BK9",
+        "CT1",
+        "AG2",
+        "PO3",
+        "AT4",
+        "AD5",
+        "FD6",
+        "CE7",
+        "HP8",
+        "PM9",
+    }
+)
 
 
 class KakaoMapProvider(MapProvider):
@@ -90,11 +112,7 @@ class KakaoMapProvider(MapProvider):
         except (KeyError, TypeError, ValueError) as exc:
             raise ProviderError("Kakao place response has invalid coordinates") from exc
         address = str(document.get("road_address_name") or document.get("address_name") or "")
-        category = str(
-            document.get("category_name")
-            or document.get("address_type")
-            or "address"
-        )
+        category = str(document.get("category_name") or document.get("address_type") or "address")
         return Place(
             place_id=place_id,
             name=name,
@@ -180,8 +198,15 @@ class KakaoMapProvider(MapProvider):
         radius_m: int = 2000,
         limit: int = 15,
     ) -> list[Place]:
-        if not query and not category_code:
+        normalized_query = query.strip() if query and query.strip() else None
+        normalized_category = category_code.strip().upper() if category_code else None
+        if not normalized_query and not normalized_category:
             raise ValueError("nearby_search requires query or category_code")
+        if normalized_category and normalized_category not in KAKAO_CATEGORY_CODES:
+            raise ValueError(
+                f"Unknown Kakao category code: {normalized_category}. "
+                "Use an official category group code or provide query instead."
+            )
         center_place = self._resolve_place(center)
         size = _size(limit)
         normalized_radius = max(1, min(radius_m, 20000))
@@ -192,21 +217,27 @@ class KakaoMapProvider(MapProvider):
             "sort": "distance",
             "size": size,
         }
-        if category_code:
-            path = "/search/category.json"
-            params["category_group_code"] = category_code.upper()
-        else:
+        if normalized_query:
             path = "/search/keyword.json"
-            params["query"] = query
+            params["query"] = normalized_query
+            if normalized_category:
+                params["category_group_code"] = normalized_category
+        else:
+            path = "/search/category.json"
+            params["category_group_code"] = normalized_category
         cache_args = {
             "center_place_id": center_place.place_id,
             "center_latitude": center_place.latitude,
             "center_longitude": center_place.longitude,
-            "query": _normalized_text(query) if query else None,
-            "category_code": category_code.upper() if category_code else None,
+            "query": _normalized_text(normalized_query) if normalized_query else None,
+            "category_code": normalized_category,
             "radius_m": normalized_radius,
             "limit": size,
         }
+        if normalized_query and normalized_category:
+            # Invalidates entries created by the old implementation, which ignored query
+            # whenever category_code was also present.
+            cache_args["category_filter_mode"] = "keyword"
         cached = self._cache.get_places("nearby_search", cache_args)
         if cached is not None:
             self._record_cache_hit(cached)
@@ -267,7 +298,9 @@ class KakaoMapProvider(MapProvider):
                 "origin": f"{origin_place.longitude},{origin_place.latitude}",
                 "destination": f"{destination_place.longitude},{destination_place.latitude}",
                 "priority": normalized_priority,
-                "summary": "false",
+                # Benchmarks use route distance/duration, so avoid downloading roads,
+                # vertices, bounds, and turn-by-turn guides.
+                "summary": "true",
             },
         )
         route = self.normalize_route(response, origin_place, destination_place)
@@ -280,6 +313,11 @@ class KakaoMapProvider(MapProvider):
             return value
         if value in self._places:
             return self._places[value]
+        cached_place = self._cache.get_place(value)
+        if cached_place is not None:
+            self._cache_hit_count += 1
+            self._places[cached_place.place_id] = cached_place
+            return cached_place
         matches = self.search_place(value, limit=1)
         if not matches:
             raise PlaceNotFoundError(f"Place not found: {value}")
@@ -288,14 +326,16 @@ class KakaoMapProvider(MapProvider):
     def _get_local(self, path: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
         return self._request(f"{LOCAL_BASE_URL}{path}", api_key=self._rest_api_key, params=params)
 
-    def _request(
-        self, url: str, *, api_key: str, params: Mapping[str, Any]
-    ) -> Mapping[str, Any]:
+    def _request(self, url: str, *, api_key: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
         self._api_call_count += 1
         try:
             response = self._client.get(
                 url,
-                headers={"Authorization": f"KakaoAK {api_key}"},
+                headers={
+                    "Authorization": f"KakaoAK {api_key}",
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
                 params=params,
             )
         except httpx.TimeoutException as exc:

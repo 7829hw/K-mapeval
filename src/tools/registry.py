@@ -2,12 +2,33 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from src.models import Place
 from src.tools.map import MapProvider
+
+KakaoCategoryCode = Literal[
+    "MT1",
+    "CS2",
+    "PS3",
+    "SC4",
+    "AC5",
+    "PK6",
+    "OL7",
+    "SW8",
+    "BK9",
+    "CT1",
+    "AG2",
+    "PO3",
+    "AT4",
+    "AD5",
+    "FD6",
+    "CE7",
+    "HP8",
+    "PM9",
+]
 
 
 class PlaceSearchArgs(BaseModel):
@@ -43,9 +64,11 @@ class NearbyPlacesArgs(BaseModel):
         description="Center place name, place_id, or normalized Place from an earlier step"
     )
     query: str | None = Field(default=None, description="Place type/name keyword, e.g. 지하철역")
-    category_code: str | None = Field(
+    category_code: KakaoCategoryCode | None = Field(
         default=None,
-        description="Optional Kakao category code such as SW8 (subway) or FD6 (food)",
+        description=(
+            "Official Kakao category group code. Use query for types without a group code."
+        ),
     )
     radius_m: int = Field(default=2000, ge=1, le=20000)
     limit: int = Field(default=15, ge=1, le=15)
@@ -54,6 +77,11 @@ class NearbyPlacesArgs(BaseModel):
     @classmethod
     def clamp_radius(cls, value: Any) -> int:
         return _clamp_int(value, minimum=1, maximum=20_000)
+
+    @field_validator("category_code", mode="before")
+    @classmethod
+    def normalize_category_code(cls, value: Any) -> Any:
+        return value.strip().upper() if isinstance(value, str) else value
 
     @field_validator("limit", mode="before")
     @classmethod
@@ -141,8 +169,9 @@ class ToolRegistry:
                 ),
                 ToolDefinition(
                     "nearby_places",
-                    "Find places around a center, sorted by distance. Supply query "
-                    "or category_code.",
+                    "Find places around a center with Kakao Local, sorted by distance. "
+                    "Supply query or an official category_code; query may be combined with "
+                    "category_code as a filter.",
                     NearbyPlacesArgs,
                     lambda args: self.provider.nearby_search(
                         args.center,
@@ -154,7 +183,7 @@ class ToolRegistry:
                 ),
                 ToolDefinition(
                     "directions",
-                    "Get a normalized driving route with distance, duration and guidance steps.",
+                    "Get a normalized driving-route distance and duration summary.",
                     DirectionsArgs,
                     lambda args: self.provider.directions(
                         args.origin,

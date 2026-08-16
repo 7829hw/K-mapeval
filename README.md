@@ -41,6 +41,10 @@ Spatial ─────┘                         │
 
 `search_place`, `geocode`, `nearby_search`, `place_details`, `directions` 및 이를 사용하는 `travel_time`은 항상 캐시를 먼저 조회합니다. 기본 DB는 `data/kakao_cache.db`, 기본 TTL은 24시간입니다. `.env`에서 다음 값을 바꿀 수 있습니다.
 
+장소/반경 검색은 Kakao Maps Local의 공식 `keyword.json`·`category.json`을 사용합니다.
+자동차 경로는 Kakao Maps의 도보·대중교통 API가 아니라 Kakao Mobility의 공식
+`/v1/directions`를 사용하며, 벤치마크에 필요한 거리·시간 요약만 요청합니다.
+
 ```ini
 KAKAO_CACHE_DB_PATH=data/kakao_cache.db
 KAKAO_CACHE_TTL_SECONDS=86400

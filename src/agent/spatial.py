@@ -27,7 +27,9 @@ Do not answer the question."""
 PLANNER_PROMPT = """You are the planning stage of Spatial-Agent. Build an executable evidence plan.
 Use only these exact contracts:
 - place_search(query, limit) -> [{place_id,name,address,latitude,longitude,category}]
-- nearby_places(center, query|category_code, radius_m, limit) -> [Place], nearest first
+- nearby_places(center, query|category_code, radius_m, limit) -> [Place], nearest first.
+  Kakao category codes are MT1, CS2, PS3, SC4, AC5, PK6, OL7, SW8, BK9, CT1, AG2,
+  PO3, AT4, AD5, FD6, CE7, HP8, PM9. Use query for types without an official code.
 - directions(origin, destination, mode="driving", priority="RECOMMEND") -> Route
 - travel_time has the same arguments and Route output as directions
 - haversine_distance(place_a, place_b) -> {distance_m,distance_km}

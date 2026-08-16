@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from pathlib import Path
+from queue import Queue
+from threading import Lock, Thread
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
@@ -26,15 +30,25 @@ class EvaluationReport(BaseModel):
 class Evaluator:
     def __init__(
         self,
-        agent: BenchmarkAgent,
+        agent: BenchmarkAgent | None,
         dataset: list[BenchmarkItem],
         *,
+        agent_factory: Callable[[], AbstractContextManager[BenchmarkAgent]] | None = None,
+        max_workers: int = 1,
         output_dir: str | Path | None = "reports",
         dataset_path: str | Path | None = None,
         log_dir: str | Path = "logs",
         test_mode: str = "full",
     ) -> None:
+        if agent is None and agent_factory is None:
+            raise ValueError("Evaluator requires agent or agent_factory")
+        if max_workers < 1:
+            raise ValueError("max_workers must be at least 1")
+        if max_workers > 1 and agent_factory is None:
+            raise ValueError("Parallel evaluation requires an isolated agent_factory")
         self.agent = agent
+        self.agent_factory = agent_factory
+        self.max_workers = max_workers
         self.dataset = dataset
         self.output_dir = Path(output_dir) if output_dir else None
         self.dataset_path = str(dataset_path) if dataset_path else None
@@ -43,13 +57,16 @@ class Evaluator:
         self.report_path: Path | None = None
 
     def run(self) -> EvaluationReport:
-        results: list[dict[str, Any]] = []
         total = len(self.dataset)
+        worker_count = min(self.max_workers, total) if total else 1
         print("=" * 80)
         print(f"Running evaluation on {total} samples")
+        print(f"Concurrent LLM sessions: {worker_count}")
         print("=" * 80)
-        for index, item in enumerate(self.dataset, 1):
-            results.append(self._run_single(item, index=index, total=total))
+        if worker_count == 1:
+            results = self._run_sequential(total)
+        else:
+            results = self._run_parallel(total, worker_count)
         print()
 
         statistics = calculate_statistics(results)
@@ -59,6 +76,7 @@ class Evaluator:
             "sample_ratio": None,
             "random_seed": None,
             "total_samples": total,
+            "concurrency": worker_count,
             "dataset_source": self.dataset_path,
         }
         report = EvaluationReport(metadata=metadata, statistics=statistics, results=results)
@@ -68,8 +86,70 @@ class Evaluator:
             print(f"Report saved to: {self.report_path}")
         return report
 
+    def _run_sequential(self, total: int) -> list[dict[str, Any]]:
+        if self.agent_factory is not None:
+            with self.agent_factory() as agent:
+                return [
+                    self._run_single(agent, item, index=index, total=total)
+                    for index, item in enumerate(self.dataset, 1)
+                ]
+        if self.agent is None:  # guarded by __init__; keeps type narrowing explicit
+            raise RuntimeError("Sequential evaluator has no agent")
+        return [
+            self._run_single(self.agent, item, index=index, total=total)
+            for index, item in enumerate(self.dataset, 1)
+        ]
+
+    def _run_parallel(self, total: int, worker_count: int) -> list[dict[str, Any]]:
+        if self.agent_factory is None:  # guarded by __init__
+            raise RuntimeError("Parallel evaluator has no agent factory")
+
+        jobs: Queue[tuple[int, BenchmarkItem] | None] = Queue()
+        for index, item in enumerate(self.dataset, 1):
+            jobs.put((index, item))
+        for _ in range(worker_count):
+            jobs.put(None)
+
+        ordered_results: list[dict[str, Any] | None] = [None] * total
+        worker_errors: list[BaseException] = []
+        error_lock = Lock()
+
+        def worker() -> None:
+            try:
+                with self.agent_factory() as agent:
+                    while True:
+                        job = jobs.get()
+                        if job is None:
+                            return
+                        index, item = job
+                        ordered_results[index - 1] = self._run_single(
+                            agent,
+                            item,
+                            index=index,
+                            total=total,
+                        )
+            except BaseException as exc:
+                with error_lock:
+                    worker_errors.append(exc)
+
+        threads = [
+            Thread(target=worker, name=f"benchmark-worker-{index + 1}")
+            for index in range(worker_count)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        if worker_errors:
+            raise RuntimeError(f"Benchmark worker failed: {worker_errors[0]}") from worker_errors[0]
+        if any(result is None for result in ordered_results):
+            raise RuntimeError("Parallel benchmark finished with missing results")
+        return [result for result in ordered_results if result is not None]
+
     def _run_single(
         self,
+        agent: BenchmarkAgent,
         item: BenchmarkItem,
         *,
         index: int,
@@ -86,7 +166,7 @@ class Evaluator:
                 log_dir=self.log_dir,
                 option_count=len(options),
             ) as logger:
-                result = self.agent.answer(question, options)
+                result = agent.answer(question, options)
                 log_agent_result(logger, result, correct_answer=item.answer)
             elapsed = time.time() - started
             predicted_option = result.predicted_answer
@@ -126,7 +206,10 @@ class Evaluator:
             }
         except Exception as exc:
             elapsed = time.time() - started
-            print(f"[{index}/{total}] ID {item.id!s:>3} | ERROR: {str(exc)[:80]} | {elapsed:.1f}s")
+            print(
+                f"[{index}/{total}] ID {item.id!s:>3} | ERROR: {str(exc)[:80]} | {elapsed:.1f}s",
+                flush=True,
+            )
             return {
                 "id": item.id,
                 "question": question,
@@ -163,7 +246,8 @@ class Evaluator:
             f"[{index}/{total}] ID {item.id!s:>3} | "
             f"{item.classification:10s} -> {predicted_intent or 'None':10s} {intent_mark} | "
             f"pred={str(shown_pred)[:24]!r}, correct={correct_text[:24]!r} {answer_mark} | "
-            f"{elapsed:.1f}s"
+            f"{elapsed:.1f}s",
+            flush=True,
         )
 
     def _write_report(self, report: EvaluationReport) -> Path | None:

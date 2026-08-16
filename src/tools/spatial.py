@@ -9,13 +9,17 @@ class SpatialOperatorRegistry:
 
     names = (
         "haversine_distance",
+        "pairwise_distances",
         "bearing_to_direction",
         "filter_by_direction",
+        "nearest",
+        "within_radius",
         "select_min",
         "select_max",
         "sort_by",
         "compare_routes",
         "sum_route_metrics",
+        "aggregate_route_groups",
     )
 
     def invoke(self, name: str, arguments: dict[str, Any]) -> Any:
@@ -71,6 +75,20 @@ class SpatialOperatorRegistry:
         }
 
     @classmethod
+    def pairwise_distances(cls, pairs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        for index, pair in enumerate(pairs):
+            distance = cls.haversine_distance(pair["place_a"], pair["place_b"])
+            results.append(
+                {
+                    "pair_index": index,
+                    "label": pair.get("label"),
+                    **distance,
+                }
+            )
+        return results
+
+    @classmethod
     def filter_by_direction(
         cls,
         center: dict[str, Any],
@@ -89,19 +107,61 @@ class SpatialOperatorRegistry:
             matches.append({**place, **bearing, **distance})
         return sorted(matches, key=lambda place: float(place["distance_m"]))
 
+    @classmethod
+    def nearest(
+        cls,
+        anchor: dict[str, Any],
+        candidates: list[dict[str, Any]],
+        metric: str = "haversine",
+    ) -> dict[str, Any]:
+        if metric != "haversine":
+            raise ValueError("nearest currently supports the haversine metric")
+        ranked = [
+            {"candidate_index": index, **candidate, **cls.haversine_distance(anchor, candidate)}
+            for index, candidate in enumerate(candidates)
+        ]
+        ranked.sort(key=lambda candidate: float(candidate["distance_m"]))
+        return {"nearest": ranked[0] if ranked else None, "ranked": ranked}
+
+    @classmethod
+    def within_radius(
+        cls,
+        center: dict[str, Any],
+        candidates: list[dict[str, Any]],
+        radius_m: float,
+    ) -> list[dict[str, Any]]:
+        matches = [
+            {"candidate_index": index, **candidate, **cls.haversine_distance(center, candidate)}
+            for index, candidate in enumerate(candidates)
+        ]
+        return sorted(
+            (candidate for candidate in matches if candidate["distance_m"] <= float(radius_m)),
+            key=lambda candidate: float(candidate["distance_m"]),
+        )
+
     @staticmethod
     def select_min(items: list[dict[str, Any]], key: str) -> dict[str, Any]:
-        return min(items, key=lambda item: float(_path(item, key)))
+        comparable = [item for item in items if _has_path(item, key)]
+        if not comparable:
+            raise ValueError(f"No item contains comparable key: {key}")
+        return min(comparable, key=lambda item: float(_path(item, key)))
 
     @staticmethod
     def select_max(items: list[dict[str, Any]], key: str) -> dict[str, Any]:
-        return max(items, key=lambda item: float(_path(item, key)))
+        comparable = [item for item in items if _has_path(item, key)]
+        if not comparable:
+            raise ValueError(f"No item contains comparable key: {key}")
+        return max(comparable, key=lambda item: float(_path(item, key)))
 
     @staticmethod
     def sort_by(
         items: list[dict[str, Any]], key: str, descending: bool = False
     ) -> list[dict[str, Any]]:
-        return sorted(items, key=lambda item: float(_path(item, key)), reverse=descending)
+        return sorted(
+            (item for item in items if _has_path(item, key)),
+            key=lambda item: float(_path(item, key)),
+            reverse=descending,
+        )
 
     @staticmethod
     def compare_routes(routes: list[dict[str, Any]], metric: str = "distance_m") -> dict[str, Any]:
@@ -117,12 +177,54 @@ class SpatialOperatorRegistry:
             "duration_s": sum(int(route["duration_s"]) for route in routes),
         }
 
+    @staticmethod
+    def aggregate_route_groups(
+        routes: list[dict[str, Any]], groups: list[list[int]]
+    ) -> dict[str, Any]:
+        totals: list[dict[str, Any]] = []
+        for option_index, indexes in enumerate(groups):
+            selected = [routes[index] for index in indexes]
+            errors = [route.get("error") for route in selected if route.get("status") == "error"]
+            totals.append(
+                {
+                    "option_index": option_index,
+                    "distance_m": sum(int(route.get("distance_m", 0)) for route in selected),
+                    "duration_s": sum(int(route.get("duration_s", 0)) for route in selected),
+                    "complete": not errors,
+                    "errors": errors,
+                }
+            )
+        complete = [total for total in totals if total["complete"]]
+        best_distance = (
+            min(complete, key=lambda total: total["distance_m"])["option_index"]
+            if complete
+            else None
+        )
+        best_duration = (
+            min(complete, key=lambda total: total["duration_s"])["option_index"]
+            if complete
+            else None
+        )
+        return {
+            "option_totals": totals,
+            "best_distance_option": best_distance,
+            "best_duration_option": best_duration,
+        }
+
 
 def _path(value: dict[str, Any], path: str) -> Any:
     current: Any = value
     for part in path.split("."):
         current = current[int(part)] if isinstance(current, list) else current[part]
     return current
+
+
+def _has_path(value: dict[str, Any], path: str) -> bool:
+    try:
+        _path(value, path)
+    except (IndexError, KeyError, TypeError, ValueError):
+        return False
+    return True
 
 
 def _normalize_arguments(name: str, arguments: dict[str, Any]) -> dict[str, Any]:

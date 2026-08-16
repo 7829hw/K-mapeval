@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     llm_model: str = ""
     llm_base_url: str | None = None
     max_reasoning_steps: int = Field(default=8, ge=1, le=30)
+    benchmark_concurrency: int = Field(default=4, ge=1, le=32)
 
     kakao_rest_api_key: str = ""
     kakao_timeout_seconds: float = Field(default=15.0, gt=0)

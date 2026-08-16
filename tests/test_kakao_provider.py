@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+
 import httpx
 import pytest
 
@@ -285,3 +288,51 @@ def test_directions_resolves_persisted_place_ids_without_local_api_calls(tmp_pat
     assert second.api_call_count == 1
     assert second.cache_hit_count == 2
     second.close()
+
+
+def test_four_provider_sessions_share_sqlite_cache_concurrently(tmp_path) -> None:
+    cache_path = tmp_path / "concurrent.db"
+    request_barrier = Barrier(4)
+
+    def run_session(index: int) -> str:
+        def handler(_: httpx.Request) -> httpx.Response:
+            request_barrier.wait(timeout=5)
+            return httpx.Response(
+                200,
+                json={
+                    "documents": [
+                        _document(str(index), f"장소-{index}", 126.97 + index / 1000, 37.55)
+                    ]
+                },
+            )
+
+        provider = KakaoMapProvider(
+            "test-key",
+            cache_path=str(cache_path),
+            client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+        try:
+            return provider.search_place(f"장소-{index}", limit=1)[0].name
+        finally:
+            provider.close()
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        names = list(executor.map(run_session, range(4)))
+    assert names == [f"장소-{index}" for index in range(4)]
+
+    def fail_if_called(_: httpx.Request) -> httpx.Response:
+        raise AssertionError("All four concurrent results should be cached")
+
+    cached = KakaoMapProvider(
+        "test-key",
+        cache_path=str(cache_path),
+        client=httpx.Client(transport=httpx.MockTransport(fail_if_called)),
+    )
+    try:
+        assert [
+            cached.search_place(f"장소-{index}", limit=1)[0].name for index in range(4)
+        ] == names
+        assert cached.api_call_count == 0
+        assert cached.cache_hit_count == 4
+    finally:
+        cached.close()

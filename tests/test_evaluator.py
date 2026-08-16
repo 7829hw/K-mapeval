@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import json
+import time
+from contextlib import contextmanager
+from threading import Barrier, Lock
+
+import pytest
 
 from src.agent.base import AgentResult, BenchmarkAgent
 from src.dataset import BenchmarkItem
@@ -54,6 +59,7 @@ def test_evaluator_writes_upstream_spatial_agent_report_and_query_logs(tmp_path)
     assert saved["metadata"]["dataset_source"] == "fixtures/test.jsonl"
     assert saved["metadata"]["test_mode"] == "full"
     assert saved["metadata"]["total_samples"] == 2
+    assert saved["metadata"]["concurrency"] == 1
     assert saved["results"][0]["correct_answer"] == 0
     assert saved["results"][0]["predicted_option"] == 0
     assert saved["results"][0]["predicted_answer"] == "x"
@@ -110,3 +116,80 @@ def test_report_is_created_after_batch_and_terminal_matches_upstream_style(
     assert "Overall answer accuracy: 2/2 (100.0%)" in output
     assert "Report saved to:" in output
     assert len(list(report_dir.glob("test_*.json"))) == 1
+
+
+def test_parallel_evaluator_uses_four_isolated_llm_sessions_and_preserves_order(
+    tmp_path,
+) -> None:
+    worker_count = 4
+    wave_barrier = Barrier(worker_count)
+    state_lock = Lock()
+    state = {"created": 0, "closed": 0, "active": 0, "max_active": 0}
+
+    @contextmanager
+    def agent_factory():
+        with state_lock:
+            state["created"] += 1
+
+        class ConcurrentAgent(BenchmarkAgent):
+            agent_type = "parallel"
+
+            def answer(self, question: str, options: list[str]) -> AgentResult:
+                with state_lock:
+                    state["active"] += 1
+                    state["max_active"] = max(state["max_active"], state["active"])
+                try:
+                    wave_barrier.wait(timeout=2)
+                    time.sleep(0.01)
+                finally:
+                    with state_lock:
+                        state["active"] -= 1
+                return AgentResult(
+                    agent_type=self.agent_type,
+                    predicted_intent="poi",
+                    predicted_answer=0,
+                    trace=[{"stage": "evaluate", "marker": question}],
+                )
+
+        try:
+            yield ConcurrentAgent()
+        finally:
+            with state_lock:
+                state["closed"] += 1
+
+    items = [
+        BenchmarkItem(
+            id=f"q{index}",
+            question=f"marker-{index}",
+            options=["x", "y"],
+            answer=0,
+            classification="poi",
+        )
+        for index in range(8)
+    ]
+    report = Evaluator(
+        None,
+        items,
+        agent_factory=agent_factory,
+        max_workers=worker_count,
+        output_dir=None,
+        log_dir=tmp_path / "logs",
+    ).run()
+
+    assert state == {"created": 4, "closed": 4, "active": 0, "max_active": 4}
+    assert report.metadata["concurrency"] == 4
+    assert [row["id"] for row in report.results] == [item.id for item in items]
+    for index, item in enumerate(items):
+        log_file = next((tmp_path / "logs").glob(f"*_id{item.id}_*.log"))
+        log_text = log_file.read_text(encoding="utf-8")
+        assert f'"marker": "marker-{index}"' in log_text
+        assert all(
+            f'"marker": "marker-{other}"' not in log_text
+            for other in range(len(items))
+            if other != index
+        )
+
+
+def test_parallel_evaluator_rejects_a_shared_agent() -> None:
+    with pytest.raises(ValueError, match="isolated agent_factory"):
+        Evaluator(FixedAgent(), [], max_workers=4)

@@ -107,6 +107,51 @@ class DirectionsArgs(BaseModel):
     priority: str = Field(default="RECOMMEND", description="RECOMMEND, TIME, or DISTANCE")
 
 
+class BatchGeocodeArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    place_names: list[str] = Field(min_length=1, max_length=30)
+    anchor: str | Place | None = Field(
+        default=None,
+        description="Optional anchor used to disambiguate nearby places",
+    )
+    radius_m: int = Field(default=20_000, ge=1, le=20_000)
+    limit: int = Field(default=1, ge=1, le=15)
+
+    @field_validator("limit", mode="before")
+    @classmethod
+    def clamp_limit(cls, value: Any) -> int:
+        return _clamp_int(value, minimum=1, maximum=15)
+
+    @field_validator("radius_m", mode="before")
+    @classmethod
+    def clamp_radius(cls, value: Any) -> int:
+        return _clamp_int(value, minimum=1, maximum=20_000)
+
+
+class RoutePair(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    origin: str | Place | None
+    destination: str | Place | None
+    label: str | None = None
+
+
+class DistanceMatrixArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    origins: list[str | Place | None] | None = Field(default=None, max_length=15)
+    destinations: list[str | Place | None] | None = Field(default=None, max_length=15)
+    pairs: list[RoutePair] | None = Field(default=None, max_length=30)
+    mode: str = "driving"
+    priority: str = "RECOMMEND"
+
+    @model_validator(mode="after")
+    def require_matrix_or_pairs(self) -> DistanceMatrixArgs:
+        if self.pairs:
+            return self
+        if self.origins and self.destinations:
+            return self
+        raise ValueError("distance_matrix requires pairs or non-empty origins and destinations")
+
+
 @dataclass(frozen=True)
 class ToolDefinition:
     name: str
@@ -162,6 +207,13 @@ class ToolRegistry:
                     lambda args: self.provider.geocode(args.address, limit=args.limit),
                 ),
                 ToolDefinition(
+                    "batch_geocode",
+                    "Resolve a list of place names in one GeoFlow operator. Results preserve input "
+                    "order and expose each best match as the place field.",
+                    BatchGeocodeArgs,
+                    self._batch_geocode,
+                ),
+                ToolDefinition(
                     "place_details",
                     "Read a normalized place previously retrieved in this run by place_id.",
                     PlaceDetailsArgs,
@@ -203,6 +255,13 @@ class ToolRegistry:
                         priority=args.priority,
                     ),
                 ),
+                ToolDefinition(
+                    "distance_matrix",
+                    "Compute driving distance/duration for an origin-destination matrix or an "
+                    "explicit list of ordered route pairs. Individual route failures are isolated.",
+                    DistanceMatrixArgs,
+                    self._distance_matrix,
+                ),
             )
         }
 
@@ -234,6 +293,98 @@ class ToolRegistry:
         self.calls.append(execution)
         return execution
 
+    def _batch_geocode(self, args: BatchGeocodeArgs) -> list[dict[str, Any]]:
+        anchor_value = args.anchor or (args.place_names[0] if len(args.place_names) > 1 else None)
+        anchor_place: Place | None = anchor_value if isinstance(anchor_value, Place) else None
+        anchor_matches: list[Place] = []
+        if isinstance(anchor_value, str):
+            anchor_matches = self.provider.search_place(anchor_value, limit=max(args.limit, 5))
+            anchor_place = _best_place_match(anchor_value, anchor_matches)
+        results: list[dict[str, Any]] = []
+        for place_name in args.place_names:
+            try:
+                if anchor_place is not None and _same_search_text(place_name, anchor_value):
+                    matches = anchor_matches or [anchor_place]
+                elif anchor_place is not None:
+                    matches = self.provider.nearby_search(
+                        anchor_place,
+                        query=place_name,
+                        radius_m=args.radius_m,
+                        limit=max(args.limit, 5),
+                    )
+                    if not matches:
+                        matches = self.provider.search_place(place_name, limit=max(args.limit, 5))
+                else:
+                    matches = self.provider.search_place(place_name, limit=max(args.limit, 5))
+                best_match = _best_place_match(place_name, matches)
+                results.append(
+                    {
+                        "query": place_name,
+                        "place": _jsonable(best_match) if best_match else None,
+                        "candidates": _jsonable(matches[: args.limit]),
+                    }
+                )
+            except Exception as exc:
+                results.append(
+                    {
+                        "query": place_name,
+                        "place": None,
+                        "candidates": [],
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+        return results
+
+    def _distance_matrix(self, args: DistanceMatrixArgs) -> dict[str, Any]:
+        pairs = list(args.pairs or [])
+        if not pairs:
+            pairs = [
+                RoutePair(origin=origin, destination=destination)
+                for origin in args.origins or []
+                for destination in args.destinations or []
+            ]
+        routes: list[dict[str, Any]] = []
+        for index, pair in enumerate(pairs):
+            if pair.origin is None or pair.destination is None:
+                routes.append(
+                    {
+                        "pair_index": index,
+                        "label": pair.label,
+                        "origin": _place_label(pair.origin),
+                        "destination": _place_label(pair.destination),
+                        "status": "error",
+                        "error": "PlaceNotFoundError: unresolved route endpoint",
+                    }
+                )
+                continue
+            try:
+                route = self.provider.directions(
+                    pair.origin,
+                    pair.destination,
+                    mode=args.mode,
+                    priority=args.priority,
+                )
+                routes.append(
+                    {
+                        "pair_index": index,
+                        "label": pair.label,
+                        **_jsonable(route),
+                        "status": "ok",
+                    }
+                )
+            except Exception as exc:
+                routes.append(
+                    {
+                        "pair_index": index,
+                        "label": pair.label,
+                        "origin": _place_label(pair.origin),
+                        "destination": _place_label(pair.destination),
+                        "status": "error",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+        return {"routes": routes, "route_count": len(routes)}
+
 
 def _jsonable(value: Any) -> Any:
     if isinstance(value, BaseModel):
@@ -248,3 +399,39 @@ def _jsonable(value: Any) -> Any:
 def _clamp_int(value: Any, *, minimum: int, maximum: int) -> int:
     number = int(value)
     return max(minimum, min(number, maximum))
+
+
+def _place_label(value: str | Place | None) -> str:
+    if value is None:
+        return ""
+    return value if isinstance(value, str) else value.name
+
+
+def _same_search_text(place_name: str, anchor: str | Place | None) -> bool:
+    anchor_name = anchor.name if isinstance(anchor, Place) else anchor
+    if not anchor_name:
+        return False
+    return "".join(place_name.split()).casefold() == "".join(anchor_name.split()).casefold()
+
+
+def _best_place_match(query: str, matches: list[Place]) -> Place | None:
+    if not matches:
+        return None
+    normalized_query = _search_key(query)
+
+    def score(place: Place) -> tuple[int, float]:
+        normalized_name = _search_key(place.name)
+        exact = int(normalized_query == normalized_name)
+        containment = int(
+            normalized_query in normalized_name or normalized_name in normalized_query
+        )
+        overlap = len(set(normalized_query) & set(normalized_name)) / max(
+            len(set(normalized_query)), 1
+        )
+        return exact * 2 + containment, overlap
+
+    return max(matches, key=score)
+
+
+def _search_key(value: str) -> str:
+    return "".join(character for character in value.casefold() if character.isalnum())

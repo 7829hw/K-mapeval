@@ -83,3 +83,6 @@ class OpenAIChatClient:
                 arguments = {"_invalid_json": call.function.arguments}
             calls.append(LLMToolCall(call.id, call.function.name, arguments))
         return LLMResponse(message.content or "", tuple(calls))
+
+    def close(self) -> None:
+        self._client.close()

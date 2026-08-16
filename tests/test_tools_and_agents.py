@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from src.agent import ReactAgent, SpatialAgent
+from src.agent.geoflow import normalize_and_validate_graph
 from src.agent.spatial import _heuristic_intent
 from src.llm import LLMResponse, LLMToolCall
 from src.models import Place, Route
-from src.tools import MapProvider, ToolRegistry
+from src.tools import MapProvider, SpatialOperatorRegistry, ToolRegistry
 
 
 class FakeProvider(MapProvider):
@@ -70,7 +73,7 @@ def test_react_executes_common_tool_then_parses_answer() -> None:
     assert result.failure_type is None
 
 
-def test_spatial_agent_preserves_all_five_stages() -> None:
+def test_spatial_agent_runs_paper_aligned_pipeline() -> None:
     llm = QueuedLLM(
         [
             LLMResponse('{"intent":"poi"}'),
@@ -86,8 +89,10 @@ def test_spatial_agent_preserves_all_five_stages() -> None:
     assert result.predicted_answer == 1
     assert result.response == "^^1^^"
     assert [entry["stage"] for entry in result.trace] == [
-        "route",
-        "plan",
+        "analyze",
+        "retrieve_templates",
+        "compose",
+        "validate",
         "execute",
         "evaluate",
         "generate",
@@ -115,6 +120,129 @@ def test_registry_clamps_llm_generated_kakao_limits() -> None:
     assert nearby.status == "ok"
     assert nearby.arguments["radius_m"] == 20_000
     assert nearby.arguments["limit"] == 15
+
+
+def test_batch_geocode_preserves_input_order_in_one_geoflow_tool_call() -> None:
+    registry = ToolRegistry(FakeProvider())
+    execution = registry.invoke("batch_geocode", {"place_names": ["경복궁", "광화문"], "limit": 1})
+    assert execution.status == "ok"
+    assert [item["query"] for item in execution.output] == ["경복궁", "광화문"]
+    assert all(item["place"]["name"] == "경복궁" for item in execution.output)
+    assert registry.tool_call_count == 1
+    assert registry.provider.api_call_count == 2
+
+
+def test_distance_matrix_and_multi_segment_aggregate_keep_option_mapping() -> None:
+    registry = ToolRegistry(FakeProvider())
+    execution = registry.invoke(
+        "distance_matrix",
+        {
+            "pairs": [
+                {"origin": "S", "destination": "A"},
+                {"origin": "A", "destination": "B"},
+                {"origin": "S", "destination": "C"},
+                {"origin": "C", "destination": "D"},
+            ],
+            "priority": "DISTANCE",
+        },
+    )
+    assert execution.status == "ok"
+    aggregate = SpatialOperatorRegistry().invoke(
+        "aggregate_route_groups",
+        {"routes": execution.output["routes"], "groups": [[0, 1], [2, 3]]},
+    )
+    assert [item["option_index"] for item in aggregate["option_totals"]] == [0, 1]
+    assert aggregate["option_totals"][0]["distance_m"] == 200
+
+
+def test_distance_matrix_isolates_unresolved_pairs_and_keeps_valid_routes() -> None:
+    registry = ToolRegistry(FakeProvider())
+    execution = registry.invoke(
+        "distance_matrix",
+        {
+            "pairs": [
+                {"origin": "S", "destination": "A", "label": "0"},
+                {"origin": "S", "destination": None, "label": "1"},
+            ]
+        },
+    )
+    assert execution.status == "ok"
+    assert [route["status"] for route in execution.output["routes"]] == ["ok", "error"]
+    best = SpatialOperatorRegistry().invoke(
+        "select_min", {"items": execution.output["routes"], "key": "distance_m"}
+    )
+    assert best["label"] == "0"
+
+
+def test_geoflow_validation_topologically_orders_and_checks_all_constraints() -> None:
+    graph = {
+        "graph": [
+            {
+                "id": "nearest",
+                "operator": "nearest",
+                "arguments": {"anchor": "$places.0.place", "candidates": []},
+                "depends_on": ["places"],
+                "output_type": "object",
+                "role": "measure",
+            },
+            {
+                "id": "places",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["경복궁"]},
+                "depends_on": [],
+                "output_type": "object",
+                "role": "support",
+            },
+        ]
+    }
+    ordered, constraints = normalize_and_validate_graph(graph, max_steps=8)
+    assert [step["id"] for step in ordered] == ["places", "nearest"]
+    assert all(constraints.values())
+
+
+def test_geoflow_validation_rejects_cycles_instead_of_truncating() -> None:
+    graph = {
+        "graph": [
+            {
+                "id": "a",
+                "operator": "place_search",
+                "arguments": {"query": "$b"},
+                "role": "support",
+            },
+            {
+                "id": "b",
+                "operator": "place_search",
+                "arguments": {"query": "$a"},
+                "role": "support",
+            },
+        ]
+    }
+    with pytest.raises(ValueError, match="acyclicity"):
+        normalize_and_validate_graph(graph, max_steps=8)
+
+
+def test_geoflow_validation_rejects_incompatible_dependency_types() -> None:
+    graph = {
+        "graph": [
+            {
+                "id": "distance",
+                "operator": "haversine_distance",
+                "arguments": {
+                    "place_a": {"latitude": 37.0, "longitude": 127.0},
+                    "place_b": {"latitude": 37.1, "longitude": 127.1},
+                },
+                "role": "support",
+            },
+            {
+                "id": "route_totals",
+                "operator": "sum_route_metrics",
+                "arguments": {"routes": "$distance"},
+                "role": "measure",
+            },
+        ]
+    }
+    with pytest.raises(ValueError, match="Type compatibility"):
+        normalize_and_validate_graph(graph, max_steps=8)
 
 
 def test_directions_accepts_a_normalized_place_from_a_plan_reference() -> None:
@@ -187,3 +315,14 @@ def test_spatial_router_heuristics_cover_extended_intents() -> None:
     assert {intent: _heuristic_intent(question) for intent, question in questions.items()} == {
         intent: intent for intent in questions
     }
+
+
+def test_spatial_router_prioritizes_trip_and_routing_over_nearest_wording() -> None:
+    assert (
+        _heuristic_intent(
+            "에슬로우서울역점에서 출발해 두 곳을 차례로 방문할 때 "
+            "총 자동차 이동거리가 가장 짧은 일정은?"
+        )
+        == "trip"
+    )
+    assert _heuristic_intent("서울역에서 자동차 최단거리 경로로 가장 가까운 목적지는?") == "routing"

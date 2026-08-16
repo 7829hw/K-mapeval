@@ -10,6 +10,12 @@ from src.agent.base import (
     find_provider_failure,
     format_question,
 )
+from src.agent.geoflow import (
+    OPERATOR_CONTRACTS,
+    normalize_analysis,
+    normalize_and_validate_graph,
+    retrieve_templates,
+)
 from src.llm import ChatClient
 from src.parsing import parse_answer, parse_json_object
 from src.tools import SpatialOperatorRegistry, ToolRegistry
@@ -18,55 +24,77 @@ SUPPORTED_INTENTS = frozenset(
     {"nearby", "poi", "routing", "trip", "type", "direction", "distance", "radius"}
 )
 
-ROUTER_PROMPT = """Classify this Korean spatial multiple-choice question into exactly one intent:
-nearby, poi, routing, trip, type, direction, distance, or radius.
-Use distance only for straight-line/geodesic distance, routing for road routes, and radius when
-the question gives a search radius. Return JSON only: {"intent":"nearby"}.
-Do not answer the question."""
+ANALYSIS_PROMPT = """You are Spatial-Agent's Spatial Information Theory Analysis stage.
+Extract the spatial entities and assign one scientific core concept and one functional role.
+Core concepts: location, object, field, event, network, amount, proportion.
+Functional roles: extent, temporal_extent, sub_condition, condition, support, measure.
+Classify intent as nearby, poi, routing, trip, type, direction, distance, or radius.
+Use distance only for straight-line/geodesic distance, routing for road-network routes, and radius
+when an explicit search radius is given. Include all named places and spatial/temporal constraints.
+Return JSON only:
+{"intent":"direction","concepts":[{"id":"anchor","text":"서울역","concept_type":"location","role":"extent","attributes":{}}],"measure":"direction"}
+Do not answer the multiple-choice question and do not invent coordinates."""
 
-PLANNER_PROMPT = """You are the planning stage of Spatial-Agent. Build an executable evidence plan.
-Use only these exact contracts:
-- place_search(query, limit) -> [{place_id,name,address,latitude,longitude,category}]
-- nearby_places(center, query|category_code, radius_m, limit) -> [Place], nearest first.
-  Kakao category codes are MT1, CS2, PS3, SC4, AC5, PK6, OL7, SW8, BK9, CT1, AG2,
-  PO3, AT4, AD5, FD6, CE7, HP8, PM9. Use query for types without an official code.
-- directions(origin, destination, mode="driving", priority="RECOMMEND") -> Route
-- travel_time has the same arguments and Route output as directions
-- haversine_distance(place_a, place_b) -> {distance_m,distance_km}
-- bearing_to_direction(place_a, place_b) ->
-  {bearing_degrees,direction,direction_ko,cardinal_direction,cardinal_direction_ko}
-- filter_by_direction(center, places, direction) -> [Place with distance/direction evidence]
-- select_min(items, key) / select_max(items, key); items must be objects
-- compare_routes(routes, metric="distance_m")
-- sum_route_metrics(routes), where routes are complete Route objects
+GRAPH_PROMPT = """You are Spatial-Agent's Concept Transformation Drafting, GeoFlow Graph
+Construction, and Factorization stage. Compose the retrieved pre-validated templates into an
+executable operator-concept DAG. Every node must contribute to a Measure node.
 
-Return JSON only in this shape:
-{"steps":[{"id":"s1","operator":"place_search","arguments":{"query":"경복궁","limit":1}}]}
+The graph must satisfy all five paper constraints:
+1. acyclicity; 2. role ordering (sub_condition < condition < support < measure);
+3. operator output type compatibility; 4. executable operators and available arguments;
+5. connectivity from contextual input through every node to a measure.
 
-Reference normalized output fields exactly, for example $s1.0, $s1.0.latitude,
-$s1.0.longitude, and $s2.distance_m. Never use Google fields such as geometry, lat, lng,
-location, legs, or inputs. Pass a complete Place reference such as $s1.0 to origin,
-destination, place_a, and place_b. Gather comparable candidate evidence, use deterministic
-calculations locally, and contain no more than {max_steps} steps.
-Choose a plan appropriate to the intent:
-- type: search the named place and inspect its category field.
-- direction: search both places and use bearing_to_direction. For the nearest place in a stated
-  direction, retrieve candidates with nearby_places, then use filter_by_direction.
-- distance: search both places and use haversine_distance; do not use driving directions for a
-  straight-line distance question.
-- radius: call nearby_places with the exact radius_m and requested POI query/category, then compare
-  the returned place names with every option. A vertical bar in an option separates place names.
-Do not select the final answer and do not assume the gold answer."""
+Return JSON only:
+{"graph":[{"id":"places","operator":"batch_geocode","arguments":{"place_names":["A","B"]},"depends_on":[],"output_type":"object","role":"support"}]}
 
-EVALUATOR_PROMPT = """You are the evaluation stage of Spatial-Agent. Select exactly one candidate
-using the executed spatial evidence. Execution evidence has priority over guesses. Candidate
-numbering is 0-based. Return JSON only:
+Exact operator contracts:
+- place_search(query, limit=5) -> object (list of Place)
+- batch_geocode(place_names, anchor?, radius_m=20000, limit=1) -> object; anchor biases ambiguous
+  names toward the question's reference location. Output preserves order and each item has
+  {query, place, candidates}; reference the best match as $node.0.place
+- geocode(address, limit=5) -> location
+- place_details(place_id) -> object
+- nearby_places(center, query|category_code, radius_m, limit) -> object, nearest first
+- directions(origin, destination, mode="driving", priority) -> field Route
+- travel_time(origin, destination, mode="driving", priority) -> field Route
+- distance_matrix(origins,destinations OR pairs, mode="driving", priority) -> field;
+  pairs is [{origin,destination,label?}], and output routes preserve pair order at $node.routes
+- haversine_distance(place_a, place_b) -> amount
+- pairwise_distances(pairs=[{place_a,place_b,label?}]) -> field
+- bearing_to_direction(place_a, place_b) -> field
+- filter_by_direction(center, places, direction) -> object, nearest first
+- nearest(anchor, candidates, metric="haversine") -> object
+- within_radius(center, candidates, radius_m) -> object
+- select_min/select_max(items,key), sort_by(items,key), compare_routes(routes,metric) -> object
+- sum_route_metrics(routes) -> amount
+- aggregate_route_groups(routes,groups) -> amount; groups contains route indexes per option and
+  returns option_totals plus best_distance_option and best_duration_option.
+
+Use normalized fields only: latitude, longitude, distance_m, duration_s. Complete Place objects,
+or literal place names for map tools, are valid. Never use Google geometry/lat/lng/legs fields.
+Use batch_geocode for anchor/options and distance_matrix for route candidates so the graph remains
+within {max_steps} nodes. Supply the question's origin/reference place as batch_geocode.anchor to
+disambiguate same-name POIs. For a trip option A→B from S, include route pairs S→A and A→B, in
+option order, then aggregate groups. For nearest among explicit options, geocode every option and
+compute deterministically. A vertical bar in one option separates grouped place names; preserve its
+option index while resolving each name. For a radius question use the exact radius and requested
+category/keyword.
+Do not select an option and do not use the gold answer."""
+
+REPAIR_PROMPT = """Repair the supplied GeoFlow graph so it passes the listed validation error.
+Keep the question semantics and retrieved template, use only the exact operator contracts from the
+original system prompt, and stay within {max_steps} nodes. Return only {"graph":[...]} JSON."""
+
+EVALUATOR_PROMPT = """You are Spatial-Agent's grounded response generation stage. Select exactly
+one candidate using the final GeoFlow state and the complete topological execution trace. Computed
+distance, direction, category, route, and option_totals evidence has priority over prior knowledge.
+Respect candidate-index to candidate-text mapping. Numbering is 0-based. Return JSON only:
 {"predicted_option":1,"confidence":0.8,"reason":"brief evidence-based reason"}
 Never return an option outside the supplied candidates."""
 
 
 class SpatialAgent(BenchmarkAgent):
-    """Kakao port preserving Route -> Plan -> Execute -> Evaluate -> Generate."""
+    """Paper-aligned concept grounding, GeoFlow composition, execution, and generation."""
 
     agent_type = "spatial_agent"
 
@@ -75,6 +103,13 @@ class SpatialAgent(BenchmarkAgent):
         self.tools = tools
         self.operators = SpatialOperatorRegistry()
         self.max_steps = max_steps
+        available = {
+            *(schema["function"]["name"] for schema in self.tools.schemas()),
+            *self.operators.names,
+        }
+        missing = set(OPERATOR_CONTRACTS) - available
+        if missing:
+            raise ValueError(f"GeoFlow operators are not executable: {', '.join(sorted(missing))}")
 
     def answer(self, question: str, options: list[str]) -> AgentResult:
         started = time.perf_counter()
@@ -90,43 +125,91 @@ class SpatialAgent(BenchmarkAgent):
         predicted_intent: str | None = None
         reasoning_steps = 0
         try:
-            # Route
-            routing = self.llm.chat(
+            analysis_response = self.llm.chat(
                 [
-                    {"role": "system", "content": ROUTER_PROMPT},
-                    {"role": "user", "content": question},
+                    {"role": "system", "content": ANALYSIS_PROMPT},
+                    {"role": "user", "content": format_question(question, options)},
                 ]
             )
             reasoning_steps += 1
-            route_json = parse_json_object(routing.content)
-            intent = str(route_json.get("intent", "")).lower()
+            raw_analysis = parse_json_object(analysis_response.content)
+            fallback_intent = _heuristic_intent(question)
+            analysis = normalize_analysis(raw_analysis, question, fallback_intent)
+            intent = _explicit_intent(question) or str(analysis["intent"]).lower()
             if intent not in SUPPORTED_INTENTS:
-                intent = _heuristic_intent(question)
+                intent = fallback_intent
+            analysis["intent"] = intent
             predicted_intent = intent
-            trace.append({"stage": "route", "intent": intent})
+            trace.append({"stage": "analyze", **analysis})
 
-            # Plan
+            templates = retrieve_templates(intent, question)
+            trace.append(
+                {
+                    "stage": "retrieve_templates",
+                    "templates": [template["name"] for template in templates],
+                }
+            )
+
             plan_response = self.llm.chat(
                 [
                     {
                         "role": "system",
-                        "content": PLANNER_PROMPT.replace("{max_steps}", str(self.max_steps)),
+                        "content": GRAPH_PROMPT.replace("{max_steps}", str(self.max_steps)),
                     },
                     {
                         "role": "user",
-                        "content": f"Intent: {intent}\n{format_question(question, options)}",
+                        "content": (
+                            f"{format_question(question, options)}\n\n"
+                            "Spatial concept analysis:\n"
+                            f"{json.dumps(analysis, ensure_ascii=False)}\n\n"
+                            "Retrieved pre-validated templates and examples:\n"
+                            f"{json.dumps(templates, ensure_ascii=False)}"
+                        ),
                     },
                 ]
             )
             reasoning_steps += 1
             plan = parse_json_object(plan_response.content)
-            raw_steps = plan.get("steps")
-            if not isinstance(raw_steps, list):
-                raise ValueError("Planner response does not contain a steps list")
-            steps = raw_steps[: self.max_steps]
-            trace.append({"stage": "plan", "steps": steps})
+            trace.append({"stage": "compose", "graph": plan.get("graph") or plan.get("steps")})
+            try:
+                steps, constraints = normalize_and_validate_graph(plan, max_steps=self.max_steps)
+            except ValueError as graph_error:
+                trace.append({"stage": "validate", "status": "invalid", "error": str(graph_error)})
+                repair_response = self.llm.chat(
+                    [
+                        {
+                            "role": "system",
+                            "content": (
+                                GRAPH_PROMPT.replace("{max_steps}", str(self.max_steps))
+                                + "\n\n"
+                                + REPAIR_PROMPT.replace("{max_steps}", str(self.max_steps))
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": (
+                                f"Validation error: {graph_error}\n"
+                                f"Question and options:\n{format_question(question, options)}\n"
+                                f"Analysis: {json.dumps(analysis, ensure_ascii=False)}\n"
+                                f"Templates: {json.dumps(templates, ensure_ascii=False)}\n"
+                                f"Invalid graph: {json.dumps(plan, ensure_ascii=False)}"
+                            ),
+                        },
+                    ]
+                )
+                reasoning_steps += 1
+                plan = parse_json_object(repair_response.content)
+                trace.append({"stage": "repair", "graph": plan.get("graph") or plan.get("steps")})
+                steps, constraints = normalize_and_validate_graph(plan, max_steps=self.max_steps)
+            trace.append(
+                {
+                    "stage": "validate",
+                    "status": "valid",
+                    "constraints": constraints,
+                    "topological_order": [step["id"] for step in steps],
+                }
+            )
 
-            # Execute
             results: dict[str, Any] = {}
             execution_log: list[dict[str, Any]] = []
             tool_names = {schema["function"]["name"] for schema in self.tools.schemas()}
@@ -147,6 +230,8 @@ class SpatialAgent(BenchmarkAgent):
                         entry = {
                             "id": step_id,
                             "operator": operator,
+                            "role": step["role"],
+                            "output_type": step["output_type"],
                             "arguments": execution.arguments,
                             **execution.observation(),
                         }
@@ -156,6 +241,8 @@ class SpatialAgent(BenchmarkAgent):
                         entry = {
                             "id": step_id,
                             "operator": operator,
+                            "role": step["role"],
+                            "output_type": step["output_type"],
                             "arguments": arguments,
                             "status": "ok",
                             "result": output,
@@ -165,14 +252,16 @@ class SpatialAgent(BenchmarkAgent):
                     entry = {
                         "id": step_id,
                         "operator": operator,
+                        "role": step["role"],
+                        "output_type": step["output_type"],
                         "arguments": raw_arguments,
                         "status": "error",
                         "error": results[step_id]["error"],
                     }
+                entry["state_keys"] = list(results)
                 execution_log.append(entry)
-            trace.append({"stage": "execute", "steps": execution_log})
+            trace.append({"stage": "execute", "steps": execution_log, "final_state": results})
 
-            # Evaluate
             evaluation = self.llm.chat(
                 [
                     {"role": "system", "content": EVALUATOR_PROMPT},
@@ -180,8 +269,10 @@ class SpatialAgent(BenchmarkAgent):
                         "role": "user",
                         "content": (
                             f"Intent: {intent}\n{format_question(question, options)}\n\n"
-                            "Plan and execution evidence:\n"
-                            f"{json.dumps(execution_log, ensure_ascii=False)}"
+                            "Validated GeoFlow topological execution trace:\n"
+                            f"{json.dumps(execution_log, ensure_ascii=False)}\n\n"
+                            "Final concept state:\n"
+                            f"{json.dumps(results, ensure_ascii=False)}"
                         ),
                     },
                 ]
@@ -200,7 +291,6 @@ class SpatialAgent(BenchmarkAgent):
                 }
             )
 
-            # Generate
             if predicted is not None:
                 response_text = f"^^{predicted}^^"
             trace.append({"stage": "generate", "response": response_text})
@@ -273,6 +363,10 @@ def _coerce_option(value: Any, option_count: int) -> int | None:
 
 
 def _heuristic_intent(question: str) -> str:
+    return _explicit_intent(question) or "poi"
+
+
+def _explicit_intent(question: str) -> str | None:
     lowered = question.lower()
     if any(word in lowered for word in ("반경", "이내", "radius", "within")):
         return "radius"
@@ -285,10 +379,10 @@ def _heuristic_intent(question: str) -> str:
         for word in ("어느 방향", "방향에", "동쪽", "서쪽", "남쪽", "북쪽", "direction")
     ):
         return "direction"
-    if any(word in lowered for word in ("가까운", "근처", "nearest", "nearby")):
-        return "nearby"
-    if any(word in lowered for word in ("경로", "운전", "자동차", "주행", "route", "driving")):
-        return "routing"
     if any(word in lowered for word in ("일정", "여행", "순서", "경유", "itinerary")):
         return "trip"
-    return "poi"
+    if any(word in lowered for word in ("경로", "운전", "자동차", "주행", "route", "driving")):
+        return "routing"
+    if any(word in lowered for word in ("가까운", "근처", "nearest", "nearby")):
+        return "nearby"
+    return None

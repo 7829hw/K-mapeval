@@ -8,27 +8,30 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Lock
 
 from src.agent.base import AgentResult
 
 LOGGER_NAME = "spatial_agent"
 LOG_FORMAT = "%(asctime)s [%(levelname)-5s] %(message)s"
 LOG_DATE_FORMAT = "%H:%M:%S"
+_CONFIGURE_LOCK = Lock()
 
 
 def configure_logging() -> logging.Logger:
     """Configure the logger like the upstream Spatial-Agent implementation."""
 
     logger = logging.getLogger(LOGGER_NAME)
-    if logger.handlers:
-        return logger
-    level_name = os.getenv("SPATIAL_AGENT_LOG_LEVEL", "INFO").upper()
-    logger.setLevel(getattr(logging, level_name, logging.INFO))
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.WARNING)
-    console_handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT))
-    logger.addHandler(console_handler)
-    logger.propagate = False
+    with _CONFIGURE_LOCK:
+        if logger.handlers:
+            return logger
+        level_name = os.getenv("SPATIAL_AGENT_LOG_LEVEL", "INFO").upper()
+        logger.setLevel(getattr(logging, level_name, logging.INFO))
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.WARNING)
+        console_handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT))
+        logger.addHandler(console_handler)
+        logger.propagate = False
     return logger
 
 
@@ -49,7 +52,14 @@ def query_log(
 ) -> Iterator[logging.Logger]:
     """Attach the upstream-style UTC timestamped per-query file handler."""
 
-    logger = configure_logging()
+    base_logger = configure_logging()
+    # A global logger with multiple temporary handlers would copy concurrent queries into
+    # one another's files. Each query therefore gets an isolated logger at the same level.
+    logger = logging.Logger(
+        f"{LOGGER_NAME}.query.{question_id}.{datetime.now(UTC).timestamp()}",
+        level=base_logger.level,
+    )
+    logger.propagate = False
     destination = Path(log_dir)
     destination.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")

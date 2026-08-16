@@ -26,6 +26,15 @@ K-MapEval/
 
 두 에이전트 모두 `Place`와 `Route` 정규화 스키마만 봅니다. 정답, classification, region, difficulty, verified_at은 에이전트 입력에 포함되지 않습니다.
 
+Spatial-Agent는 논문의 prompting 경로를 따라 `공간 개념/기능 역할 분석 → 검증된
+매크로 템플릿 검색 → GeoFlow DAG 구성/도구 매핑 → 5개 제약 검증 → 위상순 실행 →
+근거 기반 선택` 순서로 동작합니다. 그래프는 acyclicity, role ordering, type compatibility,
+data availability, connectivity를 모두 통과해야 실행되며, 잘못된 그래프는 한 번 수리한 뒤
+다시 검증합니다. Routing/Trip은 `distance_matrix`, `aggregate_route_groups`를 사용해
+선택지별 경로와 다중 구간 합계를 보존하므로 단계 상한 때문에 계획 뒷부분이 잘리지
+않습니다. 논문의 SFT+DPO는 선택적 학습 단계이므로 이 저장소는 별도 학습 가중치 없이
+off-the-shelf LLM prompting 구성을 사용합니다.
+
 ## SQLite 캐시
 
 두 에이전트는 동일한 `KakaoMapProvider`와 SQLite 캐시를 사용합니다.
@@ -63,7 +72,7 @@ pip install -e '.[dev]'
 cp example.env .env
 ```
 
-`.env`에 LLM과 `KAKAO_REST_API_KEY`를 입력합니다. 하나의 Kakao REST API 키를 Local API와 Mobility API에 함께 사용합니다. `LLM_BASE_URL`을 비워두면 OpenAI 기본 endpoint를 사용하고, 입력하면 OpenAI 호환 Chat Completions endpoint를 사용합니다. Temperature, 출력 토큰 수, 요청 timeout은 별도로 전달하지 않고 연결된 LLM/API의 기본값을 사용합니다. `MAX_REASONING_STEPS`로 문항당 reasoning/tool-call 단계 상한을 설정할 수 있습니다.
+`.env`에 LLM과 `KAKAO_REST_API_KEY`를 입력합니다. 하나의 Kakao REST API 키를 Local API와 Mobility API에 함께 사용합니다. `LLM_BASE_URL`을 비워두면 OpenAI 기본 endpoint를 사용하고, 입력하면 OpenAI 호환 Chat Completions endpoint를 사용합니다. Temperature, 출력 토큰 수, 요청 timeout은 별도로 전달하지 않고 연결된 LLM/API의 기본값을 사용합니다. `MAX_REASONING_STEPS`로 문항당 reasoning/tool-call 단계 상한을 설정할 수 있습니다. `BENCHMARK_CONCURRENCY`의 기본값은 `4`이며, 각 worker가 독립 LLM 클라이언트·에이전트·Kakao provider를 사용해 네 문항을 동시에 처리합니다.
 
 ## 실행
 
@@ -71,6 +80,7 @@ cp example.env .env
 python main.py --agent react
 python main.py --agent spatial
 python main.py --agent both
+python main.py --agent spatial --concurrency 4
 ```
 
 일부 문항만 실행할 수 있습니다.

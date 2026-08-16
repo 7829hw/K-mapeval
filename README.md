@@ -1,6 +1,10 @@
 # K-MapEval
 
-Kakao 지도 정보 위에서 MapEval 방식 ReAct와 Spatial-Agent의 공간 추론 성능을 같은 조건으로 비교하는 연구용 MVP입니다. 전체 한국형 벤치마크가 아니라, 공통 provider·도구·평가 파이프라인과 8개 개발용 샘플을 제공합니다.
+Kakao 지도 정보 위에서 MapEval 방식 ReAct와 Spatial-Agent의 공간 추론 성능을 같은 조건으로 비교하는 연구용 MVP입니다. 공통 provider·도구·평가 파이프라인과 개발용 샘플을 제공합니다.
+
+지원 classification은 `nearby`, `poi`, `routing`, `trip`, `type`, `direction`,
+`distance`, `radius`입니다. `answer`와 에이전트의 선택지 번호는 모두 `options`의
+0-based index입니다.
 
 ## 구조
 
@@ -16,7 +20,8 @@ K-MapEval/
 │   └── models.py        # Place / Route 스키마
 ├── dataset/             # 평가 데이터셋
 ├── tests/               # 단위 테스트
-└── results/             # 실행 결과(자동 생성)
+├── logs/                # 문항별 실행 로그(자동 생성)
+└── reports/             # 배치 평가 보고서(자동 생성)
 ```
 
 두 에이전트 모두 `Place`와 `Route` 정규화 스키마만 봅니다. 정답, classification, region, difficulty, verified_at은 에이전트 입력에 포함되지 않습니다.
@@ -70,10 +75,18 @@ python main.py --agent both
 python main.py --agent both --dataset dataset/test.jsonl --ids nearby_001 poi_001
 ```
 
-결과는 기본적으로 `results/` 아래에 에이전트별 summary와 문항별 trace로 저장됩니다. 로그에는 API 키가 들어가지 않습니다.
-실행 중에는 각 QA의 시작·완료, 전체 진행률, 정답 여부와 소요시간이 터미널에 표시됩니다.
-`results/<agent>_report.json`은 QA 하나가 끝날 때마다 누적 갱신되므로 중간에 실행이
-중단되어도 완료된 문항까지의 summary와 trace를 확인할 수 있습니다.
+확장 유형 데이터셋도 같은 JSONL 형식으로 바로 실행할 수 있습니다.
+
+```bash
+python main.py --agent both --dataset dataset/seoul_mapqa_kr_mcq_100.jsonl
+```
+
+로그 생성 방식은 Spatial-Agent 원본과 같습니다. 각 문항의 실행 trace는
+`logs/<UTC>_id<문항ID>_<질문-slug>.log`에 기록되고, 배치가 끝나면
+`reports/test_<UTC>.json` 보고서 하나가 생성됩니다. 보고서는 `metadata`, `statistics`,
+`results`로 구성됩니다. 입력 JSONL, 에이전트 출력, 문항 로그와 보고서의
+`correct_answer`/`predicted_option`은 모두 0-based입니다. 로그에는 API 키가 들어가지
+않습니다.
 
 ## 평가 항목
 

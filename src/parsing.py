@@ -19,10 +19,10 @@ def parse_answer(text: str, *, option_count: int) -> int | None:
         match = re.search(pattern, text, flags=re.IGNORECASE)
         if match:
             value = int(match.group(1))
-            return value if 1 <= value <= option_count else None
+            return value if 0 <= value < option_count else None
     if re.fullmatch(r"\s*\d+\s*", text):
         value = int(text.strip())
-        return value if 1 <= value <= option_count else None
+        return value if 0 <= value < option_count else None
     return None
 
 

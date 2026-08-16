@@ -74,7 +74,7 @@ Create only approximately 8-12 sample questions.
 Cover `nearby`, `poi`, `routing`, and `trip`.
 Use about 2-3 samples per classification.
 Use fields `id`, `question`, `options`, `answer`, and `classification`.
-Prefer 1-based answer indices for MapEval compatibility.
+Use 0-based answer indices consistently in datasets, agents, logs, and reports.
 Treat samples as development fixtures, not research benchmark data.
 Manually verify sample answers before pipeline testing.
 

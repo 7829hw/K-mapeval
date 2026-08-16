@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.agent import ReactAgent, SpatialAgent
+from src.agent.spatial import _heuristic_intent
 from src.llm import LLMResponse, LLMToolCall
 from src.models import Place, Route
 from src.tools import MapProvider, ToolRegistry
@@ -168,11 +169,21 @@ def test_bad_plan_reference_is_isolated_and_evaluation_still_runs() -> None:
             LLMResponse('{"predicted_option":1,"confidence":0.3,"reason":"partial evidence"}'),
         ]
     )
-    result = SpatialAgent(llm, ToolRegistry(FakeProvider()), max_steps=2).answer(
-        "질문", ["A", "B"]
-    )
+    result = SpatialAgent(llm, ToolRegistry(FakeProvider()), max_steps=2).answer("질문", ["A", "B"])
     execute = next(stage for stage in result.trace if stage["stage"] == "execute")
     assert execute["steps"][1]["status"] == "error"
     assert "Missing field" in execute["steps"][1]["error"]
     assert result.predicted_answer == 1
     assert result.failure_type is None
+
+
+def test_spatial_router_heuristics_cover_extended_intents() -> None:
+    questions = {
+        "type": "농협은행 불암지점의 장소 유형은 무엇인가요?",
+        "direction": "GS25 언주제일에서 북쪽에 있는 가장 가까운 카페는?",
+        "distance": "서울역과 숭례문 사이의 직선거리는 약 얼마인가요?",
+        "radius": "서울역 반경 500m 안에 있는 편의점 목록은 무엇인가요?",
+    }
+    assert {intent: _heuristic_intent(question) for intent, question in questions.items()} == {
+        intent: intent for intent in questions
+    }

@@ -345,10 +345,8 @@ Dataset 구축은 별도의 후속 연구 단계로 분리한다.
 권장:
 
 ```text
-nearby  : 2~3문항
-poi     : 2~3문항
-routing : 2~3문항
-trip    : 2~3문항
+nearby / poi / routing / trip과 함께
+type / direction / distance / radius 유형을 지원한다.
 
 총 약 8~12문항
 ```
@@ -367,6 +365,8 @@ trip    : 2~3문항
 
 MapEval-API 형식을 참고한다.
 
+`answer`는 `options`의 0-based index이며, 에이전트 출력과 로그·보고서도 같은 기준을 사용한다.
+
 ```json
 {
   "id": "nearby_001",
@@ -377,7 +377,7 @@ MapEval-API 형식을 참고한다.
     "안국역",
     "종각역"
   ],
-  "answer": 2,
+  "answer": 1,
   "classification": "nearby"
 }
 ```
@@ -405,7 +405,7 @@ MapEval-API 형식을 참고한다.
 - 전국 지역 분포
 - 서울 편중 방지
 - POI category diversity
-- `nearby / poi / routing / trip` 균형
+- `nearby / poi / routing / trip / type / direction / distance / radius` 균형
 - easy / medium / hard 난이도
 - single-hop / multi-hop reasoning
 - 정답 검증

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 
 from src.agent import ReactAgent, SpatialAgent
@@ -21,7 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Agent architecture to evaluate (default: both)",
     )
     result.add_argument("--dataset", default="dataset/sample.jsonl")
-    result.add_argument("--output-dir", default="results")
+    result.add_argument("--output-dir", default="reports")
     result.add_argument("--ids", nargs="*", help="Optional question IDs")
     return result
 
@@ -55,24 +54,27 @@ def run(agent_type: str, args: argparse.Namespace) -> dict:
             dataset,
             output_dir=Path(args.output_dir),
             dataset_path=args.dataset,
+            test_mode="ids" if args.ids else "full",
         ).run()
-        summary = report.summary
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
-        return summary
+        return report.statistics
     finally:
         provider.close()
 
 
 def main() -> None:
     args = build_parser().parse_args()
-    agent_types = ("react", "spatial_agent") if args.agent == "both" else (
-        "spatial_agent" if args.agent == "spatial" else "react",
+    agent_types = (
+        ("react", "spatial_agent")
+        if args.agent == "both"
+        else ("spatial_agent" if args.agent == "spatial" else "react",)
     )
     summaries = {agent_type: run(agent_type, args) for agent_type in agent_types}
     if len(summaries) == 2:
         print(
-            f"ReAct accuracy={summaries['react']['accuracy']:.3f} | "
-            f"Spatial-Agent accuracy={summaries['spatial_agent']['accuracy']:.3f}"
+            "ReAct accuracy="
+            f"{summaries['react']['overall_answer_accuracy']['accuracy']:.3f} | "
+            "Spatial-Agent accuracy="
+            f"{summaries['spatial_agent']['overall_answer_accuracy']['accuracy']:.3f}"
         )
 
 

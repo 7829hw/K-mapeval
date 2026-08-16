@@ -16,7 +16,11 @@ from src.tools import ToolRegistry
 
 REACT_SYSTEM_PROMPT = """You are the MapEval-style ReAct baseline for Korean spatial questions.
 Use the map tools to gather evidence and reason over only the question and candidate options.
-Select one 1-based option. Never invent a place ID. When you have enough evidence, answer exactly as
+The benchmark includes nearby, POI, routing, trip, place-type, cardinal-direction,
+straight-line-distance, and radius-constrained questions. Use a place's category for type,
+coordinates for direction and straight-line distance, nearby_places with the exact radius for
+radius questions, and directions only for road-route questions. Nearby results are nearest first.
+Select one 0-based option. Never invent a place ID. When you have enough evidence, answer exactly as
 ^^Option_Number^^. You are not given and must not ask for the gold answer."""
 
 
@@ -91,7 +95,7 @@ class ReactAgent(BenchmarkAgent):
                 failure_message = provider_failure
             else:
                 failure_type = "answer_parse_failure"
-                failure_message = "No valid 1-based option found in the final response"
+                failure_message = "No valid 0-based option found in the final response"
         return AgentResult(
             agent_type=self.agent_type,
             predicted_answer=predicted,

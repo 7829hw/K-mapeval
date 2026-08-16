@@ -6,6 +6,17 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+BenchmarkClassification = Literal[
+    "nearby",
+    "poi",
+    "routing",
+    "trip",
+    "type",
+    "direction",
+    "distance",
+    "radius",
+]
+
 
 class BenchmarkItem(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -13,16 +24,16 @@ class BenchmarkItem(BaseModel):
     id: str = Field(min_length=1)
     question: str = Field(min_length=1)
     options: list[str] = Field(min_length=2, max_length=4)
-    answer: int = Field(ge=1)
-    classification: Literal["nearby", "poi", "routing", "trip"]
+    answer: int = Field(ge=0)
+    classification: BenchmarkClassification
     region: str | None = None
     difficulty: Literal["easy", "medium", "hard"] | None = None
     verified_at: str | None = None
 
     @model_validator(mode="after")
     def answer_is_valid_option(self) -> BenchmarkItem:
-        if self.answer > len(self.options):
-            raise ValueError("answer must be a 1-based index into options")
+        if self.answer >= len(self.options):
+            raise ValueError("answer must be a 0-based index into options")
         if any(not option.strip() for option in self.options):
             raise ValueError("sample options must not be blank")
         return self
@@ -50,4 +61,3 @@ def load_dataset(path: str | Path) -> list[BenchmarkItem]:
     if len(ids) != len(set(ids)):
         raise ValueError("Dataset IDs must be unique")
     return items
-

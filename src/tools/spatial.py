@@ -10,6 +10,7 @@ class SpatialOperatorRegistry:
     names = (
         "haversine_distance",
         "bearing_to_direction",
+        "filter_by_direction",
         "select_min",
         "select_max",
         "sort_by",
@@ -46,7 +47,47 @@ class SpatialOperatorRegistry:
         y = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(delta_lon)
         bearing = (math.degrees(math.atan2(x, y)) + 360) % 360
         directions = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
-        return {"bearing_degrees": bearing, "direction": directions[round(bearing / 45) % 8]}
+        direction = directions[round(bearing / 45) % 8]
+        direction_ko = {
+            "N": "북쪽",
+            "NE": "북동쪽",
+            "E": "동쪽",
+            "SE": "남동쪽",
+            "S": "남쪽",
+            "SW": "남서쪽",
+            "W": "서쪽",
+            "NW": "북서쪽",
+        }[direction]
+        cardinal_directions = ("N", "E", "S", "W")
+        cardinal_direction = cardinal_directions[round(bearing / 90) % 4]
+        return {
+            "bearing_degrees": bearing,
+            "direction": direction,
+            "direction_ko": direction_ko,
+            "cardinal_direction": cardinal_direction,
+            "cardinal_direction_ko": {"N": "북쪽", "E": "동쪽", "S": "남쪽", "W": "서쪽"}[
+                cardinal_direction
+            ],
+        }
+
+    @classmethod
+    def filter_by_direction(
+        cls,
+        center: dict[str, Any],
+        places: list[dict[str, Any]],
+        direction: str,
+    ) -> list[dict[str, Any]]:
+        """Return candidates in a cardinal sector, nearest first."""
+
+        expected = _cardinal_direction(direction)
+        matches: list[dict[str, Any]] = []
+        for place in places:
+            bearing = cls.bearing_to_direction(center, place)
+            if bearing["cardinal_direction"] != expected:
+                continue
+            distance = cls.haversine_distance(center, place)
+            matches.append({**place, **bearing, **distance})
+        return sorted(matches, key=lambda place: float(place["distance_m"]))
 
     @staticmethod
     def select_min(items: list[dict[str, Any]], key: str) -> dict[str, Any]:
@@ -120,8 +161,7 @@ def _normalize_arguments(name: str, arguments: dict[str, Any]) -> dict[str, Any]
         )
         if isinstance(source, dict):
             items = [
-                {"candidate": candidate, "value": value}
-                for candidate, value in source.items()
+                {"candidate": candidate, "value": value} for candidate, value in source.items()
             ]
         elif isinstance(source, list):
             items = [
@@ -156,6 +196,32 @@ def _normalize_arguments(name: str, arguments: dict[str, Any]) -> dict[str, Any]
         }
 
     return args
+
+
+def _cardinal_direction(value: str) -> str:
+    normalized = value.strip().lower().replace(" ", "")
+    aliases = {
+        "n": "N",
+        "north": "N",
+        "북": "N",
+        "북쪽": "N",
+        "e": "E",
+        "east": "E",
+        "동": "E",
+        "동쪽": "E",
+        "s": "S",
+        "south": "S",
+        "남": "S",
+        "남쪽": "S",
+        "w": "W",
+        "west": "W",
+        "서": "W",
+        "서쪽": "W",
+    }
+    try:
+        return aliases[normalized]
+    except KeyError as exc:
+        raise ValueError("direction must be north/east/south/west (북쪽/동쪽/남쪽/서쪽)") from exc
 
 
 def _comparison_value_path(items: list[dict[str, Any]]) -> str:

@@ -10,6 +10,7 @@ class AgentResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     agent_type: str
+    predicted_intent: str | None = None
     predicted_answer: int | None = None
     response: str = ""
     tool_calls: int = Field(default=0, ge=0)
@@ -31,10 +32,11 @@ class BenchmarkAgent(ABC):
 
 
 def format_question(question: str, options: list[str]) -> str:
-    rendered = "\n".join(f"Option {index}: {option}" for index, option in enumerate(options, 1))
+    rendered = "\n".join(f"Option {index}: {option}" for index, option in enumerate(options))
     return (
         f"Question:\n{question}\n\nCandidate options:\n{rendered}\n\n"
-        'Return the final selection exactly as "^^Option_Number^^", for example ^^2^^.'
+        "Option numbers are 0-based. Return the final selection exactly as "
+        '"^^Option_Number^^", for example ^^1^^.'
     )
 
 

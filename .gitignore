@@ -10,6 +10,7 @@ dist/
 build/
 *.egg-info/
 results/
+reports/
 logs/
 data/*.db
 data/*.db-shm

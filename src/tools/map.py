@@ -54,6 +54,11 @@ class MapProvider(ABC):
     @abstractmethod
     def geocode(self, address: str, *, limit: int = 5) -> list[Place]: ...
 
+    def reverse_geocode(
+        self, latitude: float, longitude: float, *, limit: int = 5
+    ) -> list[Place]:
+        raise NotImplementedError("This map provider does not implement reverse_geocode")
+
     @abstractmethod
     def nearby_search(
         self,
@@ -76,4 +81,6 @@ class MapProvider(ABC):
         *,
         mode: str = "driving",
         priority: str = "RECOMMEND",
+        waypoints: list[str | Place] | None = None,
+        include_steps: bool = False,
     ) -> Route: ...

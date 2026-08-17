@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -14,6 +16,13 @@ class Place(BaseModel):
     latitude: float = Field(ge=-90, le=90)
     longitude: float = Field(ge=-180, le=180)
     category: str = ""
+    phone: str = ""
+    place_url: str = ""
+    rating: float | None = Field(default=None, ge=0, le=5)
+    price_level: str | None = None
+    opening_hours: dict[str, Any] | None = None
+    timezone: str | None = None
+    is_open: bool | None = None
 
 
 class RouteStep(BaseModel):
@@ -35,3 +44,4 @@ class Route(BaseModel):
     distance_m: int = Field(ge=0)
     duration_s: int = Field(ge=0)
     steps: tuple[RouteStep, ...] = ()
+    waypoints: tuple[str, ...] = ()

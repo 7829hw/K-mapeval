@@ -16,6 +16,7 @@ class SpatialOperatorRegistry:
         "identity_measure",
         "haversine_distance",
         "pairwise_distances",
+        "pairwise_extremes",
         "bearing_to_direction",
         "filter_by_direction",
         "nearest",
@@ -24,6 +25,11 @@ class SpatialOperatorRegistry:
         "select_max",
         "sort_by",
         "compare_routes",
+        "filter_routes",
+        "extract_distance",
+        "extract_duration",
+        "filter_places",
+        "steps_analysis",
         "sum_route_metrics",
         "aggregate_route_groups",
         "merge_places",
@@ -35,8 +41,9 @@ class SpatialOperatorRegistry:
         "build_route_network",
         "calculate_proportion",
         "open_at_time",
+        "timezone",
         "timezone_convert",
-        "calculate_finish_time",
+        "calculate_start_time",
         "tsp_tw",
     )
 
@@ -116,6 +123,22 @@ class SpatialOperatorRegistry:
         return results
 
     @classmethod
+    def pairwise_extremes(cls, locations: list[dict[str, Any]]) -> dict[str, Any]:
+        if len(locations) < 2:
+            raise ValueError("pairwise_extremes requires at least two locations")
+        pairs = [
+            {
+                "indexes": [left, right],
+                "locations": [locations[left], locations[right]],
+                **cls.haversine_distance(locations[left], locations[right]),
+            }
+            for left in range(len(locations))
+            for right in range(left + 1, len(locations))
+        ]
+        farthest = max(pairs, key=lambda item: float(item["distance_m"]))
+        return {"farthest_pair": farthest, "pairs": pairs}
+
+    @classmethod
     def filter_by_direction(
         cls,
         center: dict[str, Any],
@@ -142,15 +165,48 @@ class SpatialOperatorRegistry:
         anchor: dict[str, Any],
         candidates: list[dict[str, Any]],
         metric: str = "haversine",
+        routes: list[dict[str, Any]] | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        if metric != "haversine":
-            raise ValueError("nearest currently supports the haversine metric")
-        ranked = [
-            {"candidate_index": index, **candidate, **cls.haversine_distance(anchor, candidate)}
-            for index, candidate in enumerate(candidates)
-            if isinstance(candidate, dict)
-        ]
-        ranked.sort(key=lambda candidate: float(candidate["distance_m"]))
+        if metric == "haversine":
+            ranked = [
+                {
+                    "candidate_index": index,
+                    **candidate,
+                    **cls.haversine_distance(anchor, candidate),
+                }
+                for index, candidate in enumerate(candidates)
+                if isinstance(candidate, dict)
+            ]
+            ranked.sort(key=lambda candidate: float(candidate["distance_m"]))
+        elif metric == "travel_time":
+            route_values = routes.get("routes") if isinstance(routes, dict) else routes
+            if not isinstance(route_values, list):
+                raise ValueError("travel_time nearest requires aligned routes")
+            ranked = []
+            for index, candidate in enumerate(candidates):
+                route = next(
+                    (
+                        item
+                        for position, item in enumerate(route_values)
+                        if isinstance(item, dict)
+                        and item.get("status", "ok") == "ok"
+                        and item.get("pair_index", position) == index
+                    ),
+                    None,
+                )
+                if isinstance(candidate, dict) and route is not None:
+                    ranked.append(
+                        {
+                            "candidate_index": index,
+                            **candidate,
+                            "duration_s": route["duration_s"],
+                            "distance_m": route.get("distance_m"),
+                            "route": route,
+                        }
+                    )
+            ranked.sort(key=lambda candidate: float(candidate["duration_s"]))
+        else:
+            raise ValueError("nearest metric must be haversine or travel_time")
         return {"nearest": ranked[0] if ranked else None, "ranked": ranked}
 
     @classmethod
@@ -200,6 +256,84 @@ class SpatialOperatorRegistry:
             raise ValueError("route metric must be distance_m or duration_s")
         best_index = min(range(len(routes)), key=lambda index: float(routes[index][metric]))
         return {"best_index": best_index, "metric": metric, "route": routes[best_index]}
+
+    @staticmethod
+    def filter_routes(
+        routes: list[dict[str, Any]], keyword: str, include: bool = True
+    ) -> dict[str, Any]:
+        needle = keyword.casefold()
+        matched_indexes: list[int] = []
+        matched_routes: list[dict[str, Any]] = []
+        for index, route in enumerate(routes):
+            instructions = " ".join(
+                f"{step.get('instruction', '')} {step.get('road_name', '')}"
+                for step in route.get("steps", [])
+                if isinstance(step, dict)
+            ).casefold()
+            contains = needle in instructions
+            if contains is include:
+                matched_indexes.append(index)
+                matched_routes.append(route)
+        return {"route_indexes": matched_indexes, "routes": matched_routes}
+
+    @staticmethod
+    def extract_distance(route: dict[str, Any]) -> dict[str, float]:
+        return {"distance_m": float(route["distance_m"])}
+
+    @staticmethod
+    def extract_duration(route: dict[str, Any]) -> dict[str, float]:
+        return {"duration_s": float(route["duration_s"])}
+
+    @staticmethod
+    def filter_places(
+        places: list[dict[str, Any]],
+        min_rating: float | None = None,
+        price_levels: list[str] | None = None,
+        required_types: list[str] | None = None,
+        open_now: bool | None = None,
+    ) -> list[dict[str, Any]]:
+        price_set = {value.casefold() for value in (price_levels or [])}
+        type_terms = [value.casefold() for value in (required_types or [])]
+        selected: list[dict[str, Any]] = []
+        for place in places:
+            if min_rating is not None and (
+                place.get("rating") is None or float(place["rating"]) < min_rating
+            ):
+                continue
+            if price_set and str(place.get("price_level") or "").casefold() not in price_set:
+                continue
+            haystack = f"{place.get('category', '')} {place.get('name', '')}".casefold()
+            if type_terms and not all(term in haystack for term in type_terms):
+                continue
+            if open_now is not None and bool(place.get("is_open")) is not open_now:
+                continue
+            selected.append(place)
+        return selected
+
+    @staticmethod
+    def steps_analysis(route: dict[str, Any], landmark: str | None = None) -> dict[str, Any]:
+        steps = [step for step in route.get("steps", []) if isinstance(step, dict)]
+        left = [step for step in steps if "좌회전" in str(step.get("instruction", ""))]
+        right = [step for step in steps if "우회전" in str(step.get("instruction", ""))]
+        roundabouts = [
+            step
+            for step in steps
+            if re.search(r"회전교차로|로터리|roundabout", str(step.get("instruction", "")), re.I)
+        ]
+        after_landmark = None
+        if landmark:
+            for index, step in enumerate(steps[:-1]):
+                text = f"{step.get('instruction', '')} {step.get('road_name', '')}"
+                if landmark.casefold() in text.casefold():
+                    after_landmark = steps[index + 1]
+                    break
+        return {
+            "step_count": len(steps),
+            "left_turn_count": len(left),
+            "right_turn_count": len(right),
+            "roundabout_exit_count": len(roundabouts),
+            "instruction_after_landmark": after_landmark,
+        }
 
     @staticmethod
     def sum_route_metrics(routes: list[dict[str, Any]]) -> dict[str, int]:
@@ -452,19 +586,51 @@ class SpatialOperatorRegistry:
     def open_at_time(
         schedule: dict[str, Any], local_time: str, timezone: str
     ) -> dict[str, Any]:
+        if "opening_hours" in schedule:
+            schedule = schedule.get("opening_hours") or {}
         moment = _parse_datetime(local_time, timezone)
         weekday = moment.strftime("%A").lower()
+        previous = moment - timedelta(days=1)
         interval = schedule.get(weekday) or schedule.get(str(moment.weekday()))
-        if not interval:
-            return {"local_time": moment.isoformat(), "is_open": False, "interval": None}
-        intervals = interval if isinstance(interval, list) else [interval]
-        current = moment.strftime("%H:%M")
-        is_open = any(
-            isinstance(item, dict)
-            and str(item.get("open", "00:00")) <= current < str(item.get("close", "00:00"))
-            for item in intervals
+        previous_interval = schedule.get(previous.strftime("%A").lower()) or schedule.get(
+            str(previous.weekday())
         )
-        return {"local_time": moment.isoformat(), "is_open": is_open, "interval": interval}
+        intervals = interval if isinstance(interval, list) else [interval] if interval else []
+        previous_intervals = (
+            previous_interval
+            if isinstance(previous_interval, list)
+            else [previous_interval]
+            if previous_interval
+            else []
+        )
+        current = moment.strftime("%H:%M")
+        is_open = any(_time_in_period(current, item, carryover=False) for item in intervals)
+        is_open = is_open or any(
+            _time_in_period(current, item, carryover=True) for item in previous_intervals
+        )
+        return {
+            "local_time": moment.isoformat(),
+            "is_open": is_open,
+            "interval": interval,
+            "previous_interval": previous_interval,
+        }
+
+    @staticmethod
+    def timezone(latitude: float, longitude: float, timestamp: int | None = None) -> dict[str, Any]:
+        lat, lon = float(latitude), float(longitude)
+        if not (32 <= lat <= 39.5 and 123 <= lon <= 133):
+            raise ValueError("Offline timezone lookup only covers the Korean benchmark extent")
+        zone = ZoneInfo("Asia/Seoul")
+        moment = (
+            datetime.fromtimestamp(timestamp, zone)
+            if timestamp is not None
+            else datetime.now(zone)
+        )
+        return {
+            "timezone_id": "Asia/Seoul",
+            "timezone_name": moment.tzname(),
+            "utc_offset_s": int((moment.utcoffset() or timedelta()).total_seconds()),
+        }
 
     @staticmethod
     def timezone_convert(
@@ -479,15 +645,15 @@ class SpatialOperatorRegistry:
         }
 
     @staticmethod
-    def calculate_finish_time(
-        start_time: str, duration_s: float, timezone: str
+    def calculate_start_time(
+        arrival_time: str, duration_s: float, timezone: str
     ) -> dict[str, Any]:
-        start = _parse_datetime(start_time, timezone)
-        finish = start + timedelta(seconds=float(duration_s))
+        arrival = _parse_datetime(arrival_time, timezone)
+        start = arrival - timedelta(seconds=float(duration_s))
         return {
-            "start_time": start.isoformat(),
+            "arrival_time": arrival.isoformat(),
             "duration_s": float(duration_s),
-            "finish_time": finish.isoformat(),
+            "start_time": start.isoformat(),
             "timezone": timezone,
         }
 
@@ -496,7 +662,9 @@ class SpatialOperatorRegistry:
         nodes: list[dict[str, Any]],
         distance_matrix: list[list[float]] | dict[str, Any],
         time_windows: list[list[float]] | None = None,
+        service_times: list[float] | None = None,
         start_index: int = 0,
+        time_budget: float | None = None,
     ) -> dict[str, Any]:
         matrix = (
             distance_matrix.get("matrix")
@@ -522,9 +690,43 @@ class SpatialOperatorRegistry:
                     if elapsed > latest:
                         feasible = False
                         break
+                elapsed += float((service_times or [0.0] * len(nodes))[node_index])
+                if time_budget is not None and elapsed > float(time_budget):
+                    feasible = False
+                    break
             if feasible and (best is None or elapsed < best["total_cost"]):
                 best = {"order": list(route), "total_cost": elapsed, "feasible": True}
-        return best or {"order": [], "total_cost": None, "feasible": False}
+        if best is not None:
+            return {**best, "fallback_used": False}
+        order = [start_index]
+        remaining = set(visit_indexes)
+        elapsed = float((service_times or [0.0] * len(nodes))[start_index])
+        while remaining:
+            current = order[-1]
+            candidates = sorted(remaining, key=lambda index: float(matrix[current][index]))
+            accepted = None
+            for candidate in candidates:
+                arrival = elapsed + float(matrix[current][candidate])
+                if time_windows:
+                    earliest, latest = map(float, time_windows[candidate])
+                    arrival = max(arrival, earliest)
+                    if arrival > latest:
+                        continue
+                finish = arrival + float((service_times or [0.0] * len(nodes))[candidate])
+                if time_budget is None or finish <= float(time_budget):
+                    accepted, elapsed = candidate, finish
+                    break
+            if accepted is None:
+                break
+            order.append(accepted)
+            remaining.remove(accepted)
+        return {
+            "order": order,
+            "total_cost": elapsed,
+            "feasible": not remaining,
+            "fallback_used": True,
+            "unvisited": sorted(remaining),
+        }
 
 
 def _path(value: dict[str, Any], path: str) -> Any:
@@ -532,6 +734,17 @@ def _path(value: dict[str, Any], path: str) -> Any:
     for part in path.split("."):
         current = current[int(part)] if isinstance(current, list) else current[part]
     return current
+
+
+def _time_in_period(current: str, period: Any, *, carryover: bool) -> bool:
+    if not isinstance(period, dict):
+        return False
+    opening, closing = str(period.get("open", "00:00")), str(period.get("close", "00:00"))
+    if opening == closing:
+        return True
+    if opening < closing:
+        return False if carryover else opening <= current < closing
+    return current < closing if carryover else current >= opening
 
 
 def _has_path(value: dict[str, Any], path: str) -> bool:

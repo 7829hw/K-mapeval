@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
@@ -72,6 +73,13 @@ def test_search_nearby_details_and_route_are_normalized() -> None:
         "latitude": 37.5796,
         "longitude": 126.977,
         "category": "관광명소",
+        "phone": "",
+        "place_url": "",
+        "rating": None,
+        "price_level": None,
+        "opening_hours": None,
+        "timezone": None,
+        "is_open": None,
     }
     assert provider.place_details("1") == palace
     nearby = provider.nearby_search(palace, query="지하철역", limit=1)
@@ -119,6 +127,82 @@ def test_nearby_query_with_category_uses_keyword_filter() -> None:
     assert request.url.params["query"] == "카페"
     assert request.url.params["category_group_code"] == "CE7"
     assert request.url.params["sort"] == "distance"
+
+
+def test_reverse_geocode_is_normalized_and_cached() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "documents": [
+                    {
+                        "road_address": {
+                            "address_name": "서울 종로구 사직로 161",
+                            "building_name": "경복궁",
+                        },
+                        "address": {"address_name": "서울 종로구 세종로 1-1"},
+                    }
+                ]
+            },
+        )
+
+    provider = KakaoMapProvider(
+        "test-key",
+        cache_path=":memory:",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    assert provider.reverse_geocode(37.5796, 126.977, limit=1)[0].name == "경복궁"
+    assert provider.reverse_geocode(37.5796, 126.977, limit=1)[0].name == "경복궁"
+    assert len(requests) == 1
+    assert requests[0].url.path == "/v2/local/geo/coord2address.json"
+
+
+def test_waypoint_route_uses_post_and_verifies_summary() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "routes": [
+                    {
+                        "result_code": 0,
+                        "summary": {
+                            "distance": 100,
+                            "duration": 20,
+                            "waypoints": [{"name": "경유", "x": 127.1, "y": 37.1}],
+                        },
+                        "sections": [
+                            {
+                                "roads": [{"name": "도로"}],
+                                "guides": [{"guidance": "우회전", "road_index": 0}],
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+
+    provider = KakaoMapProvider(
+        "test-key",
+        cache_path=":memory:",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    origin = KakaoMapProvider.normalize_place(_document("o", "출발", 127.0, 37.0))
+    waypoint = KakaoMapProvider.normalize_place(_document("w", "경유", 127.1, 37.1))
+    destination = KakaoMapProvider.normalize_place(_document("d", "도착", 127.2, 37.2))
+    route = provider.directions(
+        origin, destination, waypoints=[waypoint], include_steps=True
+    )
+    assert route.waypoints == ("경유",)
+    assert route.steps[0].instruction == "우회전"
+    assert requests[0].method == "POST"
+    assert requests[0].url.path == "/v1/waypoints/directions"
+    assert json.loads(requests[0].content)["summary"] is False
 
 
 def test_nearby_retains_ranked_results_across_kakao_pages() -> None:

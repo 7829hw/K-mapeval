@@ -9,6 +9,7 @@ from src.agent.geoflow import (
     CORE_CONCEPTS,
     OPERATOR_CONTRACTS,
     TEMPLATES,
+    build_concept_graph,
     factorize_geoflow,
     normalize_analysis,
     normalize_and_validate_graph,
@@ -499,6 +500,174 @@ def test_template_catalog_covers_appendix_e_macro_families() -> None:
         "Multi-Segment-Aggregate",
         "Time-Window-Reverse",
     }
+
+
+@pytest.mark.parametrize("template_key", sorted(TEMPLATES))
+def test_each_appendix_e_template_is_executable(template_key: str) -> None:
+    provider_tools = ToolRegistry(FakeProvider())
+    operators = SpatialOperatorRegistry()
+    provider_names = {
+        schema["function"]["name"] for schema in provider_tools.schemas()
+    }
+    ordered, constraints = normalize_and_validate_graph(
+        TEMPLATES[template_key]["example"], max_steps=20
+    )
+    results: dict[str, Any] = {}
+    for step in ordered:
+        arguments = _resolve_references(step["arguments"], results)
+        if step["operator"] in provider_names:
+            execution = provider_tools.invoke(step["operator"], arguments)
+            assert execution.status == "ok", execution.error
+            results[step["id"]] = execution.output
+        else:
+            results[step["id"]] = operators.invoke(step["operator"], arguments)
+    assert constraints["connectivity"] is True
+    assert results[ordered[-1]["id"]] is not None
+
+
+def test_concept_edges_are_not_inferred_from_role_levels() -> None:
+    analysis = normalize_analysis(
+        {
+            "intent": "poi",
+            "concepts": [
+                {"id": "extent", "concept_type": "object", "role": "extent"},
+                {"id": "support", "concept_type": "field", "role": "support"},
+                {"id": "measure", "concept_type": "amount", "role": "measure"},
+            ],
+        },
+        "질문",
+        "poi",
+    )
+    assert build_concept_graph(analysis).edges == ()
+
+
+def test_appendix_c_operator_semantics() -> None:
+    operators = SpatialOperatorRegistry()
+    places = [
+        {"name": "A", "latitude": 37.0, "longitude": 127.0},
+        {"name": "B", "latitude": 37.01, "longitude": 127.0},
+        {"name": "C", "latitude": 37.1, "longitude": 127.0},
+    ]
+    extremes = operators.invoke("pairwise_extremes", {"locations": places})
+    assert extremes["farthest_pair"]["indexes"] == [0, 2]
+    routes = [
+        {"distance_m": 10, "duration_s": 10, "steps": [{"instruction": "유료도로 진입"}]},
+        {"distance_m": 20, "duration_s": 5, "steps": [{"instruction": "일반도로"}]},
+    ]
+    filtered = operators.invoke(
+        "filter_routes", {"routes": routes, "keyword": "유료도로", "include": False}
+    )
+    assert filtered["route_indexes"] == [1]
+    nearest = operators.invoke(
+        "nearest",
+        {
+            "anchor": places[0],
+            "candidates": places[1:],
+            "metric": "travel_time",
+            "routes": [
+                {"pair_index": 0, "distance_m": 10, "duration_s": 20, "status": "ok"},
+                {"pair_index": 1, "distance_m": 20, "duration_s": 5, "status": "ok"},
+            ],
+        },
+    )
+    assert nearest["nearest"]["candidate_index"] == 1
+    open_status = operators.invoke(
+        "open_at_time",
+        {
+            "schedule": {"sunday": {"open": "23:00", "close": "02:00"}},
+            "local_time": "2026-08-17T01:00:00",
+            "timezone": "Asia/Seoul",
+        },
+    )
+    assert open_status["is_open"] is True
+    fallback = operators.invoke(
+        "tsp_tw",
+        {
+            "nodes": places,
+            "distance_matrix": [[0, 2, 5], [2, 0, 2], [5, 2, 0]],
+            "time_windows": [[0, 0], [0, 3], [0, 3]],
+            "time_budget": 3,
+        },
+    )
+    assert fallback["fallback_used"] is True
+    assert fallback["order"] == [0, 1]
+
+
+def test_calculate_finish_time_uses_each_route_and_stay() -> None:
+    execution = ToolRegistry(FakeProvider()).invoke(
+        "calculate_finish_time",
+        {
+            "start_time": "2026-08-17T09:00:00",
+            "locations": ["A", "B", "C"],
+            "stay_durations_s": [10, 20, 30],
+            "timezone": "Asia/Seoul",
+        },
+    )
+    assert execution.status == "ok"
+    assert execution.output["travel_duration_s"] == 40
+    assert execution.output["stay_duration_s"] == 60
+    assert execution.output["finish_time"].endswith("09:01:40+09:00")
+
+
+def test_contextual_roles_are_not_part_of_g2_precedence() -> None:
+    payload = {
+        "graph": [
+            {
+                "id": "extent",
+                "operator": "place_search",
+                "arguments": {"query": "서울역"},
+                "role": "extent",
+            },
+            {
+                "id": "support",
+                "operator": "identity_measure",
+                "arguments": {"value": "$extent"},
+                "role": "support",
+            },
+            {
+                "id": "temporal_context",
+                "operator": "identity_measure",
+                "arguments": {"value": "$support"},
+                "role": "temporal_extent",
+            },
+            {
+                "id": "measure",
+                "operator": "identity_measure",
+                "arguments": {"value": "$temporal_context"},
+                "role": "measure",
+            },
+        ]
+    }
+    ordered, constraints = normalize_and_validate_graph(payload, max_steps=8)
+    assert [step["id"] for step in ordered] == [
+        "extent",
+        "support",
+        "temporal_context",
+        "measure",
+    ]
+    assert constraints["role_ordering"] is True
+
+
+def test_llm_generation_is_not_overwritten_by_rule_matcher() -> None:
+    llm = QueuedLLM(
+        [
+            LLMResponse('{"intent":"type"}'),
+            LLMResponse(
+                '{"graph":['
+                '{"id":"place","operator":"place_search",'
+                '"arguments":{"query":"경복궁","limit":1},"role":"extent"},'
+                '{"id":"match","operator":"match_type_options",'
+                '"arguments":{"place":"$place.0","options":["관광명소","은행"]},'
+                '"role":"measure"}]}'
+            ),
+            LLMResponse('{"predicted_option":1,"confidence":0.2,"reason":"generated"}'),
+        ]
+    )
+    result = SpatialAgent(llm, ToolRegistry(FakeProvider()), max_steps=4).answer(
+        "경복궁 유형은?", ["관광명소", "은행"]
+    )
+    assert result.predicted_answer == 1
+    assert result.trace[-2]["reason"] == "generated"
 
 
 def test_geoflow_validation_rejects_incompatible_dependency_types() -> None:

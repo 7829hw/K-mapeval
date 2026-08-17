@@ -3,8 +3,10 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -59,13 +61,28 @@ KAKAO_CATEGORY_ALIASES = {
 
 class PlaceSearchArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    query: str = Field(description="Korean place name, optionally with a region")
-    limit: int = Field(default=5, ge=1, le=15)
+    query: str | None = None
+    center: str | Place | None = None
+    category_code: KakaoCategoryCode | None = None
+    radius_m: int = Field(default=2000, ge=1, le=20000)
+    min_rating: float | None = Field(default=None, ge=0, le=5)
+    open_now: bool | None = None
+    limit: int = Field(default=5, ge=1, le=45)
 
     @field_validator("limit", mode="before")
     @classmethod
     def clamp_limit(cls, value: Any) -> int:
-        return _clamp_int(value, minimum=1, maximum=15)
+        return _clamp_int(value, minimum=1, maximum=45)
+
+    @model_validator(mode="after")
+    def require_selector(self) -> PlaceSearchArgs:
+        if self.center is None and not self.query:
+            raise ValueError("place_search requires query when center is omitted")
+        if self.center is not None and not self.query and not self.category_code:
+            raise ValueError("spatial place_search requires query or category_code")
+        if self.center is None:
+            self.limit = min(self.limit, 15)
+        return self
 
 
 class PlaceDetailsArgs(BaseModel):
@@ -82,6 +99,18 @@ class GeocodeArgs(BaseModel):
     @classmethod
     def clamp_limit(cls, value: Any) -> int:
         return _clamp_int(value, minimum=1, maximum=15)
+
+
+class ReverseGeocodeArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    limit: int = Field(default=5, ge=1, le=15)
+
+
+class BatchPlaceDetailsArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    place_ids: list[str] = Field(min_length=1, max_length=45)
 
 
 class NearbyPlacesArgs(BaseModel):
@@ -133,6 +162,24 @@ class DirectionsArgs(BaseModel):
     )
     mode: str = Field(default="driving", description="MVP supports driving")
     priority: str = Field(default="RECOMMEND", description="RECOMMEND, TIME, or DISTANCE")
+    waypoints: list[str | Place] = Field(default_factory=list, max_length=30)
+    include_steps: bool = False
+
+
+class CalculateFinishTimeArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    start_time: str
+    locations: list[str | Place] = Field(min_length=1, max_length=30)
+    stay_durations_s: list[float] = Field(default_factory=list, max_length=30)
+    timezone: str = "Asia/Seoul"
+    mode: str = "driving"
+    priority: str = "TIME"
+
+    @model_validator(mode="after")
+    def validate_stays(self) -> CalculateFinishTimeArgs:
+        if self.stay_durations_s and len(self.stay_durations_s) != len(self.locations):
+            raise ValueError("stay_durations_s must be empty or match locations")
+        return self
 
 
 class BatchGeocodeArgs(BaseModel):
@@ -236,16 +283,23 @@ class ToolRegistry:
             for tool in (
                 ToolDefinition(
                     "place_search",
-                    "Find normalized Korean places by name. Returns IDs, addresses, "
-                    "coordinates and categories.",
+                    "Search by keyword, or around center with radius/type/rating/open filters.",
                     PlaceSearchArgs,
-                    lambda args: self.provider.search_place(args.query, limit=args.limit),
+                    self._place_search,
                 ),
                 ToolDefinition(
                     "geocode",
                     "Convert a Korean address into normalized coordinates and address fields.",
                     GeocodeArgs,
                     lambda args: self.provider.geocode(args.address, limit=args.limit),
+                ),
+                ToolDefinition(
+                    "reverse_geocode",
+                    "Convert WGS84 coordinates to a normalized Korean address.",
+                    ReverseGeocodeArgs,
+                    lambda args: self.provider.reverse_geocode(
+                        args.latitude, args.longitude, limit=args.limit
+                    ),
                 ),
                 ToolDefinition(
                     "batch_geocode",
@@ -256,9 +310,17 @@ class ToolRegistry:
                 ),
                 ToolDefinition(
                     "place_details",
-                    "Read a normalized place previously retrieved in this run by place_id.",
+                    "Read normalized cached place metadata by place_id.",
                     PlaceDetailsArgs,
                     lambda args: self.provider.place_details(args.place_id),
+                ),
+                ToolDefinition(
+                    "batch_place_details",
+                    "Read cached metadata for several places in input order.",
+                    BatchPlaceDetailsArgs,
+                    lambda args: [
+                        self.provider.place_details(place_id) for place_id in args.place_ids
+                    ],
                 ),
                 ToolDefinition(
                     "nearby_places",
@@ -282,13 +344,15 @@ class ToolRegistry:
                 ),
                 ToolDefinition(
                     "directions",
-                    "Get a normalized driving-route distance and duration summary.",
+                    "Get a route with optional verified waypoints and navigation steps.",
                     DirectionsArgs,
                     lambda args: self.provider.directions(
                         args.origin,
                         args.destination,
                         mode=args.mode,
                         priority=args.priority,
+                        waypoints=args.waypoints,
+                        include_steps=args.include_steps,
                     ),
                 ),
                 ToolDefinition(
@@ -300,6 +364,8 @@ class ToolRegistry:
                         args.destination,
                         mode=args.mode,
                         priority=args.priority,
+                        waypoints=args.waypoints,
+                        include_steps=args.include_steps,
                     ),
                 ),
                 ToolDefinition(
@@ -308,6 +374,12 @@ class ToolRegistry:
                     "explicit list of ordered route pairs. Individual route failures are isolated.",
                     DistanceMatrixArgs,
                     self._distance_matrix,
+                ),
+                ToolDefinition(
+                    "calculate_finish_time",
+                    "Compute a multi-stop finish time from live/cached travel times and stays.",
+                    CalculateFinishTimeArgs,
+                    self._calculate_finish_time,
                 ),
             )
         }
@@ -386,6 +458,52 @@ class ToolRegistry:
                     }
                 )
         return results
+
+    def _place_search(self, args: PlaceSearchArgs) -> list[Place]:
+        places = (
+            self.provider.search_place(str(args.query), limit=args.limit)
+            if args.center is None
+            else self.provider.nearby_search(
+                args.center,
+                query=args.query,
+                category_code=args.category_code,
+                radius_m=args.radius_m,
+                limit=args.limit,
+            )
+        )
+        if args.min_rating is not None:
+            places = [
+                place
+                for place in places
+                if place.rating is not None and place.rating >= args.min_rating
+            ]
+        if args.open_now is not None:
+            places = [place for place in places if place.is_open is args.open_now]
+        return places
+
+    def _calculate_finish_time(self, args: CalculateFinishTimeArgs) -> dict[str, Any]:
+        zone = ZoneInfo(args.timezone)
+        start = datetime.fromisoformat(args.start_time)
+        start = start.replace(tzinfo=zone) if start.tzinfo is None else start.astimezone(zone)
+        stays = args.stay_durations_s or [0.0] * len(args.locations)
+        route_evidence: list[dict[str, Any]] = []
+        travel_seconds = 0
+        for origin, destination in zip(args.locations, args.locations[1:], strict=False):
+            route = self.provider.directions(
+                origin, destination, mode=args.mode, priority=args.priority
+            )
+            travel_seconds += route.duration_s
+            route_evidence.append(route.model_dump(mode="json"))
+        stay_seconds = sum(float(value) for value in stays)
+        finish = start + timedelta(seconds=travel_seconds + stay_seconds)
+        return {
+            "start_time": start.isoformat(),
+            "finish_time": finish.isoformat(),
+            "travel_duration_s": travel_seconds,
+            "stay_duration_s": stay_seconds,
+            "routes": route_evidence,
+            "timezone": args.timezone,
+        }
 
     def _distance_matrix(self, args: DistanceMatrixArgs) -> dict[str, Any]:
         pairs = list(args.pairs or [])

@@ -10,13 +10,12 @@ CORE_CONCEPTS = frozenset(
 FUNCTIONAL_ROLES = frozenset(
     {"extent", "temporal_extent", "sub_condition", "condition", "support", "measure"}
 )
+CONTEXTUAL_ROLES = frozenset({"extent", "temporal_extent"})
 ROLE_PRIORITY = {
-    "extent": 0,
-    "temporal_extent": 0,
-    "sub_condition": 1,
-    "condition": 2,
-    "support": 3,
-    "measure": 4,
+    "sub_condition": 0,
+    "condition": 1,
+    "support": 2,
+    "measure": 3,
 }
 
 
@@ -88,10 +87,12 @@ class FactorizedGeoFlow:
 
 OPERATOR_CONTRACTS: dict[str, OperatorContract] = {
     "identity_measure": OperatorContract("object", ("value",)),
-    "place_search": OperatorContract("object", ("query",)),
+    "place_search": OperatorContract("object"),
     "batch_geocode": OperatorContract("object", ("place_names",)),
     "geocode": OperatorContract("location", ("address",)),
+    "reverse_geocode": OperatorContract("location", ("latitude", "longitude")),
     "place_details": OperatorContract("object", ("place_id",)),
+    "batch_place_details": OperatorContract("object", ("place_ids",)),
     "nearby_places": OperatorContract("object", ("center",)),
     "recover_option_places": OperatorContract(
         "object", ("options", "candidates", "anchor")
@@ -101,6 +102,7 @@ OPERATOR_CONTRACTS: dict[str, OperatorContract] = {
     "distance_matrix": OperatorContract("field"),
     "haversine_distance": OperatorContract("amount"),
     "pairwise_distances": OperatorContract("field", ("pairs",)),
+    "pairwise_extremes": OperatorContract("amount", ("locations",)),
     "bearing_to_direction": OperatorContract("field"),
     "filter_by_direction": OperatorContract("object", ("center", "places", "direction")),
     "nearest": OperatorContract("object", ("anchor", "candidates")),
@@ -109,6 +111,11 @@ OPERATOR_CONTRACTS: dict[str, OperatorContract] = {
     "select_max": OperatorContract("object", ("items", "key")),
     "sort_by": OperatorContract("object", ("items", "key")),
     "compare_routes": OperatorContract("object", ("routes",)),
+    "filter_routes": OperatorContract("field", ("routes", "keyword")),
+    "extract_distance": OperatorContract("amount", ("route",)),
+    "extract_duration": OperatorContract("amount", ("route",)),
+    "filter_places": OperatorContract("object", ("places",)),
+    "steps_analysis": OperatorContract("field", ("route",)),
     "sum_route_metrics": OperatorContract("amount", ("routes",)),
     "aggregate_route_groups": OperatorContract("amount", ("routes", "groups")),
     "merge_places": OperatorContract("object", ("items",)),
@@ -120,9 +127,11 @@ OPERATOR_CONTRACTS: dict[str, OperatorContract] = {
     "build_route_network": OperatorContract("network", ("nodes", "edges")),
     "calculate_proportion": OperatorContract("proportion", ("numerator", "denominator")),
     "open_at_time": OperatorContract("event", ("schedule", "local_time", "timezone")),
+    "timezone": OperatorContract("event", ("latitude", "longitude")),
     "timezone_convert": OperatorContract("event", ("local_time", "from_timezone", "to_timezone")),
-    "calculate_finish_time": OperatorContract(
-        "event", ("start_time", "duration_s", "timezone")
+    "calculate_finish_time": OperatorContract("event", ("start_time", "locations")),
+    "calculate_start_time": OperatorContract(
+        "event", ("arrival_time", "duration_s", "timezone")
     ),
     "tsp_tw": OperatorContract("network", ("nodes", "distance_matrix")),
 }
@@ -132,6 +141,7 @@ OPERATOR_INPUT_TYPES: dict[str, dict[str, frozenset[str]]] = {
         "value": frozenset(CORE_CONCEPTS),
     },
     "batch_geocode": {"anchor": frozenset({"location", "object"})},
+    "batch_place_details": {"place_ids": frozenset({"object"})},
     "place_details": {"place_id": frozenset({"object"})},
     "nearby_places": {"center": frozenset({"location", "object"})},
     "recover_option_places": {
@@ -141,6 +151,7 @@ OPERATOR_INPUT_TYPES: dict[str, dict[str, frozenset[str]]] = {
     "directions": {
         "origin": frozenset({"location", "object"}),
         "destination": frozenset({"location", "object"}),
+        "waypoints": frozenset({"location", "object"}),
     },
     "travel_time": {
         "origin": frozenset({"location", "object"}),
@@ -162,6 +173,7 @@ OPERATOR_INPUT_TYPES: dict[str, dict[str, frozenset[str]]] = {
         "lng2": frozenset({"location", "object"}),
     },
     "pairwise_distances": {"pairs": frozenset({"location", "object"})},
+    "pairwise_extremes": {"locations": frozenset({"location", "object"})},
     "bearing_to_direction": {
         "place_a": frozenset({"location", "object"}),
         "place_b": frozenset({"location", "object"}),
@@ -173,6 +185,7 @@ OPERATOR_INPUT_TYPES: dict[str, dict[str, frozenset[str]]] = {
     "nearest": {
         "anchor": frozenset({"location", "object"}),
         "candidates": frozenset({"object"}),
+        "routes": frozenset({"field"}),
     },
     "within_radius": {
         "center": frozenset({"location", "object"}),
@@ -182,6 +195,11 @@ OPERATOR_INPUT_TYPES: dict[str, dict[str, frozenset[str]]] = {
     "select_max": {"items": frozenset({"object", "field", "amount"})},
     "sort_by": {"items": frozenset({"object", "field", "amount"})},
     "compare_routes": {"routes": frozenset({"field"})},
+    "filter_routes": {"routes": frozenset({"field"})},
+    "extract_distance": {"route": frozenset({"field"})},
+    "extract_duration": {"route": frozenset({"field"})},
+    "filter_places": {"places": frozenset({"object"})},
+    "steps_analysis": {"route": frozenset({"field"})},
     "sum_route_metrics": {"routes": frozenset({"field"})},
     "aggregate_route_groups": {"routes": frozenset({"field"})},
     "merge_places": {"items": frozenset({"object"})},
@@ -204,7 +222,10 @@ OPERATOR_INPUT_TYPES: dict[str, dict[str, frozenset[str]]] = {
     "open_at_time": {"schedule": frozenset({"object", "field", "event"})},
     "timezone_convert": {"local_time": frozenset({"event", "field"})},
     "calculate_finish_time": {
-        "start_time": frozenset({"event", "field"}),
+        "locations": frozenset({"object", "location"}),
+    },
+    "calculate_start_time": {
+        "arrival_time": frozenset({"event", "field"}),
         "duration_s": frozenset({"amount", "field"}),
     },
     "tsp_tw": {
@@ -258,8 +279,22 @@ TEMPLATES = {
                     "arguments": {"query": "농협은행 불암지점", "limit": 1},
                     "depends_on": [],
                     "output_type": "object",
+                    "role": "extent",
+                },
+                {
+                    "id": "details",
+                    "operator": "place_details",
+                    "arguments": {"place_id": "$place.0.place_id"},
+                    "depends_on": ["place"],
+                    "role": "support",
+                },
+                {
+                    "id": "attribute",
+                    "operator": "identity_measure",
+                    "arguments": {"value": "$details"},
+                    "depends_on": ["details"],
                     "role": "measure",
-                }
+                },
             ]
         },
     },
@@ -280,7 +315,7 @@ TEMPLATES = {
                     },
                     "depends_on": [],
                     "output_type": "object",
-                    "role": "support",
+                    "role": "extent",
                 },
                 {
                     "id": "direction",
@@ -312,7 +347,7 @@ TEMPLATES = {
                     },
                     "depends_on": [],
                     "output_type": "object",
-                    "role": "support",
+                    "role": "extent",
                 },
                 {
                     "id": "nearest",
@@ -336,15 +371,21 @@ TEMPLATES = {
         "example": {
             "graph": [
                 {
+                    "id": "center",
+                    "operator": "batch_geocode",
+                    "arguments": {"place_names": ["서울역"], "limit": 1},
+                    "role": "extent",
+                },
+                {
                     "id": "nearby",
                     "operator": "nearby_places",
                     "arguments": {
-                        "center": "서울역",
+                        "center": "$center.0.place",
                         "query": "편의점",
                         "radius_m": 500,
                         "limit": 45,
                     },
-                    "depends_on": [],
+                    "depends_on": ["center"],
                     "output_type": "object",
                     "role": "measure",
                 }
@@ -368,8 +409,15 @@ TEMPLATES = {
                     },
                     "depends_on": [],
                     "output_type": "field",
+                    "role": "extent",
+                },
+                {
+                    "id": "best_route",
+                    "operator": "compare_routes",
+                    "arguments": {"routes": "$routes.routes", "metric": "distance_m"},
+                    "depends_on": ["routes"],
                     "role": "measure",
-                }
+                },
             ]
         },
     },
@@ -396,7 +444,7 @@ TEMPLATES = {
                     },
                     "depends_on": [],
                     "output_type": "field",
-                    "role": "support",
+                    "role": "extent",
                 },
                 {
                     "id": "totals",
@@ -454,8 +502,16 @@ TEMPLATES = {
                     "arguments": {
                         "origin": "$endpoints.0.place",
                         "destination": "$endpoints.1.place",
+                        "include_steps": True,
                     },
                     "depends_on": ["endpoints"],
+                    "role": "support",
+                },
+                {
+                    "id": "step_analysis",
+                    "operator": "steps_analysis",
+                    "arguments": {"route": "$route"},
+                    "depends_on": ["route"],
                     "role": "measure",
                 },
             ]
@@ -479,10 +535,10 @@ TEMPLATES = {
                     "role": "temporal_extent",
                 },
                 {
-                    "id": "finish",
-                    "operator": "calculate_finish_time",
+                    "id": "departure",
+                    "operator": "calculate_start_time",
                     "arguments": {
-                        "start_time": "$time_context.converted_time",
+                        "arrival_time": "$time_context.converted_time",
                         "duration_s": 3600,
                         "timezone": "Asia/Seoul",
                     },
@@ -579,8 +635,6 @@ def build_concept_graph(analysis: dict[str, Any]) -> ConceptGraph:
         for source in concept.get("depends_on") or []:
             if str(source) in node_ids and str(source) != target:
                 edges.append((str(source), target))
-    if not edges:
-        edges = _infer_concept_edges(nodes)
     return ConceptGraph(nodes=nodes, edges=tuple(dict.fromkeys(edges)))
 
 
@@ -712,7 +766,7 @@ def factorize_geoflow(analysis: dict[str, Any], payload: dict[str, Any]) -> Fact
         bound_concepts.add(concept_id)
 
     hyperedges: list[OperatorHyperedge] = []
-    concept_edges = list(concept_graph.edges)
+    concept_edges: list[tuple[str, str]] = []
     for step in graph:
         input_concepts = list(
             dict.fromkeys(
@@ -783,37 +837,7 @@ def _complete_analysis_roles(
                 "depends_on": [str(extents[0]["id"])],
             }
         )
-    if not any(concept.get("depends_on") for concept in completed):
-        nodes = tuple(
-            ConceptNode(
-                id=str(concept["id"]),
-                text=str(concept.get("text") or ""),
-                concept_type=str(concept["concept_type"]),
-                role=str(concept["role"]),
-                attributes=dict(concept.get("attributes") or {}),
-            )
-            for concept in completed
-        )
-        inferred = _infer_concept_edges(nodes)
-        incoming: dict[str, list[str]] = {node.id: [] for node in nodes}
-        for source, target in inferred:
-            incoming[target].append(source)
-        for concept in completed:
-            concept["depends_on"] = incoming[str(concept["id"])]
     return completed
-
-
-def _infer_concept_edges(nodes: tuple[ConceptNode, ...]) -> list[tuple[str, str]]:
-    levels: dict[int, list[str]] = {}
-    for node in nodes:
-        levels.setdefault(ROLE_PRIORITY[node.role], []).append(node.id)
-    ordered_levels = sorted(levels)
-    edges: list[tuple[str, str]] = []
-    for position in range(1, len(ordered_levels)):
-        sources = levels[ordered_levels[position - 1]]
-        targets = levels[ordered_levels[position]]
-        edges.extend((source, target) for source in sources for target in targets)
-    return edges
 
 
 def _factorized_role(
@@ -824,7 +848,13 @@ def _factorized_role(
     sink_ids: set[str],
 ) -> str:
     if step_id in source_ids:
-        if operator in {"open_at_time", "calculate_finish_time", "timezone_convert"}:
+        if operator in {
+            "open_at_time",
+            "calculate_finish_time",
+            "calculate_start_time",
+            "timezone_convert",
+            "timezone",
+        }:
             return "temporal_extent"
         return "extent"
     if step_id in sink_ids:
@@ -839,6 +869,9 @@ def _factorized_role(
         "open_at_time": "condition",
         "build_route_network": "support",
         "distance_matrix": "support",
+        "filter_routes": "condition",
+        "filter_places": "condition",
+        "steps_analysis": "support",
         "tsp_tw": "support",
     }
     if operator in semantic_roles:
@@ -897,6 +930,14 @@ def normalize_and_validate_graph(
         missing = [name for name in contract.required_arguments if name not in arguments]
         if missing:
             raise ValueError(f"GeoFlow node {step_id} is missing arguments: {', '.join(missing)}")
+        if operator == "place_search" and not (
+            "query" in arguments
+            or (
+                "center" in arguments
+                and ({"query", "category_code"} & arguments.keys())
+            )
+        ):
+            raise ValueError("place_search requires query, or center with query/category_code")
         if operator == "nearby_places" and not ({"query", "category_code"} & arguments.keys()):
             raise ValueError("nearby_places requires query or category_code")
         if operator == "distance_matrix" and not (
@@ -947,7 +988,7 @@ def normalize_and_validate_graph(
         for dependency in step["depends_on"]:
             if dependency not in by_id:
                 raise ValueError(f"Unknown dependency {dependency!r} on GeoFlow node {step['id']}")
-            if ROLE_PRIORITY[by_id[dependency]["role"]] > ROLE_PRIORITY[step["role"]]:
+            if _violates_procedural_order(by_id[dependency]["role"], step["role"]):
                 raise ValueError(
                     f"Role ordering violation: {dependency} ({by_id[dependency]['role']}) -> "
                     f"{step['id']} ({step['role']})"
@@ -1038,7 +1079,7 @@ def normalize_and_validate_graph(
                 )
             source_role = str(concept_by_id[source].get("role") or "support")
             target_role = str(concept_by_id[target].get("role") or "support")
-            if ROLE_PRIORITY[source_role] > ROLE_PRIORITY[target_role]:
+            if _violates_procedural_order(source_role, target_role):
                 raise ValueError(
                     f"Concept role ordering violation: {source} ({source_role}) -> "
                     f"{target} ({target_role})"
@@ -1178,7 +1219,7 @@ def _topological_sort(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     while ready:
         ready.sort(
             key=lambda step_id: (
-                ROLE_PRIORITY[by_id[step_id]["role"]],
+                _execution_priority(by_id[step_id]["role"]),
                 source_order[step_id],
             )
         )
@@ -1191,6 +1232,16 @@ def _topological_sort(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if len(ordered) != len(steps):
         raise ValueError("GeoFlow graph violates acyclicity")
     return ordered
+
+
+def _violates_procedural_order(source_role: str, target_role: str) -> bool:
+    if source_role not in ROLE_PRIORITY or target_role not in ROLE_PRIORITY:
+        return False
+    return ROLE_PRIORITY[source_role] > ROLE_PRIORITY[target_role]
+
+
+def _execution_priority(role: str) -> int:
+    return -1 if role in CONTEXTUAL_ROLES else ROLE_PRIORITY[role]
 
 
 def _reaches_measure(node: str, outgoing: dict[str, set[str]], measures: set[str]) -> bool:

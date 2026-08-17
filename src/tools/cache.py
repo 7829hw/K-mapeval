@@ -6,11 +6,13 @@ import sqlite3
 import time
 from collections.abc import Mapping
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from src.models import Place, Route
 
 SCHEMA_VERSION = 1
+_SCHEMA_LOCK = Lock()
 
 
 class SQLiteMapCache:
@@ -26,9 +28,11 @@ class SQLiteMapCache:
         if self.path != ":memory:":
             Path(self.path).expanduser().parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(self.path, timeout=30)
-        self._connection.execute("PRAGMA journal_mode=WAL")
-        self._connection.execute("PRAGMA foreign_keys=ON")
-        self._create_schema()
+        self._connection.execute("PRAGMA busy_timeout=30000")
+        with _SCHEMA_LOCK:
+            self._connection.execute("PRAGMA journal_mode=WAL")
+            self._connection.execute("PRAGMA foreign_keys=ON")
+            self._create_schema()
 
     def close(self) -> None:
         self._connection.close()

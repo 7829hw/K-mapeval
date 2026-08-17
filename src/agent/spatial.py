@@ -44,7 +44,7 @@ executable operator-concept DAG. Every node must contribute to a Measure node.
 
 The graph must satisfy all five paper constraints:
 1. acyclicity; 2. role ordering
-   (extent/temporal_extent < sub_condition < condition < support < measure);
+   (sub_condition < condition < support < measure; contextual roles are unordered);
 3. operator output type compatibility; 4. executable operators and available arguments;
 5. connectivity from contextual input through every node to a measure.
 
@@ -52,28 +52,35 @@ Return JSON only:
 {"graph":[{"id":"places","operator":"batch_geocode","arguments":{"place_names":["A","B"]},"depends_on":[],"output_type":"object","role":"extent","concept_ids":["anchor"]}]}
 
 Exact operator contracts:
-- place_search(query, limit=5) -> object (list of Place)
+- place_search(query?,center?,category_code?,radius_m?,min_rating?,open_now?,limit=5) -> object
 - batch_geocode(place_names, anchor?, radius_m=20000, limit=1) -> object; anchor biases ambiguous
   names toward the question's reference location. Output preserves order and each item has
   {query, place, candidates}; reference the best match as $node.0.place
 - geocode(address, limit=5) -> location
+- reverse_geocode(latitude,longitude,limit=5) -> location
 - place_details(place_id) -> object
+- batch_place_details(place_ids) -> object
 - nearby_places(center, query|category_code, radius_m, limit) -> object, nearest first
   Kakao category codes: MT1 mart, CS2 convenience store, PS3 childcare, SC4 school,
   AC5 academy, PK6 parking, OL7 gas/charging, SW8 subway station, BK9 bank,
   CT1 culture, AG2 real estate, PO3 public institution, AT4 attraction, AD5 lodging,
   FD6 restaurant, CE7 cafe, HP8 hospital, PM9 pharmacy. Use the matching code whenever possible.
-- directions(origin, destination, mode="driving", priority) -> field Route
+- directions(origin,destination,mode="driving",priority,waypoints?,include_steps=false) -> field
 - travel_time(origin, destination, mode="driving", priority) -> field Route
 - distance_matrix(origins,destinations OR pairs, mode="driving", priority) -> field;
   pairs is [{origin,destination,label?}], and output routes preserve pair order at $node.routes
 - haversine_distance(place_a, place_b) -> amount
 - pairwise_distances(pairs=[{place_a,place_b,label?}]) -> field
+- pairwise_extremes(locations) -> amount
 - bearing_to_direction(place_a, place_b) -> field
 - filter_by_direction(center, places, direction) -> object, nearest first
-- nearest(anchor, candidates, metric="haversine") -> object
+- nearest(anchor,candidates,metric="haversine"|"travel_time",routes?) -> object
 - within_radius(center, candidates, radius_m) -> object
 - select_min/select_max(items,key), sort_by(items,key), compare_routes(routes,metric) -> object
+- filter_routes(routes,keyword,include=true) -> field
+- extract_distance(route), extract_duration(route) -> amount
+- filter_places(places,min_rating?,price_levels?,required_types?,open_now?) -> object
+- steps_analysis(route,landmark?) -> field
 - sum_route_metrics(routes) -> amount
 - aggregate_route_groups(routes,groups) -> amount; groups contains route indexes per option and
   returns option_totals plus best_distance_option and best_duration_option.
@@ -88,9 +95,11 @@ Exact operator contracts:
 - build_route_network(nodes,edges) -> network
 - calculate_proportion(numerator,denominator) -> proportion
 - open_at_time(schedule,local_time,timezone) -> event
+- timezone(latitude,longitude,timestamp?) -> event
 - timezone_convert(local_time,from_timezone,to_timezone) -> event
-- calculate_finish_time(start_time,duration_s,timezone) -> event
-- tsp_tw(nodes,distance_matrix,time_windows?,start_index=0) -> network
+- calculate_finish_time(start_time,locations,stay_durations_s?,timezone?,mode?) -> event
+- calculate_start_time(arrival_time,duration_s,timezone) -> event
+- tsp_tw(nodes,distance_matrix,time_windows?,service_times?,start_index=0,time_budget?) -> network
 - identity_measure(value) -> object; explicit Measure projection for a single source operator
 
 Use normalized fields only: latitude, longitude, distance_m, duration_s. Complete Place objects,
@@ -120,8 +129,8 @@ Respect candidate-index to candidate-text mapping. Numbering is 0-based. Return 
 {"predicted_option":1,"confidence":0.8,"reason":"brief evidence-based reason"}
 For radius/list questions, compare the resolved in-radius POI names with each option as a set;
 never choose an option merely because it contains more items or looks like a list.
-When a match_options or match_distance_options result supplies best_option with confidence >= 0.7,
-use that grounded option. It is the Measure output of a validated GeoFlow, not a language guess.
+Treat deterministic best_option fields as evidence, but make the final selection in this generation
+step after checking them against the complete final state and trace.
 Never return an option outside the supplied candidates."""
 
 INTENT_EVALUATION_RULES = {
@@ -396,14 +405,6 @@ class SpatialAgent(BenchmarkAgent):
             predicted = _coerce_option(evaluation_json.get("predicted_option"), len(options))
             if predicted is None:
                 predicted = parse_answer(evaluation.content, option_count=len(options))
-            grounded = _grounded_prediction(results, len(options))
-            if grounded is not None:
-                predicted = grounded["predicted_option"]
-                evaluation_json = {
-                    "predicted_option": predicted,
-                    "confidence": grounded["confidence"],
-                    "reason": grounded["reason"],
-                }
             trace.append(
                 {
                     "stage": "evaluate",
@@ -757,23 +758,6 @@ def _extract_requested_direction(question: str) -> str | None:
         ),
         None,
     )
-
-
-def _grounded_prediction(results: dict[str, Any], option_count: int) -> dict[str, Any] | None:
-    for step_id in reversed(list(results)):
-        result = results[step_id]
-        if not isinstance(result, dict) or "best_option" not in result:
-            continue
-        predicted = _coerce_option(result.get("best_option"), option_count)
-        confidence = float(result.get("confidence") or 0.0)
-        if predicted is None or confidence < 0.7:
-            continue
-        return {
-            "predicted_option": predicted,
-            "confidence": confidence,
-            "reason": f"Validated GeoFlow Measure {step_id} selected option {predicted}",
-        }
-    return None
 
 
 def _extract_anchor(question: str, intent: str) -> str | None:

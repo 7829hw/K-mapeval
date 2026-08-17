@@ -20,6 +20,9 @@ from src.tools.map import (
 
 LOCAL_BASE_URL = "https://dapi.kakao.com/v2/local"
 MOBILITY_DIRECTIONS_URL = "https://apis-navi.kakaomobility.com/v1/directions"
+MOBILITY_WAYPOINT_DIRECTIONS_URL = (
+    "https://apis-navi.kakaomobility.com/v1/waypoints/directions"
+)
 KAKAO_CATEGORY_CODES = frozenset(
     {
         "MT1",
@@ -120,16 +123,24 @@ class KakaoMapProvider(MapProvider):
             latitude=latitude,
             longitude=longitude,
             category=category,
+            phone=str(document.get("phone") or ""),
+            place_url=str(document.get("place_url") or ""),
         )
 
     @staticmethod
-    def normalize_route(data: Mapping[str, Any], origin: Place, destination: Place) -> Route:
+    def normalize_route(
+        data: Mapping[str, Any],
+        origin: Place,
+        destination: Place,
+        waypoints: tuple[Place, ...] = (),
+    ) -> Route:
         routes = data.get("routes") or []
         successful = next((route for route in routes if route.get("result_code") == 0), None)
         if successful is None:
             message = routes[0].get("result_msg", "No Kakao route found") if routes else "No route"
             raise RouteNotFoundError(str(message))
         summary = successful.get("summary") or {}
+        _verify_waypoint_summary(summary, waypoints)
         steps: list[RouteStep] = []
         for section in successful.get("sections") or []:
             roads = section.get("roads") or []
@@ -157,6 +168,7 @@ class KakaoMapProvider(MapProvider):
             distance_m=distance_m,
             duration_s=duration_s,
             steps=tuple(steps),
+            waypoints=tuple(place.name for place in waypoints),
         )
 
     def search_place(self, query: str, *, limit: int = 5) -> list[Place]:
@@ -187,6 +199,52 @@ class KakaoMapProvider(MapProvider):
         data = self._get_local("/search/address.json", {"query": address, "size": size})
         places = self._normalize_places(data, size)
         self._cache.set_places("geocode", cache_args, places)
+        return places
+
+    def reverse_geocode(
+        self, latitude: float, longitude: float, *, limit: int = 5
+    ) -> list[Place]:
+        latitude, longitude = float(latitude), float(longitude)
+        if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
+            raise ValueError("reverse_geocode coordinates are out of range")
+        size = _size(limit)
+        cache_args = {
+            "latitude": round(latitude, 7),
+            "longitude": round(longitude, 7),
+            "limit": size,
+        }
+        cached = self._cache.get_places("reverse_geocode", cache_args)
+        if cached is not None:
+            self._record_cache_hit(cached)
+            return cached
+        self._cache_miss_count += 1
+        data = self._get_local(
+            "/geo/coord2address.json",
+            {"x": longitude, "y": latitude, "input_coord": "WGS84"},
+        )
+        documents: list[dict[str, Any]] = []
+        for index, raw in enumerate(data.get("documents") or []):
+            if not isinstance(raw, Mapping):
+                continue
+            road, address = raw.get("road_address") or {}, raw.get("address") or {}
+            address_name = str(
+                road.get("address_name") or address.get("address_name") or ""
+            ).strip()
+            if address_name:
+                documents.append(
+                    {
+                        "id": f"coord:{longitude:.7f},{latitude:.7f}:{index}",
+                        "place_name": road.get("building_name") or address_name,
+                        "road_address_name": road.get("address_name") or "",
+                        "address_name": address.get("address_name") or address_name,
+                        "address_type": address.get("region_3depth_name") or "address",
+                        "x": longitude,
+                        "y": latitude,
+                    }
+                )
+        places = [self.normalize_place(document) for document in documents[:size]]
+        self._places.update({place.place_id: place for place in places})
+        self._cache.set_places("reverse_geocode", cache_args, places)
         return places
 
     def nearby_search(
@@ -282,6 +340,8 @@ class KakaoMapProvider(MapProvider):
         *,
         mode: str = "driving",
         priority: str = "RECOMMEND",
+        waypoints: list[str | Place] | None = None,
+        include_steps: bool = False,
     ) -> Route:
         if mode.lower() not in {"driving", "car"}:
             raise UnsupportedTravelModeError(
@@ -289,6 +349,9 @@ class KakaoMapProvider(MapProvider):
             )
         origin_place = self._resolve_place(origin)
         destination_place = self._resolve_place(destination)
+        waypoint_places = tuple(self._resolve_place(value) for value in (waypoints or []))
+        if len(waypoint_places) > 30:
+            raise ValueError("Kakao Mobility supports at most 30 waypoints")
         normalized_priority = priority.upper()
         if normalized_priority not in {"RECOMMEND", "TIME", "DISTANCE"}:
             raise ValueError("priority must be RECOMMEND, TIME, or DISTANCE")
@@ -301,25 +364,46 @@ class KakaoMapProvider(MapProvider):
             "destination_longitude": destination_place.longitude,
             "mode": "driving",
             "priority": normalized_priority,
+            "waypoints": [
+                {
+                    "place_id": place.place_id,
+                    "latitude": place.latitude,
+                    "longitude": place.longitude,
+                }
+                for place in waypoint_places
+            ],
+            "include_steps": bool(include_steps),
         }
         cached = self._cache.get_route("directions", cache_args)
         if cached is not None:
             self._cache_hit_count += 1
             return cached
         self._cache_miss_count += 1
-        response = self._request(
-            MOBILITY_DIRECTIONS_URL,
-            api_key=self._rest_api_key,
-            params={
-                "origin": f"{origin_place.longitude},{origin_place.latitude}",
-                "destination": f"{destination_place.longitude},{destination_place.latitude}",
-                "priority": normalized_priority,
-                # Benchmarks use route distance/duration, so avoid downloading roads,
-                # vertices, bounds, and turn-by-turn guides.
-                "summary": "true",
-            },
-        )
-        route = self.normalize_route(response, origin_place, destination_place)
+        if waypoint_places:
+            response = self._request(
+                MOBILITY_WAYPOINT_DIRECTIONS_URL,
+                api_key=self._rest_api_key,
+                json_body={
+                    "origin": _mobility_point(origin_place),
+                    "destination": _mobility_point(destination_place),
+                    "waypoints": [_mobility_point(place) for place in waypoint_places],
+                    "priority": normalized_priority,
+                    "summary": not include_steps,
+                },
+                method="POST",
+            )
+        else:
+            response = self._request(
+                MOBILITY_DIRECTIONS_URL,
+                api_key=self._rest_api_key,
+                params={
+                    "origin": f"{origin_place.longitude},{origin_place.latitude}",
+                    "destination": f"{destination_place.longitude},{destination_place.latitude}",
+                    "priority": normalized_priority,
+                    "summary": str(not include_steps).lower(),
+                },
+            )
+        route = self.normalize_route(response, origin_place, destination_place, waypoint_places)
         self._cache.set_route("directions", cache_args, route)
         return route
 
@@ -342,17 +426,26 @@ class KakaoMapProvider(MapProvider):
     def _get_local(self, path: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
         return self._request(f"{LOCAL_BASE_URL}{path}", api_key=self._rest_api_key, params=params)
 
-    def _request(self, url: str, *, api_key: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
+    def _request(
+        self,
+        url: str,
+        *,
+        api_key: str,
+        params: Mapping[str, Any] | None = None,
+        json_body: Mapping[str, Any] | None = None,
+        method: str = "GET",
+    ) -> Mapping[str, Any]:
         self._api_call_count += 1
         try:
-            response = self._client.get(
-                url,
-                headers={
-                    "Authorization": f"KakaoAK {api_key}",
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                },
-                params=params,
+            headers = {
+                "Authorization": f"KakaoAK {api_key}",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            }
+            response = (
+                self._client.post(url, headers=headers, params=params, json=json_body)
+                if method == "POST"
+                else self._client.get(url, headers=headers, params=params)
             )
         except httpx.TimeoutException as exc:
             raise ProviderTimeoutError("Kakao API request timed out") from exc
@@ -394,3 +487,29 @@ def _nearby_limit(limit: int) -> int:
 
 def _normalized_text(value: str) -> str:
     return " ".join(value.split()).casefold()
+
+
+def _mobility_point(place: Place) -> dict[str, Any]:
+    return {"name": place.name, "x": place.longitude, "y": place.latitude}
+
+
+def _verify_waypoint_summary(
+    summary: Mapping[str, Any], expected: tuple[Place, ...]
+) -> None:
+    if not expected:
+        return
+    returned = summary.get("waypoints")
+    if not isinstance(returned, list) or len(returned) != len(expected):
+        raise RouteNotFoundError("Kakao did not confirm every requested waypoint")
+    for requested, actual in zip(expected, returned, strict=True):
+        if not isinstance(actual, Mapping):
+            raise RouteNotFoundError("Kakao returned an invalid waypoint")
+        name = str(actual.get("name") or "").strip()
+        if name and name != requested.name:
+            raise RouteNotFoundError(f"Waypoint mismatch: {requested.name} != {name}")
+        try:
+            x, y = float(actual["x"]), float(actual["y"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RouteNotFoundError("Kakao waypoint has invalid coordinates") from exc
+        if abs(x - requested.longitude) > 1e-5 or abs(y - requested.latitude) > 1e-5:
+            raise RouteNotFoundError(f"Waypoint coordinates do not match {requested.name}")

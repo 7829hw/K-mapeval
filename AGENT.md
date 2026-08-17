@@ -1,132 +1,159 @@
 # AGENT.md
 
-## Project
+Canonical working guidance for coding agents in this repository. `CLAUDE.md` imports this file;
+edit here, not there.
 
-Build a Korean MapEval-style evaluation environment using Kakao map APIs.
-Compare a MapEval-style ReAct agent with Spatial-Agent under the same map tools.
-Research whether Spatial-Agent's gains reproduce in Korean geography and POI settings.
-This phase implements infrastructure, not the full benchmark dataset.
-Create only a small sample dataset for end-to-end validation.
+## What this is
 
-## References
+A research MVP that compares a MapEval-style **ReAct** agent against a **Spatial-Agent** (GeoFlow)
+port on Korean multiple-choice map questions, both driven by the same Kakao-backed tool layer. The
+research question is whether Spatial-Agent's reported gains reproduce on Korean geography and POI
+data. The independent variable is agent architecture — everything below the agent (provider, tools,
+cache, normalized schemas, evaluator) must stay identical for both.
 
-Use https://github.com/MapEval/MapEval-API as the main ReAct reference.
-Review `Evaluator2.py` for agent execution and multiple-choice evaluation.
-Review `FormattedTools.py` and `Tools.py` for tool interfaces and formatting.
-Use https://github.com/MapQaTor/mapqator-backend as an architectural reference only.
-Do not reproduce the full MapQaTor backend for the MVP.
-Use https://github.com/ecerybao/Spatial-Agent as the main Spatial-Agent reference.
-Review `src/agent/spatial_agent.py`, `src/agent/operators.py`, `src/tools/google_maps.py`, and `test_agent.py`.
+`K-MapEval_PRD.md` is the full spec. `docs/REFERENCE_MAPPING.md` records every deliberate deviation
+from the upstream MapEval / Spatial-Agent implementations — update it when you add another one.
 
-## Architecture
+Upstream references, when porting or checking behavior:
 
-Both agents must use the same normalized map-tool layer.
-Canonical flow: `Agent -> Common Tools -> KakaoMapProvider -> Kakao APIs`.
-Do not give ReAct and Spatial-Agent separate Kakao implementations.
-Do not implement a separate HTTP backend server in the MVP.
+- `MapEval/MapEval-API` — the ReAct baseline. `Evaluator2.py` for the agent loop and MCQ
+  evaluation, `FormattedTools.py` / `Tools.py` for tool interfaces and formatting.
+- `ecerybao/Spatial-Agent` — the Spatial-Agent side. `src/agent/spatial_agent.py`,
+  `src/agent/operators.py`, `src/tools/google_maps.py`, `test_agent.py`.
+- `MapQaTor/mapqator-backend` — architectural reference only; do not reproduce its HTTP backend.
 
-## Map Provider
+## Commands
 
-Define a provider-neutral `MapProvider` interface.
-Implement `KakaoMapProvider` as the Kakao-backed implementation.
-All Kakao API calls must go through `KakaoMapProvider`.
-Do not call Kakao APIs directly from agents, evaluators, or datasets.
-Use Kakao Local REST API for place, category, address, and coordinate queries.
-Use Kakao Mobility APIs for driving directions when needed.
-Keep API keys in environment variables and provide `.env.example`.
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e '.[dev]'
+cp example.env .env          # .env.example has the same content; either works
 
-## Normalized Schemas
+pytest                       # full suite; Kakao + LLM are stubbed, no keys/network needed
+pytest tests/test_tools_and_agents.py::test_react_executes_common_tool_then_parses_answer
+pytest -k geoflow
+ruff check .                 # line-length 100, rules E,F,I,UP,B
 
-Do not expose raw Kakao JSON directly to agents.
-Normalize places to `place_id`, `name`, `latitude`, `longitude`, `address`, and `category`.
-Normalize routes to `origin`, `destination`, `distance_m`, `duration_s`, and `steps`.
-Both agents must consume the same normalized schemas.
+python main.py --agent react
+python main.py --agent spatial
+python main.py --agent both --dataset dataset/seoul_mapqa_kr_mcq_100.jsonl
+python main.py --agent both --dataset dataset/test.jsonl --ids nearby_001 poi_001
+python main.py --agent spatial --concurrency 4
+```
 
-## ReAct Baseline
+Running `main.py` costs real LLM tokens and Kakao API quota. Every test in `tests/` fakes both, so
+verify with `pytest` first and only run the benchmark when the user asks for live numbers. Keep unit
+tests mocked (`httpx.MockTransport` for Kakao, a queued fake for the LLM); any live-API test stays
+separate and optional.
 
-Implement a MapEval-style ReAct baseline using the reference code.
-Provide tools comparable to `PlaceSearch`, `PlaceDetails`, `NearbyPlaces`, `Directions`, and `TravelTime`.
-Tool wrappers must be thin and delegate to `KakaoMapProvider`.
-Preserve MapEval multiple-choice evaluation behavior where practical.
-Never expose the gold answer to the ReAct agent.
+## Layering (do not shortcut it)
 
-## Spatial-Agent Port
+```
+main.py → Evaluator → ReactAgent | SpatialAgent → ToolRegistry → MapProvider (KakaoMapProvider)
+                                                              → SQLiteMapCache → Kakao HTTP APIs
+Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, zero API calls)
+```
 
-Reuse the existing Spatial-Agent architecture as much as possible.
-Preserve `Route -> Plan -> Execute -> Evaluate -> Generate`.
-Replace Google Maps-specific dependencies with `MapProvider`.
-Prefer dependency injection over hardcoded provider clients.
-Reuse existing spatial operators when semantically valid.
-Only modify planner, state, or operators when Kakao compatibility requires it.
-Never expose the gold answer to Spatial-Agent.
+- Kakao HTTP calls exist **only** in `src/tools/kakao.py` — Kakao Local for place/category/address/
+  coordinate queries, Kakao Mobility for driving directions. Agents, evaluator, dataset, and tests
+  talk to the abstract `MapProvider` in `src/tools/map.py`, and providers are injected, never
+  constructed inside an agent.
+- Raw Kakao JSON never reaches an agent. Everything is normalized to the frozen `Place` / `Route`
+  models in `src/models.py`; adding a field there means adding it to the provider normalizers and
+  the cache payload.
+- Deterministic math (haversine, bearing, sorting, min/max, route comparison, TSP-TW, time
+  arithmetic) belongs in `src/tools/spatial.py` and must never spend an API call.
+- ReAct and Spatial-Agent share one `ToolRegistry`; never give one agent evidence, a tool, or a
+  Kakao implementation the other cannot reach. Tool wrappers stay thin and delegate to the provider.
+- No separate HTTP backend server, web UI, or extra datastore beyond the SQLite cache. Keep
+  `src/agent/` and `src/tools/` as the only source subpackages and `main.py` as the only entry
+  point.
 
-## Spatial Operations
+## Invariants that break silently if violated
 
-Separate external retrieval from deterministic calculations.
-Use the provider for place lookup, nearby search, geocoding, directions, and travel time.
-Perform Haversine distance, sorting, filtering, min/max, and route comparison locally.
-Do not spend external API calls on deterministic calculations.
+- **0-based option indices everywhere** — dataset `answer`, agent `predicted_answer`, logs,
+  reports. The final-answer wire format is `^^N^^` (`src/parsing.py::parse_answer`).
+- **Gold answer and eval-only metadata never reach an agent.** `BenchmarkItem.agent_input()`
+  returns only `(question, options)`; `answer`, `classification`, `region`, `difficulty`, and
+  `verified_at` stay in the evaluator.
+- **No per-question special-casing.** Heuristics must be generic over a classification, never
+  keyed to a specific question id or option string, and answers are never hardcoded.
+- Provider failures and agent-reasoning failures are distinct `failure_type`s; `find_provider_failure`
+  in `src/agent/base.py` recognizes provider errors by their serialized `ProviderError` class-name
+  prefix, so keep those names when adding exception types. Place-not-found, timeout, auth failure,
+  rate limit, route-not-found, and unsupported travel mode must each fail as their own explicit
+  `ProviderError` subclass rather than degrade silently.
+- Counters (`api_calls`, `cache_hits`, `cache_misses`, `tool_calls`) are recorded as deltas around
+  each question, read off the shared provider/registry — new tool paths must go through the
+  registry or their calls vanish from the metrics.
+- Per-question logs carry `question_id`, `classification`, `agent_type`, `predicted_answer`,
+  correctness, and every tool name with normalized arguments, status, and API-call counts.
+- Do not create persistent dumps of raw Kakao responses; usage rights are not established for them.
 
-## Sample Dataset
+## Spatial-Agent / GeoFlow
 
-Do not build the full benchmark dataset in this phase.
-Create only approximately 8-12 sample questions.
-Cover `nearby`, `poi`, `routing`, and `trip`.
-Use about 2-3 samples per classification.
-Use fields `id`, `question`, `options`, `answer`, and `classification`.
-Use 0-based answer indices consistently in datasets, agents, logs, and reports.
-Treat samples as development fixtures, not research benchmark data.
-Manually verify sample answers before pipeline testing.
+Pipeline in `src/agent/spatial.py::SpatialAgent.answer`, preserving the upstream
+`Route → Plan → Execute → Evaluate → Generate` shape:
+`analyze → retrieve_templates → compose (LLM graph) → factorize + validate (→ one LLM repair →
+pre-validated template fallback) → topological execute → evaluate → generate`.
 
-## Evaluation
+The formalism lives in `src/agent/geoflow.py`: `OPERATOR_CONTRACTS` (output core-concept type per
+operator), `OPERATOR_INPUT_TYPES`, `TEMPLATES` (Appendix E macro families, all executable and
+G1–G5-valid), `factorize_geoflow`, and `normalize_and_validate_graph` (G1 acyclicity, G2 role
+ordering over `sub_condition < condition < support < measure` with contextual roles excluded,
+G3 type compatibility, G4 executability, G5 both-direction reachability
+`EXTENT/TEXTENT → node → MEASURE`).
 
-Run both agents on exactly the same sample questions.
-Use the same LLM, model version, temperature, provider, and normalized outputs.
-The intended independent variable is agent architecture.
-Report multiple-choice accuracy as the primary metric.
-Also record classification accuracy, tool calls, API calls, latency, and failures.
-Keep per-question logs for debugging and later error analysis.
+Reuse upstream operator semantics wherever they are still valid; change the planner, state, or an
+operator only where Kakao compatibility forces it.
 
-## Logging and Errors
+**Adding or renaming an operator touches four places, and tests enforce the consistency:**
 
-Log `question_id`, `classification`, `agent_type`, `predicted_answer`, and correctness.
-Log tool names, normalized arguments, execution status, and API-call counts.
-Never log API keys or secrets.
-Distinguish provider failures from agent reasoning failures.
-Handle place-not-found, timeout, auth failure, rate limit, and route-not-found.
+1. an implementation — `ToolRegistry` (`src/tools/registry.py`, external/API-backed) *or*
+   `SpatialOperatorRegistry` (`src/tools/spatial.py`, local/deterministic);
+2. `OPERATOR_CONTRACTS` + `OPERATOR_INPUT_TYPES` in `src/agent/geoflow.py`;
+3. the operator-contract list inside `GRAPH_PROMPT` in `src/agent/spatial.py` — the planner LLM
+   only knows what this prompt spells out;
+4. `_normalize_arguments` in `src/tools/spatial.py` if planners emit argument aliases for it.
 
-## Testing
+`SpatialAgent.__init__` raises at construction time if any `OPERATOR_CONTRACTS` entry is not
+executable, so a missing step 1 or 2 fails fast; a missing step 3 only shows up as degraded
+benchmark accuracy.
 
-Test Kakao response normalization and canonical schemas.
-Test deterministic spatial operators, answer parsing, and tool wrappers.
-Mock Kakao APIs for normal unit tests.
-Keep live API tests separate and optional.
+Executed steps are recorded twice: `results` keyed by step id (operator state) and `concept_state`
+materialized through each step's `output_bindings` (concept state). Both go into the trace the
+generation stage conditions on. Step failures are isolated into `{"error": ...}` rather than
+aborting the run — keep that behavior.
 
-## Repository Guidance
+## Concurrency, cache, and outputs
 
-Keep one root entry point (`main.py`) and a compact `src/` package modeled after Spatial-Agent.
-Use only `src/agent/` and `src/tools/` as source subdirectories; keep config, models, dataset,
-evaluation, metrics, and parsing modules directly under `src/`.
-Keep Kakao-specific logic inside the provider layer.
-Keep agent-facing interfaces provider-neutral.
-Avoid unnecessary databases, web UIs, distributed systems, or production infrastructure.
-Do not create persistent Kakao response dumps unless usage rights are explicitly confirmed.
+`Evaluator` runs `BENCHMARK_CONCURRENCY` (default 4) worker threads, each entering its own
+`create_agent_session` context in `main.py` with a private `OpenAIChatClient`, `KakaoMapProvider`,
+and agent. Never share an agent across workers (`Evaluator` rejects a shared `agent` when
+`max_workers > 1`), and never introduce module-level mutable agent state. Result order is restored
+by index, not completion. `src/logging.py` builds a fresh `logging.Logger` per question for the
+same reason — a shared logger with temporary handlers would cross-write concurrent traces.
 
-## Definition of Done
+`SQLiteMapCache` (`src/tools/cache.py`) is keyed by operation + canonicalized arguments, stores
+normalized `Place`/`Route` payloads only — never raw responses or keys — with a TTL (`0` = never
+expire) and a `SCHEMA_VERSION` that must be bumped when the stored payload shape changes.
 
-`KakaoMapProvider` is implemented and tested.
-MapEval-style ReAct runs against Kakao-backed tools.
-Spatial-Agent runs after replacing Google Maps dependencies.
-Both agents evaluate the same 8-12 sample questions.
-Accuracy, tool calls, API calls, latency, and failures are reported.
-Core tests pass without requiring live Kakao API access.
-The full Korean benchmark dataset remains a separate future task.
+`logs/`, `reports/`, and `data/*.db` are generated and gitignored: per-question traces at
+`logs/<UTC>_id<id>_<slug>.log`, one `reports/test_<UTC>.json` per batch with `metadata` /
+`statistics` / `results`. Primary metric is overall MCQ accuracy; per-classification accuracy, tool
+calls, API calls, cache hits/misses, latency, and failures are reported alongside it.
 
-## Research Integrity
+## Datasets
 
-Do not hardcode answers or special-case individual questions.
-Do not reveal evaluation-only metadata unless the protocol requires it.
-Do not give one agent richer map evidence than the other.
-Keep tool schemas and normalization identical across agents.
-Document any deviation from the reference implementations.
-Optimize for a fair `ReAct vs Spatial-Agent` comparison.
+JSONL, one `BenchmarkItem` per line, unique ids, 2–4 options, `answer` a 0-based index, and
+`classification` from `nearby | poi | routing | trip | type | direction | distance | radius`
+(the same eight values are `SUPPORTED_INTENTS` in `src/agent/spatial.py` — extending the set means
+touching both, plus the intent heuristics and evaluation rules). Extra fields are allowed
+(`verification_status`, etc.). `dataset/sample.jsonl` is an unverified development fixture; treat
+answers as unvalidated until someone confirms them against live Kakao data and sets `verified_at`.
+Building the full Korean research benchmark is a separate task, not something to expand into
+incidentally.
+
+Because this repo runs the prompting-only path (no SFT/DPO, no embedding retrieval, Kakao instead of
+the paper's Google/MapEval-Textual snapshot), reports must be labeled prompting-only and must not be
+presented as reproducing the paper's headline numbers.

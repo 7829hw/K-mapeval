@@ -795,6 +795,123 @@ def test_radius_grounding_builds_candidate_set_graph() -> None:
     assert grounded[-1]["arguments"]["mode"] == "radius_set"
 
 
+def test_radius_literals_are_factors_not_synthetic_output_references() -> None:
+    steps = [
+        {
+            "id": "anchor",
+            "operator": "batch_geocode",
+            "arguments": {"place_names": ["기준"]},
+        },
+        {
+            "id": "constraint",
+            "operator": "identity_measure",
+            "arguments": {"value": 1000},
+            "depends_on": ["anchor"],
+        },
+        {
+            "id": "nearby",
+            "operator": "nearby_places",
+            "arguments": {
+                "center": "$anchor.0.place",
+                "query": "음식점",
+                "radius_m": "$constraint.0",
+            },
+            "depends_on": ["anchor", "constraint"],
+        },
+        {
+            "id": "match",
+            "operator": "match_options",
+            "arguments": {"options": ["wrong"], "places": "$nearby"},
+            "depends_on": ["nearby"],
+        },
+    ]
+    grounded = _ground_graph_literals(
+        steps,
+        "기준점 반경 500m 안에 있는 카페 목록은 무엇인가요?",
+        ["A | B", "A | B | C"],
+        "radius",
+    )
+
+    assert grounded[0]["arguments"]["place_names"] == ["기준점"]
+    assert grounded[2]["arguments"]["category_code"] == "CE7"
+    assert grounded[2]["arguments"]["radius_m"] == 500
+    assert grounded[3]["arguments"]["mode"] == "radius_set"
+    assert grounded[3]["arguments"]["options"] == ["A | B", "A | B | C"]
+
+
+def test_factorization_keeps_radius_and_category_as_operator_factors() -> None:
+    analysis = normalize_analysis(
+        {
+            "intent": "radius",
+            "concepts": [
+                {
+                    "id": "anchor",
+                    "text": "기준점",
+                    "concept_type": "location",
+                    "role": "extent",
+                    "depends_on": [],
+                },
+                {
+                    "id": "radius",
+                    "text": "500m",
+                    "concept_type": "amount",
+                    "role": "condition",
+                    "depends_on": ["anchor"],
+                },
+                {
+                    "id": "target",
+                    "text": "카페",
+                    "concept_type": "object",
+                    "role": "condition",
+                    "depends_on": ["anchor"],
+                },
+                {
+                    "id": "answer",
+                    "text": "목록",
+                    "concept_type": "object",
+                    "role": "measure",
+                    "depends_on": ["target"],
+                },
+            ],
+        },
+        "기준점 반경 500m 안에 있는 카페 목록은 무엇인가요?",
+        "radius",
+    )
+    factorized = factorize_geoflow(
+        analysis,
+        {
+            "graph": [
+                {
+                    "id": "anchor",
+                    "operator": "batch_geocode",
+                    "arguments": {"place_names": ["기준점"]},
+                    "concept_ids": ["anchor"],
+                },
+                {
+                    "id": "nearby",
+                    "operator": "nearby_places",
+                    "arguments": {
+                        "center": "$anchor.0.place",
+                        "category_code": "CE7",
+                        "radius_m": 500,
+                    },
+                },
+                {
+                    "id": "match",
+                    "operator": "match_options",
+                    "arguments": {"options": ["A"], "places": "$nearby"},
+                },
+            ]
+        },
+    )
+    ordered, constraints = normalize_and_validate_graph(factorized.as_dict(), max_steps=8)
+    nearby = next(step for step in ordered if step["id"] == "nearby")
+
+    assert {"radius", "target"} <= set(nearby["input_concepts"])
+    assert not ({"radius", "target"} & set(nearby["concept_ids"]))
+    assert constraints["concept_factorization"]
+
+
 def test_match_options_recovers_minor_historical_name_changes() -> None:
     anchor = FakeProvider().place.model_dump()
     places = [

@@ -676,6 +676,14 @@ def _category_compatibility(query: str, place: Place) -> int:
     query_key = _search_key(query)
     category_key = _search_key(place.category or "")
     name_key = _search_key(place.name)
+    convenience_brands = ("cu", "gs25", "세븐일레븐", "이마트24", "미니스톱")
+    requested_brand = next((brand for brand in convenience_brands if brand in query_key), None)
+    if requested_brand:
+        if requested_brand in name_key:
+            return 5
+        if "편의점" in category_key:
+            return 2
+        return -4
     if any(term in query_key for term in ("은행", "새마을금고", "농협")):
         if "atm" in category_key or "365" in name_key:
             return -3
@@ -722,18 +730,29 @@ def _query_variants(query: str) -> list[str]:
         variants.extend([outer, inner])
     punctuation_free = re.sub(r"[.·,_/-]+", " ", without_company)
     variants.append(" ".join(punctuation_free.split()))
+    words = without_company.split()
+    deferred_branch_variants: list[str] = []
+    if len(words) > 1:
+        branch_token = words[-1]
+        if branch_token.endswith("점") and len(branch_token) > 1:
+            branch_stem = branch_token[:-1]
+            descriptor_variant_added = False
+            for descriptor in ("센트럴", "사거리", "로데오", "프라자", "타워"):
+                if branch_stem.endswith(descriptor) and len(branch_stem) > len(descriptor):
+                    variants.append(f"{' '.join(words[:-1])} {branch_stem}")
+                    local_name = branch_stem[: -len(descriptor)]
+                    variants.append(f"{' '.join(words[:-1])} {local_name}")
+                    descriptor_variant_added = True
+                    break
+            if not descriptor_variant_added:
+                deferred_branch_variants.append(f"{' '.join(words[:-1])} {branch_stem}")
+            deferred_branch_variants.append(branch_stem)
     # Historical benchmark names may outlive a branch rename. Broader brand forms are only
-    # attempted after the exact name misses, so live exact matches keep priority.
+    # attempted after specific shortened branch forms, so they cannot mask a local match.
     branchless = re.sub(r"\s+\S{1,20}(?:본점|지점|점)$", "", without_company).strip()
     if branchless and branchless != without_company:
         variants.append(branchless)
-    words = without_company.split()
-    if len(words) > 1:
-        variants.append(" ".join(words[:-1]))
-        branch_token = words[-1]
-        if branch_token.endswith("점") and len(branch_token) > 1:
-            variants.append(f"{' '.join(words[:-1])} {branch_token[:-1]}")
-            variants.append(branch_token[:-1])
+    variants.extend(deferred_branch_variants)
     facility_suffixes = {
         "문고": "도서관",
         "도서관": "문고",

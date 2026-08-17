@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 CORE_CONCEPTS = frozenset(
@@ -62,12 +62,14 @@ class OperatorHyperedge:
     operator_id: str
     input_concepts: tuple[str, ...]
     output_bindings: tuple[dict[str, str], ...]
+    parameters: dict[str, Any]
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "operator_id": self.operator_id,
             "input_concepts": list(self.input_concepts),
             "output_bindings": list(self.output_bindings),
+            "parameters": self.parameters,
         }
 
 
@@ -641,9 +643,10 @@ def build_concept_graph(analysis: dict[str, Any]) -> ConceptGraph:
 def factorize_geoflow(analysis: dict[str, Any], payload: dict[str, Any]) -> FactorizedGeoFlow:
     """Map concept graph G to an executable operator-concept hypergraph G'.
 
-    Each operator hyperedge records all input concepts and one or more output bindings. Literal
-    source operators are explicitly bound to EXTENT/TEXTENT concepts instead of being implicit
-    roots, and every original analysis concept remains bound to at least one operator output.
+    Each operator hyperedge records input concepts, literal factor parameters, and one or more
+    output bindings.  Analysis concepts that supply a radius, direction, category, or other
+    literal argument are factor inputs; they must not be fabricated as operator outputs merely
+    to satisfy connectivity.
     """
 
     raw_steps = payload.get("graph") if payload.get("graph") is not None else payload.get("steps")
@@ -681,6 +684,40 @@ def factorize_geoflow(analysis: dict[str, Any], payload: dict[str, Any]) -> Fact
     for node in concept_graph.nodes:
         role_buckets[node.role].append(node.id)
 
+    roles: dict[str, str] = {}
+    for index, raw in enumerate(raw_steps):
+        if not isinstance(raw, dict):
+            continue
+        step_id = step_ids[index]
+        roles[step_id] = _factorized_role(
+            step_id,
+            str(raw.get("operator") or ""),
+            str(raw.get("role") or ""),
+            source_ids,
+            sink_ids,
+        )
+    # LLM-authored labels are advisory. A procedural child cannot run at an earlier role than
+    # its parent, so raise the child role to the strongest role required by real dependencies.
+    for _ in step_ids:
+        changed = False
+        for step_id in step_ids:
+            if step_id in source_ids or step_id in sink_ids:
+                continue
+            required = max(
+                (
+                    ROLE_PRIORITY[roles[parent]]
+                    for parent in dependency_map.get(step_id, [])
+                    if roles[parent] in ROLE_PRIORITY
+                ),
+                default=-1,
+            )
+            current = ROLE_PRIORITY.get(roles[step_id], -1)
+            if required > current:
+                roles[step_id] = _role_for_priority(required)
+                changed = True
+        if not changed:
+            break
+
     graph: list[dict[str, Any]] = []
     bound_concepts: set[str] = set()
     step_concepts: dict[str, list[str]] = {}
@@ -692,19 +729,17 @@ def factorize_geoflow(analysis: dict[str, Any], payload: dict[str, Any]) -> Fact
         step["id"] = step_id
         step["depends_on"] = dependency_map.get(step_id, [])
         operator = str(step.get("operator") or "")
-        role = _factorized_role(
-            step_id,
-            operator,
-            str(step.get("role") or ""),
-            source_ids,
-            sink_ids,
-        )
+        role = roles[step_id]
         step["role"] = role
         explicit_ids = step.get("concept_ids") or []
-        concept_ids = [str(value) for value in explicit_ids if str(value) in concepts]
+        concept_ids = [
+            str(value)
+            for value in explicit_ids
+            if str(value) in concepts and str(value) not in bound_concepts
+        ]
         if not concept_ids:
             available = [value for value in role_buckets[role] if value not in bound_concepts]
-            concept_ids = available or list(role_buckets[role][:1])
+            concept_ids = available
         if source_ids and step_id in source_ids and not concept_ids:
             concept_ids = extent_concepts[:1]
         if sink_ids and step_id in sink_ids and not concept_ids:
@@ -725,6 +760,9 @@ def factorize_geoflow(analysis: dict[str, Any], payload: dict[str, Any]) -> Fact
             role_buckets[role].append(derived_id)
             concept_ids = [derived_id]
         step["concept_ids"] = list(dict.fromkeys(concept_ids))
+        for concept_id in step["concept_ids"]:
+            if concepts[concept_id].role != role:
+                concepts[concept_id] = replace(concepts[concept_id], role=role)
         step_concepts[step_id] = step["concept_ids"]
         bound_concepts.update(step["concept_ids"])
         graph.append(step)
@@ -755,49 +793,184 @@ def factorize_geoflow(analysis: dict[str, Any], payload: dict[str, Any]) -> Fact
         step_concepts[measure_step_id] = [measure_id]
         bound_concepts.add(measure_id)
 
-    for concept_id, concept in concepts.items():
+    # A measure is an operator output, never a supplementary factor. Explicit LLM bindings can
+    # occasionally omit it, so bind any remaining measure to the final sink.
+    remaining_measures = [
+        concept_id
+        for concept_id, concept in concepts.items()
+        if concept_id not in bound_concepts and concept.role == "measure"
+    ]
+    if remaining_measures:
+        sink = next(step for step in reversed(graph) if step["role"] == "measure")
+        sink["concept_ids"].extend(remaining_measures)
+        step_concepts[sink["id"]].extend(remaining_measures)
+        bound_concepts.update(remaining_measures)
+
+    analysis_dependencies = {
+        str(concept.get("id")): [str(value) for value in concept.get("depends_on") or []]
+        for concept in analysis.get("concepts", [])
+        if isinstance(concept, dict) and concept.get("id")
+    }
+    factor_inputs: dict[str, list[str]] = {step["id"]: [] for step in graph}
+    for concept_id, concept in list(concepts.items()):
         if concept_id in bound_concepts:
             continue
-        candidates = [step for step in graph if step["role"] == concept.role]
-        if not candidates:
-            candidates = graph[-1:] if concept.role == "measure" else graph[:1]
-        candidates[0]["concept_ids"].append(concept_id)
-        step_concepts[candidates[0]["id"]].append(concept_id)
-        bound_concepts.add(concept_id)
+        consumer = _select_factor_step(concept, graph, analysis_dependencies.get(concept_id, []))
+        factor_inputs[consumer["id"]].append(concept_id)
+        consumer_role = consumer["role"]
+        if (
+            concept.role in ROLE_PRIORITY
+            and consumer_role in ROLE_PRIORITY
+            and ROLE_PRIORITY[concept.role] > ROLE_PRIORITY[consumer_role]
+        ):
+            concepts[concept_id] = replace(concept, role=consumer_role)
 
     hyperedges: list[OperatorHyperedge] = []
     concept_edges: list[tuple[str, str]] = []
+    # Keep only explicit semantic dependencies that agree with normalized functional roles.
+    for source, target in concept_graph.edges:
+        if source == target:
+            continue
+        if not _violates_procedural_order(concepts[source].role, concepts[target].role):
+            concept_edges.append((source, target))
     for step in graph:
         input_concepts = list(
             dict.fromkeys(
-                concept_id
-                for dependency in step["depends_on"]
-                for concept_id in step_concepts.get(dependency, [])
+                [
+                    concept_id
+                    for dependency in step["depends_on"]
+                    for concept_id in step_concepts.get(dependency, [])
+                ]
+                + factor_inputs[step["id"]]
             )
         )
         bindings = step.get("output_bindings")
-        if not isinstance(bindings, list) or not bindings:
-            bindings = [
-                {"concept_id": concept_id, "path": "$"}
-                for concept_id in step["concept_ids"]
-            ]
+        valid_bindings = {
+            str(binding.get("concept_id")): dict(binding)
+            for binding in bindings or []
+            if isinstance(binding, dict)
+            and str(binding.get("concept_id")) in step["concept_ids"]
+        }
+        bindings = [
+            valid_bindings.get(concept_id, {"concept_id": concept_id, "path": "$"})
+            for concept_id in step["concept_ids"]
+        ]
         step["input_concepts"] = input_concepts
         step["output_bindings"] = bindings
+        step["factor_parameters"] = _literal_arguments(step.get("arguments") or {})
         hyperedges.append(
             OperatorHyperedge(
                 operator_id=step["id"],
                 input_concepts=tuple(input_concepts),
                 output_bindings=tuple(dict(binding) for binding in bindings),
+                parameters=step["factor_parameters"],
             )
         )
         for source in input_concepts:
-            concept_edges.extend((source, target) for target in step["concept_ids"])
+            concept_edges.extend(
+                (source, target) for target in step["concept_ids"] if source != target
+            )
+
+    # A factor without an explicit analysis dependency is still contextualized by the query's
+    # EXTENT. Add a single, local anchoring edge rather than the old role-adjacency complete
+    # bipartite fallback.
+    contextual = [
+        concept_id
+        for concept_id, concept in concepts.items()
+        if concept.role in CONTEXTUAL_ROLES
+    ]
+    incoming = {concept_id: set() for concept_id in concepts}
+    for source, target in concept_edges:
+        incoming[target].add(source)
+    if contextual:
+        anchor = contextual[0]
+        for concept_id, concept in concepts.items():
+            if concept.role not in CONTEXTUAL_ROLES and not incoming[concept_id]:
+                concept_edges.append((anchor, concept_id))
 
     complete_graph = ConceptGraph(
         nodes=tuple(concepts.values()),
         edges=tuple(dict.fromkeys(concept_edges)),
     )
     return FactorizedGeoFlow(complete_graph, tuple(graph), tuple(hyperedges))
+
+
+def _role_for_priority(priority: int) -> str:
+    return next(role for role, value in ROLE_PRIORITY.items() if value == priority)
+
+
+def _select_factor_step(
+    concept: ConceptNode,
+    graph: list[dict[str, Any]],
+    dependencies: list[str],
+) -> dict[str, Any]:
+    """Select the operator that consumes an unmaterialized concept as a factor."""
+
+    normalized_text = re.sub(r"\s+", "", concept.text).lower()
+    direction_words = {"동쪽", "서쪽", "남쪽", "북쪽", "북동", "북서", "남동", "남서"}
+    category_codes = {
+        "카페": "ce7",
+        "편의점": "cs2",
+        "음식점": "fd6",
+        "병원": "hp8",
+        "약국": "pm9",
+        "주유소": "ol7",
+        "은행": "bk9",
+    }
+
+    def score(step: dict[str, Any]) -> tuple[int, int]:
+        arguments = step.get("arguments") or step.get("params") or {}
+        rendered = re.sub(r"\s+", "", repr(arguments)).lower()
+        operator = str(step.get("operator") or "")
+        value = 0
+        if normalized_text and normalized_text in rendered:
+            value += 20
+        if concept.concept_type == "amount" and any(
+            key in arguments for key in ("radius_m", "distance", "limit", "threshold")
+        ):
+            value += 10
+        if any(word in normalized_text for word in direction_words) and operator in {
+            "bearing_to_direction",
+            "filter_by_direction",
+        }:
+            value += 12
+        expected_code = next(
+            (code for word, code in category_codes.items() if word in normalized_text), None
+        )
+        if expected_code and str(arguments.get("category_code") or "").lower() == expected_code:
+            value += 15
+        if concept.concept_type in {"location", "object"} and operator in {
+            "place_search",
+            "nearby_places",
+            "filter_places",
+            "batch_geocode",
+            "batch_place_details",
+        }:
+            value += 4
+        if dependencies and step.get("depends_on"):
+            value += 2
+        if step["role"] == "measure":
+            value += 1
+        return value, -graph.index(step)
+
+    return max(graph, key=score)
+
+
+def _literal_arguments(value: Any) -> Any:
+    """Return supplementary literal parameters, excluding operator-state references."""
+
+    if isinstance(value, dict):
+        return {
+            key: literal
+            for key, item in value.items()
+            if (literal := _literal_arguments(item)) is not None
+        }
+    if isinstance(value, list):
+        literals = [literal for item in value if (literal := _literal_arguments(item)) is not None]
+        return literals or None
+    if isinstance(value, str) and canonical_reference(value).startswith("$"):
+        return None
+    return value
 
 
 def _complete_analysis_roles(
@@ -1039,7 +1212,11 @@ def normalize_and_validate_graph(
             for node in concept_nodes
             if isinstance(node, dict) and node.get("id")
         }
-        bound_ids = {concept_id for step in steps for concept_id in step["concept_ids"]}
+        bound_ids = {
+            concept_id
+            for step in steps
+            for concept_id in [*step["concept_ids"], *step["input_concepts"]]
+        }
         missing_bindings = concept_ids - bound_ids
         if missing_bindings:
             raise ValueError(

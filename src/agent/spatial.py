@@ -517,18 +517,49 @@ def _resolve_references(value: Any, results: dict[str, Any]) -> Any:
 def _ground_graph_literals(
     steps: list[dict[str, Any]], question: str, options: list[str], intent: str
 ) -> list[dict[str, Any]]:
-    """Restore verbatim benchmark entities when an LLM shortens names during binding."""
+    """Bind verbatim question literals after drafting, before graph validation.
+
+    GeoFlow factors such as a radius and requested direction are constants from the question,
+    not values that an LLM should invent or route through a synthetic operator output.
+    """
 
     anchor = _extract_anchor(question, intent)
+    target = (
+        _extract_target_type(question, intent)
+        if intent in {"nearby", "direction", "radius"}
+        else None
+    )
+    radius_m = _extract_radius_m(question) if intent == "radius" else None
     for step in steps:
-        if step["operator"] != "batch_geocode":
+        operator = step.get("operator")
+        arguments = dict(step.get("arguments") or step.get("params") or {})
+        if operator == "nearby_places" and target:
+            specification = _nearby_retrieval_specs(target)[0]
+            arguments.pop("query", None)
+            arguments.pop("category_code", None)
+            arguments.update(specification)
+            if radius_m is not None:
+                arguments["radius_m"] = radius_m
+            step["arguments"] = arguments
             continue
-        arguments = dict(step["arguments"])
+        if operator == "filter_by_direction" and intent == "direction":
+            direction = _extract_requested_direction(question)
+            if direction:
+                arguments["direction"] = direction
+            step["arguments"] = arguments
+            continue
+        if operator == "match_options":
+            arguments["options"] = options
+            arguments["mode"] = "radius_set" if intent == "radius" else "nearest"
+            step["arguments"] = arguments
+            continue
+        if operator != "batch_geocode":
+            continue
         names = list(arguments.get("place_names") or [])
-        if anchor and names and _is_shortened_name(names[0], anchor):
+        if anchor and names and names[0] != anchor:
             names[0] = anchor
-            if _is_shortened_name(str(arguments.get("anchor") or ""), anchor):
-                arguments["anchor"] = anchor
+        if anchor:
+            arguments["anchor"] = anchor
         if (
             intent in {"nearby", "direction", "routing"}
             and len(names) == len(options) + 1

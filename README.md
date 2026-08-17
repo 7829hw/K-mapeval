@@ -28,8 +28,10 @@ K-MapEval/
 
 Spatial-Agent는 `공간 개념/기능 역할 분석 → 매크로 검색 → ConceptGraph 구성 →
 operator-concept hypergraph factorization → 5개 제약 검증 → 위상순 실행 → 근거 기반 선택`
-순서로 동작합니다. Analysis concept ID는 실행 operator output에 명시적으로 바인딩됩니다.
+순서로 동작합니다. 실행 결과 개념은 operator output에, 반경·방향·카테고리 같은 보조
+상수 개념은 논문의 factor node에 해당하는 hyperedge parameter/input에 바인딩됩니다.
 G5는 모든 노드에 대해 `EXTENT/TEXTENT → node → MEASURE` 양쪽 도달성을 검사합니다.
+LLM이 부여한 절차 역할은 실제 데이터 의존 순서를 위반하지 않도록 정규화합니다.
 그래프가 잘못되면 한 번 수리한 뒤 다시 factorization·검증합니다. Routing/Trip은
 `distance_matrix`, `aggregate_route_groups`를 사용해
 선택지별 경로와 다중 구간 합계를 보존하므로 단계 상한 때문에 계획 뒷부분이 잘리지

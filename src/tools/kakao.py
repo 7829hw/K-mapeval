@@ -208,14 +208,15 @@ class KakaoMapProvider(MapProvider):
                 "Use an official category group code or provide query instead."
             )
         center_place = self._resolve_place(center)
-        size = _size(limit)
+        requested_limit = _nearby_limit(limit)
+        page_size = min(requested_limit, 15)
         normalized_radius = max(1, min(radius_m, 20000))
         params: dict[str, Any] = {
             "x": center_place.longitude,
             "y": center_place.latitude,
             "radius": normalized_radius,
             "sort": "distance",
-            "size": size,
+            "size": page_size,
         }
         if normalized_query:
             path = "/search/keyword.json"
@@ -232,7 +233,7 @@ class KakaoMapProvider(MapProvider):
             "query": _normalized_text(normalized_query) if normalized_query else None,
             "category_code": normalized_category,
             "radius_m": normalized_radius,
-            "limit": size,
+            "limit": requested_limit,
         }
         if normalized_query and normalized_category:
             # Invalidates entries created by the old implementation, which ignored query
@@ -243,8 +244,23 @@ class KakaoMapProvider(MapProvider):
             self._record_cache_hit(cached)
             return cached
         self._cache_miss_count += 1
-        data = self._get_local(path, params)
-        places = self._normalize_places(data, size)
+        places: list[Place] = []
+        seen_place_ids: set[str] = set()
+        page = 1
+        while len(places) < requested_limit:
+            page_params = {**params, "page": page}
+            data = self._get_local(path, page_params)
+            page_places = self._normalize_places(data, page_size)
+            for place in page_places:
+                if place.place_id not in seen_place_ids:
+                    places.append(place)
+                    seen_place_ids.add(place.place_id)
+                if len(places) >= requested_limit:
+                    break
+            metadata = data.get("meta") or {}
+            if bool(metadata.get("is_end")) or len(page_places) < page_size or page >= 45:
+                break
+            page += 1
         self._cache.set_places("nearby_search", cache_args, places)
         return places
 
@@ -368,6 +384,12 @@ class KakaoMapProvider(MapProvider):
 
 def _size(limit: int) -> int:
     return max(1, min(limit, 15))
+
+
+def _nearby_limit(limit: int) -> int:
+    # Kakao Local accepts at most 15 results per page. GeoFlow retrieval keeps up to
+    # three ranked pages so option evidence is not discarded after the first page.
+    return max(1, min(limit, 45))
 
 
 def _normalized_text(value: str) -> str:

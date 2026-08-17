@@ -26,14 +26,16 @@ K-MapEval/
 
 두 에이전트 모두 `Place`와 `Route` 정규화 스키마만 봅니다. 정답, classification, region, difficulty, verified_at은 에이전트 입력에 포함되지 않습니다.
 
-Spatial-Agent는 논문의 prompting 경로를 따라 `공간 개념/기능 역할 분석 → 검증된
-매크로 템플릿 검색 → GeoFlow DAG 구성/도구 매핑 → 5개 제약 검증 → 위상순 실행 →
-근거 기반 선택` 순서로 동작합니다. 그래프는 acyclicity, role ordering, type compatibility,
-data availability, connectivity를 모두 통과해야 실행되며, 잘못된 그래프는 한 번 수리한 뒤
-다시 검증합니다. Routing/Trip은 `distance_matrix`, `aggregate_route_groups`를 사용해
+Spatial-Agent는 `공간 개념/기능 역할 분석 → 매크로 검색 → ConceptGraph 구성 →
+operator-concept hypergraph factorization → 5개 제약 검증 → 위상순 실행 → 근거 기반 선택`
+순서로 동작합니다. Analysis concept ID는 실행 operator output에 명시적으로 바인딩됩니다.
+G5는 모든 노드에 대해 `EXTENT/TEXTENT → node → MEASURE` 양쪽 도달성을 검사합니다.
+그래프가 잘못되면 한 번 수리한 뒤 다시 factorization·검증합니다. Routing/Trip은
+`distance_matrix`, `aggregate_route_groups`를 사용해
 선택지별 경로와 다중 구간 합계를 보존하므로 단계 상한 때문에 계획 뒷부분이 잘리지
-않습니다. 논문의 SFT+DPO는 선택적 학습 단계이므로 이 저장소는 별도 학습 가중치 없이
-off-the-shelf LLM prompting 구성을 사용합니다.
+않습니다. EVENT/NETWORK/PROPORTION 및 시간/TSP-TW 연산도 실행 계층에 포함되지만 현재
+100문항 MCQ가 모두 이를 직접 평가하지는 않습니다. 논문의 SFT+DPO와 임베딩 검색은
+구현하지 않았으며, Kakao 데이터로 평가하므로 논문 수치 재현을 주장하지 않습니다.
 
 ## SQLite 캐시
 

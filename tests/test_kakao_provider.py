@@ -121,6 +121,36 @@ def test_nearby_query_with_category_uses_keyword_filter() -> None:
     assert request.url.params["sort"] == "distance"
 
 
+def test_nearby_retains_ranked_results_across_kakao_pages() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        page = int(request.url.params["page"])
+        start = (page - 1) * 15
+        documents = [
+            _document(str(index), f"장소-{index}", 126.97, 37.55)
+            for index in range(start, min(start + 15, 32))
+        ]
+        return httpx.Response(
+            200,
+            json={"documents": documents, "meta": {"is_end": page == 3}},
+        )
+
+    center = KakaoMapProvider.normalize_place(_document("center", "서울역", 126.97, 37.55))
+    provider = KakaoMapProvider(
+        "test-key",
+        cache_path=":memory:",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    places = provider.nearby_search(center, query="서점", limit=45)
+
+    assert len(places) == 32
+    assert [request.url.params["page"] for request in requests] == ["1", "2", "3"]
+    assert provider.api_call_count == 3
+
+
 def test_nearby_rejects_non_kakao_category_without_calling_api() -> None:
     def fail_if_called(_: httpx.Request) -> httpx.Response:
         raise AssertionError("An invalid category code must not reach Kakao")

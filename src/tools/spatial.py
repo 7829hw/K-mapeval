@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import math
+import re
+from datetime import datetime, timedelta
+from difflib import SequenceMatcher
+from itertools import permutations
 from typing import Any
+from zoneinfo import ZoneInfo
 
 
 class SpatialOperatorRegistry:
     """Deterministic operators; these never spend Kakao API calls."""
 
     names = (
+        "identity_measure",
         "haversine_distance",
         "pairwise_distances",
         "bearing_to_direction",
@@ -20,6 +26,18 @@ class SpatialOperatorRegistry:
         "compare_routes",
         "sum_route_metrics",
         "aggregate_route_groups",
+        "merge_places",
+        "match_options",
+        "match_distance_options",
+        "match_type_options",
+        "events_from_objects",
+        "filter_events",
+        "build_route_network",
+        "calculate_proportion",
+        "open_at_time",
+        "timezone_convert",
+        "calculate_finish_time",
+        "tsp_tw",
     )
 
     def invoke(self, name: str, arguments: dict[str, Any]) -> Any:
@@ -27,6 +45,10 @@ class SpatialOperatorRegistry:
         if name not in self.names or method is None:
             raise ValueError(f"Unknown spatial operator: {name}")
         return method(**_normalize_arguments(name, arguments))
+
+    @staticmethod
+    def identity_measure(value: Any) -> Any:
+        return value
 
     @staticmethod
     def haversine_distance(place_a: dict[str, Any], place_b: dict[str, Any]) -> dict[str, float]:
@@ -78,14 +100,19 @@ class SpatialOperatorRegistry:
     def pairwise_distances(cls, pairs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         for index, pair in enumerate(pairs):
-            distance = cls.haversine_distance(pair["place_a"], pair["place_b"])
-            results.append(
-                {
-                    "pair_index": index,
-                    "label": pair.get("label"),
-                    **distance,
-                }
-            )
+            place_a, place_b = pair.get("place_a"), pair.get("place_b")
+            if not isinstance(place_a, dict) or not isinstance(place_b, dict):
+                results.append(
+                    {
+                        "pair_index": index,
+                        "label": pair.get("label"),
+                        "status": "error",
+                        "error": "PlaceNotFoundError: unresolved distance endpoint",
+                    }
+                )
+                continue
+            distance = cls.haversine_distance(place_a, place_b)
+            results.append({"pair_index": index, "label": pair.get("label"), **distance})
         return results
 
     @classmethod
@@ -99,12 +126,14 @@ class SpatialOperatorRegistry:
 
         expected = _cardinal_direction(direction)
         matches: list[dict[str, Any]] = []
-        for place in places:
+        for candidate_index, place in enumerate(places):
+            if not isinstance(place, dict):
+                continue
             bearing = cls.bearing_to_direction(center, place)
             if bearing["cardinal_direction"] != expected:
                 continue
             distance = cls.haversine_distance(center, place)
-            matches.append({**place, **bearing, **distance})
+            matches.append({"candidate_index": candidate_index, **place, **bearing, **distance})
         return sorted(matches, key=lambda place: float(place["distance_m"]))
 
     @classmethod
@@ -119,6 +148,7 @@ class SpatialOperatorRegistry:
         ranked = [
             {"candidate_index": index, **candidate, **cls.haversine_distance(anchor, candidate)}
             for index, candidate in enumerate(candidates)
+            if isinstance(candidate, dict)
         ]
         ranked.sort(key=lambda candidate: float(candidate["distance_m"]))
         return {"nearest": ranked[0] if ranked else None, "ranked": ranked}
@@ -133,6 +163,7 @@ class SpatialOperatorRegistry:
         matches = [
             {"candidate_index": index, **candidate, **cls.haversine_distance(center, candidate)}
             for index, candidate in enumerate(candidates)
+            if isinstance(candidate, dict)
         ]
         return sorted(
             (candidate for candidate in matches if candidate["distance_m"] <= float(radius_m)),
@@ -210,6 +241,290 @@ class SpatialOperatorRegistry:
             "best_distance_option": best_distance,
             "best_duration_option": best_duration,
         }
+
+    @staticmethod
+    def merge_places(items: list[Any]) -> list[dict[str, Any]]:
+        """Merge retrieval branches without losing their normalized place identity."""
+
+        merged: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for branch in items:
+            values = branch if isinstance(branch, list) else [branch]
+            for value in values:
+                if not isinstance(value, dict):
+                    continue
+                key = str(value.get("place_id") or (_name_key(str(value.get("name", "")))))
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                merged.append(value)
+        return merged
+
+    @classmethod
+    def match_options(
+        cls,
+        options: list[str],
+        places: list[dict[str, Any]],
+        anchor: dict[str, Any] | None = None,
+        mode: str = "nearest",
+        minimum_similarity: float = 0.68,
+    ) -> dict[str, Any]:
+        """Ground answer options against retrieved POIs using name and spatial evidence."""
+
+        ranked: list[dict[str, Any]] = []
+        for original_rank, place in enumerate(places):
+            if not isinstance(place, dict):
+                continue
+            item = {**place, "retrieval_rank": original_rank}
+            if anchor and {"latitude", "longitude"} <= anchor.keys():
+                item.update(cls.haversine_distance(anchor, place))
+            ranked.append(item)
+        if anchor:
+            ranked.sort(key=lambda item: float(item.get("distance_m", float("inf"))))
+        for rank, item in enumerate(ranked):
+            item["rank"] = rank
+
+        if mode == "radius_set":
+            return _match_option_sets(options, ranked, minimum_similarity)
+
+        option_matches: list[dict[str, Any]] = []
+        for option_index, option in enumerate(options):
+            scored = [
+                (_name_similarity(option, str(place.get("name", ""))), place)
+                for place in ranked
+            ]
+            similarity, matched = max(scored, key=lambda entry: entry[0], default=(0.0, None))
+            option_matches.append(
+                {
+                    "option_index": option_index,
+                    "option": option,
+                    "similarity": similarity,
+                    "matched": matched if similarity >= minimum_similarity else None,
+                    "rank": (
+                        matched.get("rank")
+                        if matched and similarity >= minimum_similarity
+                        else None
+                    ),
+                    "distance_m": (
+                        matched.get("distance_m")
+                        if matched and similarity >= minimum_similarity
+                        else None
+                    ),
+                }
+            )
+        supported = [match for match in option_matches if match["matched"] is not None]
+        supported.sort(
+            key=lambda match: (
+                int(match["rank"]),
+                -float(match["similarity"]),
+                int(match["option_index"]),
+            )
+        )
+        best = supported[0] if supported else None
+        return {
+            "mode": mode,
+            "retrieved_places": ranked,
+            "option_matches": option_matches,
+            "best_option": best["option_index"] if best else None,
+            "confidence": _match_confidence(best, supported[1] if len(supported) > 1 else None),
+        }
+
+    @staticmethod
+    def match_distance_options(
+        distance: dict[str, Any] | float,
+        options: list[str],
+    ) -> dict[str, Any]:
+        distance_m = float(
+            distance.get("distance_m", 0.0) if isinstance(distance, dict) else distance
+        )
+        comparisons: list[dict[str, Any]] = []
+        for option_index, option in enumerate(options):
+            match = re.search(r"([\d,.]+)\s*(km|m)?", option, re.IGNORECASE)
+            if not match:
+                continue
+            value = float(match.group(1).replace(",", ""))
+            option_m = value * 1000 if (match.group(2) or "m").lower() == "km" else value
+            comparisons.append(
+                {
+                    "option_index": option_index,
+                    "option": option,
+                    "value_m": option_m,
+                    "absolute_error_m": abs(option_m - distance_m),
+                }
+            )
+        comparisons.sort(key=lambda item: (item["absolute_error_m"], item["option_index"]))
+        best = comparisons[0] if comparisons else None
+        return {
+            "computed_distance_m": distance_m,
+            "comparisons": comparisons,
+            "best_option": best["option_index"] if best else None,
+            "confidence": 1.0 if best and best["absolute_error_m"] <= 1 else 0.9 if best else 0.0,
+        }
+
+    @staticmethod
+    def match_type_options(place: dict[str, Any], options: list[str]) -> dict[str, Any]:
+        category = str(place.get("category") or "")
+        name = str(place.get("name") or "")
+        scored = [
+            {
+                "option_index": index,
+                "option": option,
+                "similarity": max(
+                    _name_similarity(option, category),
+                    _name_similarity(option, name),
+                    1.0 if _name_key(option) in _name_key(category) else 0.0,
+                ),
+            }
+            for index, option in enumerate(options)
+        ]
+        scored.sort(key=lambda item: (-float(item["similarity"]), int(item["option_index"])))
+        best = scored[0] if scored and scored[0]["similarity"] >= 0.68 else None
+        return {
+            "place": place,
+            "category": category,
+            "option_matches": scored,
+            "best_option": best["option_index"] if best else None,
+            "confidence": best["similarity"] if best else 0.0,
+        }
+
+    @staticmethod
+    def events_from_objects(
+        objects: list[dict[str, Any]],
+        event_type: str = "observation",
+        timestamp_field: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "event_id": f"event_{index}",
+                "event_type": event_type,
+                "object": item,
+                "timestamp": item.get(timestamp_field) if timestamp_field else None,
+            }
+            for index, item in enumerate(objects)
+            if isinstance(item, dict)
+        ]
+
+    @staticmethod
+    def filter_events(
+        events: list[dict[str, Any]], field: str, operator: str, value: Any
+    ) -> list[dict[str, Any]]:
+        comparators = {
+            "eq": lambda left: left == value,
+            "ne": lambda left: left != value,
+            "gt": lambda left: left > value,
+            "gte": lambda left: left >= value,
+            "lt": lambda left: left < value,
+            "lte": lambda left: left <= value,
+            "contains": lambda left: value in left,
+        }
+        comparator = comparators.get(operator.lower())
+        if comparator is None:
+            raise ValueError(f"Unsupported event filter operator: {operator}")
+        return [
+            event
+            for event in events
+            if _has_path(event, field) and comparator(_path(event, field))
+        ]
+
+    @staticmethod
+    def build_route_network(
+        nodes: list[dict[str, Any]], edges: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "node_count": len(nodes),
+            "edge_count": len(edges),
+        }
+
+    @staticmethod
+    def calculate_proportion(numerator: Any, denominator: Any) -> dict[str, float]:
+        numerator_value = float(len(numerator) if isinstance(numerator, list) else numerator)
+        denominator_value = float(
+            len(denominator) if isinstance(denominator, list) else denominator
+        )
+        if denominator_value == 0:
+            raise ValueError("Proportion denominator must not be zero")
+        proportion = numerator_value / denominator_value
+        return {"proportion": proportion, "percentage": proportion * 100}
+
+    @staticmethod
+    def open_at_time(
+        schedule: dict[str, Any], local_time: str, timezone: str
+    ) -> dict[str, Any]:
+        moment = _parse_datetime(local_time, timezone)
+        weekday = moment.strftime("%A").lower()
+        interval = schedule.get(weekday) or schedule.get(str(moment.weekday()))
+        if not interval:
+            return {"local_time": moment.isoformat(), "is_open": False, "interval": None}
+        intervals = interval if isinstance(interval, list) else [interval]
+        current = moment.strftime("%H:%M")
+        is_open = any(
+            isinstance(item, dict)
+            and str(item.get("open", "00:00")) <= current < str(item.get("close", "00:00"))
+            for item in intervals
+        )
+        return {"local_time": moment.isoformat(), "is_open": is_open, "interval": interval}
+
+    @staticmethod
+    def timezone_convert(
+        local_time: str, from_timezone: str, to_timezone: str
+    ) -> dict[str, str]:
+        source = _parse_datetime(local_time, from_timezone)
+        target = source.astimezone(ZoneInfo(to_timezone))
+        return {
+            "source_time": source.isoformat(),
+            "converted_time": target.isoformat(),
+            "timezone": to_timezone,
+        }
+
+    @staticmethod
+    def calculate_finish_time(
+        start_time: str, duration_s: float, timezone: str
+    ) -> dict[str, Any]:
+        start = _parse_datetime(start_time, timezone)
+        finish = start + timedelta(seconds=float(duration_s))
+        return {
+            "start_time": start.isoformat(),
+            "duration_s": float(duration_s),
+            "finish_time": finish.isoformat(),
+            "timezone": timezone,
+        }
+
+    @staticmethod
+    def tsp_tw(
+        nodes: list[dict[str, Any]],
+        distance_matrix: list[list[float]] | dict[str, Any],
+        time_windows: list[list[float]] | None = None,
+        start_index: int = 0,
+    ) -> dict[str, Any]:
+        matrix = (
+            distance_matrix.get("matrix")
+            if isinstance(distance_matrix, dict)
+            else distance_matrix
+        )
+        if not isinstance(matrix, list) or len(matrix) != len(nodes):
+            raise ValueError("tsp_tw distance_matrix must be square and match nodes")
+        if len(nodes) > 9:
+            raise ValueError("Deterministic tsp_tw supports at most 9 nodes")
+        visit_indexes = [index for index in range(len(nodes)) if index != start_index]
+        best: dict[str, Any] | None = None
+        for order in permutations(visit_indexes):
+            route = (start_index, *order)
+            elapsed = 0.0
+            feasible = True
+            for position, node_index in enumerate(route):
+                if position:
+                    elapsed += float(matrix[route[position - 1]][node_index])
+                if time_windows:
+                    earliest, latest = map(float, time_windows[node_index])
+                    elapsed = max(elapsed, earliest)
+                    if elapsed > latest:
+                        feasible = False
+                        break
+            if feasible and (best is None or elapsed < best["total_cost"]):
+                best = {"order": list(route), "total_cost": elapsed, "feasible": True}
+        return best or {"order": [], "total_cost": None, "feasible": False}
 
 
 def _path(value: dict[str, Any], path: str) -> Any:
@@ -298,6 +613,105 @@ def _normalize_arguments(name: str, arguments: dict[str, Any]) -> dict[str, Any]
         }
 
     return args
+
+
+def _name_key(value: str) -> str:
+    value = value.casefold().replace("(주)", "")
+    replacements = {
+        "dunkin donuts": "dunkindonuts",
+        "paris baguette": "parisbaguette",
+        "home plus express": "homeplusexpress",
+    }
+    value = replacements.get(" ".join(value.split()), value)
+    return "".join(character for character in value if character.isalnum())
+
+
+def _parse_datetime(value: str, timezone: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    zone = ZoneInfo(timezone)
+    return parsed.replace(tzinfo=zone) if parsed.tzinfo is None else parsed.astimezone(zone)
+
+
+def _name_similarity(left: str, right: str) -> float:
+    left_key, right_key = _name_key(left), _name_key(right)
+    if not left_key or not right_key:
+        return 0.0
+    if left_key == right_key:
+        return 1.0
+    shorter, longer = sorted((left_key, right_key), key=len)
+    containment = len(shorter) / len(longer) if shorter in longer else 0.0
+    sequence = SequenceMatcher(None, left_key, right_key).ratio()
+    if left_key[0] != right_key[0]:
+        # Shared generic suffixes (for example, 아트센터) must not make unrelated
+        # proper names look like a reliable historical-name match.
+        sequence = min(sequence, 0.64)
+    return max(sequence, min(0.98, 0.78 + 0.2 * containment) if containment else 0.0)
+
+
+def _match_option_sets(
+    options: list[str], places: list[dict[str, Any]], minimum_similarity: float
+) -> dict[str, Any]:
+    members = list(
+        dict.fromkeys(
+            member.strip() for option in options for member in option.split("|") if member.strip()
+        )
+    )
+    member_matches: dict[str, dict[str, Any] | None] = {}
+    for member in members:
+        scored = [
+            (_name_similarity(member, str(place.get("name", ""))), place) for place in places
+        ]
+        similarity, place = max(scored, key=lambda entry: entry[0], default=(0.0, None))
+        member_matches[member] = (
+            {"place": place, "similarity": similarity}
+            if place is not None and similarity >= minimum_similarity
+            else None
+        )
+    present = {member for member, match in member_matches.items() if match is not None}
+    option_scores: list[dict[str, Any]] = []
+    for option_index, option in enumerate(options):
+        option_members = {member.strip() for member in option.split("|") if member.strip()}
+        intersection = len(option_members & present)
+        precision = intersection / len(option_members) if option_members else 0.0
+        recall = intersection / len(present) if present else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+        option_scores.append(
+            {
+                "option_index": option_index,
+                "option": option,
+                "members": sorted(option_members),
+                "matched_members": sorted(option_members & present),
+                "exact_set_match": bool(present) and option_members == present,
+                "f1": f1,
+            }
+        )
+    option_scores.sort(
+        key=lambda item: (
+            -int(item["exact_set_match"]),
+            -float(item["f1"]),
+            item["option_index"],
+        )
+    )
+    best = option_scores[0] if option_scores and present else None
+    return {
+        "mode": "radius_set",
+        "retrieved_places": places,
+        "present_option_members": sorted(present),
+        "member_matches": member_matches,
+        "option_matches": option_scores,
+        "best_option": best["option_index"] if best else None,
+        "confidence": 1.0 if best and best["exact_set_match"] else 0.75 if best else 0.0,
+    }
+
+
+def _match_confidence(best: dict[str, Any] | None, second: dict[str, Any] | None) -> float:
+    if not best:
+        return 0.0
+    similarity = float(best["similarity"])
+    if second and int(second["rank"]) == int(best["rank"]):
+        margin = similarity - float(second["similarity"])
+        return 0.9 if margin >= 0.08 else 0.7
+    return 0.95 if similarity >= 0.9 else 0.8
 
 
 def _cardinal_direction(value: str) -> str:

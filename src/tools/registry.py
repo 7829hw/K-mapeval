@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -29,6 +31,30 @@ KakaoCategoryCode = Literal[
     "HP8",
     "PM9",
 ]
+
+KAKAO_CATEGORY_ALIASES = {
+    "대형마트": "MT1",
+    "편의점": "CS2",
+    "어린이집": "PS3",
+    "유치원": "PS3",
+    "학교": "SC4",
+    "학원": "AC5",
+    "주차장": "PK6",
+    "주유소": "OL7",
+    "충전소": "OL7",
+    "역": "SW8",
+    "지하철역": "SW8",
+    "은행": "BK9",
+    "문화시설": "CT1",
+    "부동산": "AG2",
+    "공공기관": "PO3",
+    "관광명소": "AT4",
+    "숙박": "AD5",
+    "음식점": "FD6",
+    "카페": "CE7",
+    "병원": "HP8",
+    "약국": "PM9",
+}
 
 
 class PlaceSearchArgs(BaseModel):
@@ -71,7 +97,7 @@ class NearbyPlacesArgs(BaseModel):
         ),
     )
     radius_m: int = Field(default=2000, ge=1, le=20000)
-    limit: int = Field(default=15, ge=1, le=15)
+    limit: int = Field(default=45, ge=1, le=45)
 
     @field_validator("radius_m", mode="before")
     @classmethod
@@ -86,12 +112,14 @@ class NearbyPlacesArgs(BaseModel):
     @field_validator("limit", mode="before")
     @classmethod
     def clamp_limit(cls, value: Any) -> int:
-        return _clamp_int(value, minimum=1, maximum=15)
+        return _clamp_int(value, minimum=1, maximum=45)
 
     @model_validator(mode="after")
     def require_search_selector(self) -> NearbyPlacesArgs:
         if not self.query and not self.category_code:
             raise ValueError("nearby search requires query or category_code")
+        if self.query and not self.category_code:
+            self.category_code = KAKAO_CATEGORY_ALIASES.get("".join(self.query.split()))
         return self
 
 
@@ -121,6 +149,19 @@ class BatchGeocodeArgs(BaseModel):
     @classmethod
     def clamp_limit(cls, value: Any) -> int:
         return _clamp_int(value, minimum=1, maximum=15)
+
+    @field_validator("radius_m", mode="before")
+    @classmethod
+    def clamp_radius(cls, value: Any) -> int:
+        return _clamp_int(value, minimum=1, maximum=20_000)
+
+
+class RecoverOptionPlacesArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    options: list[str] = Field(min_length=1, max_length=15)
+    candidates: list[Place] = Field(default_factory=list)
+    anchor: Place
+    radius_m: int = Field(default=20_000, ge=1, le=20_000)
 
     @field_validator("radius_m", mode="before")
     @classmethod
@@ -234,6 +275,12 @@ class ToolRegistry:
                     ),
                 ),
                 ToolDefinition(
+                    "recover_option_places",
+                    "Resolve only options absent from ranked nearby results, then merge them.",
+                    RecoverOptionPlacesArgs,
+                    self._recover_option_places,
+                ),
+                ToolDefinition(
                     "directions",
                     "Get a normalized driving-route distance and duration summary.",
                     DirectionsArgs,
@@ -298,7 +345,7 @@ class ToolRegistry:
         anchor_place: Place | None = anchor_value if isinstance(anchor_value, Place) else None
         anchor_matches: list[Place] = []
         if isinstance(anchor_value, str):
-            anchor_matches = self.provider.search_place(anchor_value, limit=max(args.limit, 5))
+            anchor_matches = _search_place_candidates(self.provider, anchor_value, limit=15)
             anchor_place = _best_place_match(anchor_value, anchor_matches)
         results: list[dict[str, Any]] = []
         for place_name in args.place_names:
@@ -310,18 +357,23 @@ class ToolRegistry:
                         anchor_place,
                         query=place_name,
                         radius_m=args.radius_m,
-                        limit=max(args.limit, 5),
+                        limit=15,
                     )
                     if not matches:
-                        matches = self.provider.search_place(place_name, limit=max(args.limit, 5))
+                        matches = _search_place_candidates(self.provider, place_name, limit=15)
                 else:
-                    matches = self.provider.search_place(place_name, limit=max(args.limit, 5))
+                    matches = _search_place_candidates(self.provider, place_name, limit=15)
                 best_match = _best_place_match(place_name, matches)
+                ordered_matches = (
+                    [best_match, *(match for match in matches if match != best_match)]
+                    if best_match
+                    else []
+                )
                 results.append(
                     {
                         "query": place_name,
                         "place": _jsonable(best_match) if best_match else None,
-                        "candidates": _jsonable(matches[: args.limit]),
+                        "candidates": _jsonable(ordered_matches[: args.limit]),
                     }
                 )
             except Exception as exc:
@@ -385,6 +437,30 @@ class ToolRegistry:
                 )
         return {"routes": routes, "route_count": len(routes)}
 
+    def _recover_option_places(self, args: RecoverOptionPlacesArgs) -> list[Place]:
+        places = list(args.candidates)
+        seen_place_ids = {place.place_id for place in places}
+        for option in args.options:
+            if any(_place_represents_option(option, place) for place in places):
+                continue
+            matches = self.provider.nearby_search(
+                args.anchor,
+                query=option,
+                radius_m=args.radius_m,
+                limit=15,
+            )
+            if not matches:
+                matches = _search_place_candidates(self.provider, option, limit=15)
+            match = _best_place_match(option, matches)
+            if (
+                match
+                and _place_represents_option(option, match)
+                and match.place_id not in seen_place_ids
+            ):
+                places.append(match)
+                seen_place_ids.add(match.place_id)
+        return places
+
 
 def _jsonable(value: Any) -> Any:
     if isinstance(value, BaseModel):
@@ -419,19 +495,134 @@ def _best_place_match(query: str, matches: list[Place]) -> Place | None:
         return None
     normalized_query = _search_key(query)
 
-    def score(place: Place) -> tuple[int, float]:
+    def score(place: Place) -> tuple[int, int, int, int, float]:
         normalized_name = _search_key(place.name)
         exact = int(normalized_query == normalized_name)
         containment = int(
             normalized_query in normalized_name or normalized_name in normalized_query
         )
-        overlap = len(set(normalized_query) & set(normalized_name)) / max(
-            len(set(normalized_query)), 1
+        similarity = SequenceMatcher(None, normalized_query, normalized_name).ratio()
+        return (
+            exact,
+            _branch_compatibility(query, place.name),
+            _category_compatibility(query, place),
+            containment,
+            similarity,
         )
-        return exact * 2 + containment, overlap
 
     return max(matches, key=score)
 
 
 def _search_key(value: str) -> str:
-    return "".join(character for character in value.casefold() if character.isalnum())
+    normalized = value.casefold()
+    for source in ("공립작은도서관", "작은도서관", "새마을문고", "도서관"):
+        normalized = normalized.replace(source, "문고")
+    return "".join(character for character in normalized if character.isalnum())
+
+
+def _place_represents_option(option: str, place: Place) -> bool:
+    option_key = _search_key(option)
+    place_key = _search_key(place.name)
+    if not option_key or not place_key:
+        return False
+    containment = option_key in place_key or place_key in option_key
+    fuzzy_match = (
+        option_key[0] == place_key[0]
+        and SequenceMatcher(None, option_key, place_key).ratio() >= 0.68
+    )
+    return containment or fuzzy_match
+
+
+def _branch_compatibility(query: str, place_name: str) -> int:
+    query_branch = _branch_token(query)
+    place_branch = _branch_token(place_name)
+    if not query_branch:
+        return 0
+    if place_branch == query_branch:
+        return 2
+    if place_branch and place_branch != query_branch:
+        return -2
+    place_key = _search_key(place_name)
+    return 1 if _search_key(query_branch) in place_key else 0
+
+
+def _branch_token(value: str) -> str | None:
+    words = value.split()
+    if not words:
+        return None
+    match = re.search(r"([^\s()]{1,20}?)(?:본점|지점|점)$", words[-1])
+    return match.group(1) if match else None
+
+
+def _category_compatibility(query: str, place: Place) -> int:
+    query_key = _search_key(query)
+    category_key = _search_key(place.category or "")
+    name_key = _search_key(place.name)
+    if any(term in query_key for term in ("은행", "새마을금고", "농협")):
+        if "atm" in category_key or "365" in name_key:
+            return -3
+        if "은행" in category_key or "금융서비스" in category_key:
+            return 3
+    if "경찰서" in query_key or "파출소" in query_key or "치안센터" in query_key:
+        return 2 if any(term in category_key for term in ("경찰서", "파출소")) else 0
+    if "역" in query_key:
+        return 2 if "지하철역" in category_key else 0
+    return 0
+
+
+def _search_place_candidates(provider: MapProvider, query: str, *, limit: int) -> list[Place]:
+    """Progressively retry common POI-name variants, preserving provider/cache semantics."""
+
+    matches: list[Place] = []
+    seen_place_ids: set[str] = set()
+    for variant in _query_variants(query):
+        for place in provider.search_place(variant, limit=limit):
+            if place.place_id not in seen_place_ids:
+                matches.append(place)
+                seen_place_ids.add(place.place_id)
+        if _best_place_match(query, matches) is not None and any(
+            _search_key(query) in _search_key(place.name)
+            or _search_key(place.name) in _search_key(query)
+            for place in matches
+        ):
+            break
+    return matches
+
+
+def _query_variants(query: str) -> list[str]:
+    normalized = " ".join(query.split()).strip()
+    variants = [normalized]
+    without_company = normalized.replace("(주)", "").strip()
+    if without_company != normalized:
+        variants.append(without_company)
+    for suffix in ("식품관", "푸드코트", "문화센터"):
+        if without_company.endswith(suffix):
+            variants.append(without_company[: -len(suffix)].strip())
+    if "(" in without_company and ")" in without_company:
+        outer = re.sub(r"\([^)]*\)", "", without_company).strip()
+        inner = without_company.split("(", 1)[1].split(")", 1)[0].strip()
+        variants.extend([outer, inner])
+    punctuation_free = re.sub(r"[.·,_/-]+", " ", without_company)
+    variants.append(" ".join(punctuation_free.split()))
+    # Historical benchmark names may outlive a branch rename. Broader brand forms are only
+    # attempted after the exact name misses, so live exact matches keep priority.
+    branchless = re.sub(r"\s+\S{1,20}(?:본점|지점|점)$", "", without_company).strip()
+    if branchless and branchless != without_company:
+        variants.append(branchless)
+    words = without_company.split()
+    if len(words) > 1:
+        variants.append(" ".join(words[:-1]))
+        branch_token = words[-1]
+        if branch_token.endswith("점") and len(branch_token) > 1:
+            variants.append(f"{' '.join(words[:-1])} {branch_token[:-1]}")
+            variants.append(branch_token[:-1])
+    facility_suffixes = {
+        "문고": "도서관",
+        "도서관": "문고",
+        "파출소": "경찰서",
+        "치안센터": "경찰서",
+    }
+    for source, replacement in facility_suffixes.items():
+        if without_company.endswith(source):
+            variants.append(without_company[: -len(source)] + replacement)
+    return list(dict.fromkeys(variant for variant in variants if variant))

@@ -5,8 +5,21 @@ from typing import Any
 import pytest
 
 from src.agent import ReactAgent, SpatialAgent
-from src.agent.geoflow import normalize_and_validate_graph
-from src.agent.spatial import _heuristic_intent
+from src.agent.geoflow import (
+    CORE_CONCEPTS,
+    OPERATOR_CONTRACTS,
+    TEMPLATES,
+    factorize_geoflow,
+    normalize_analysis,
+    normalize_and_validate_graph,
+)
+from src.agent.spatial import (
+    _bind_prevalidated_template,
+    _ground_graph_literals,
+    _heuristic_intent,
+    _resolve_output_binding,
+    _resolve_references,
+)
 from src.llm import LLMResponse, LLMToolCall
 from src.models import Place, Route
 from src.tools import MapProvider, SpatialOperatorRegistry, ToolRegistry
@@ -92,6 +105,7 @@ def test_spatial_agent_runs_paper_aligned_pipeline() -> None:
         "analyze",
         "retrieve_templates",
         "compose",
+        "factorize",
         "validate",
         "execute",
         "evaluate",
@@ -113,13 +127,21 @@ def test_registry_clamps_llm_generated_kakao_limits() -> None:
     search = registry.invoke("place_search", {"query": "경복궁", "limit": 20})
     nearby = registry.invoke(
         "nearby_places",
-        {"center": "경복궁", "query": "식당", "radius_m": 50_000, "limit": 20},
+        {"center": "경복궁", "query": "식당", "radius_m": 50_000, "limit": 50},
     )
     assert search.status == "ok"
     assert search.arguments["limit"] == 15
     assert nearby.status == "ok"
     assert nearby.arguments["radius_m"] == 20_000
-    assert nearby.arguments["limit"] == 15
+    assert nearby.arguments["limit"] == 45
+
+
+def test_registry_infers_exact_kakao_category_for_station_search() -> None:
+    execution = ToolRegistry(FakeProvider()).invoke(
+        "nearby_places", {"center": "경복궁", "query": "역", "radius_m": 300}
+    )
+    assert execution.status == "ok"
+    assert execution.arguments["category_code"] == "SW8"
 
 
 def test_batch_geocode_preserves_input_order_in_one_geoflow_tool_call() -> None:
@@ -130,6 +152,112 @@ def test_batch_geocode_preserves_input_order_in_one_geoflow_tool_call() -> None:
     assert all(item["place"]["name"] == "경복궁" for item in execution.output)
     assert registry.tool_call_count == 1
     assert registry.provider.api_call_count == 2
+
+
+def test_batch_geocode_progressively_retries_a_business_section_suffix() -> None:
+    class VariantProvider(FakeProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.queries: list[str] = []
+
+        def search_place(self, query: str, *, limit: int = 5) -> list[Place]:
+            self.queries.append(query)
+            self._api_calls += 1
+            return [] if query == "더현대서울식품관" else [self.place]
+
+    provider = VariantProvider()
+    execution = ToolRegistry(provider).invoke(
+        "batch_geocode", {"place_names": ["더현대서울식품관"]}
+    )
+    assert execution.status == "ok"
+    assert execution.output[0]["place"] is not None
+    assert provider.queries[:2] == ["더현대서울식품관", "더현대서울"]
+
+
+def test_batch_geocode_strips_branch_suffix_after_exact_search_misses() -> None:
+    class BranchProvider(FakeProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.queries: list[str] = []
+
+        def search_place(self, query: str, *, limit: int = 5) -> list[Place]:
+            self.queries.append(query)
+            self._api_calls += 1
+            if query != "힘난다버거":
+                return []
+            return [self.place.model_copy(update={"name": "힘난다버거 용두점"})]
+
+    provider = BranchProvider()
+    execution = ToolRegistry(provider).invoke(
+        "batch_geocode", {"place_names": ["힘난다버거 용두점"]}
+    )
+    assert execution.status == "ok"
+    assert execution.output[0]["place"] is not None
+    assert provider.queries == ["힘난다버거 용두점", "힘난다버거"]
+
+
+def test_batch_geocode_prefers_bank_branch_over_same_brand_atm() -> None:
+    class BankProvider(FakeProvider):
+        def search_place(self, query: str, *, limit: int = 5) -> list[Place]:
+            self._api_calls += 1
+            return [self.place]
+
+        def nearby_search(self, center: str | Place, **_: Any) -> list[Place]:
+            self._api_calls += 1
+            return [
+                Place(
+                    place_id="atm",
+                    name="하나은행365 아파트상가 ATM",
+                    address="서울",
+                    latitude=37.58,
+                    longitude=126.98,
+                    category="금융,보험 > 금융서비스 > 은행 > ATM",
+                ),
+                Place(
+                    place_id="branch",
+                    name="하나은행 광운대출장소",
+                    address="서울",
+                    latitude=37.59,
+                    longitude=126.99,
+                    category="금융,보험 > 금융서비스 > 은행 > 하나은행",
+                ),
+            ]
+
+    execution = ToolRegistry(BankProvider()).invoke(
+        "batch_geocode",
+        {"place_names": ["GS25 장위뉴타운점", "하나은행"], "anchor": "GS25 장위뉴타운점"},
+    )
+
+    assert execution.status == "ok"
+    assert execution.output[1]["place"]["place_id"] == "branch"
+
+
+def test_recover_option_places_queries_only_missing_option_evidence() -> None:
+    class OptionProvider(FakeProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.queries: list[str] = []
+
+        def nearby_search(self, center: str | Place, **kwargs: Any) -> list[Place]:
+            query = kwargs.get("query")
+            self.queries.append(query)
+            self._api_calls += 1
+            return [self.place.model_copy(update={"place_id": query, "name": query})]
+
+    provider = OptionProvider()
+    existing = provider.place.model_copy(update={"place_id": "a", "name": "하랑갤러리"})
+    execution = ToolRegistry(provider).invoke(
+        "recover_option_places",
+        {
+            "options": ["하랑갤러리", "페이지룸8"],
+            "candidates": [existing.model_dump()],
+            "anchor": provider.place.model_dump(),
+        },
+    )
+
+    assert execution.status == "ok"
+    assert provider.queries == ["페이지룸8"]
+    assert [place["name"] for place in execution.output] == ["하랑갤러리", "페이지룸8"]
 
 
 def test_distance_matrix_and_multi_segment_aggregate_keep_option_mapping() -> None:
@@ -191,7 +319,7 @@ def test_geoflow_validation_topologically_orders_and_checks_all_constraints() ->
                 "arguments": {"place_names": ["경복궁"]},
                 "depends_on": [],
                 "output_type": "object",
-                "role": "support",
+                "role": "extent",
             },
         ]
     }
@@ -207,18 +335,170 @@ def test_geoflow_validation_rejects_cycles_instead_of_truncating() -> None:
                 "id": "a",
                 "operator": "place_search",
                 "arguments": {"query": "$b"},
-                "role": "support",
+                "role": "extent",
             },
             {
                 "id": "b",
                 "operator": "place_search",
                 "arguments": {"query": "$a"},
-                "role": "support",
+                "role": "extent",
             },
         ]
     }
     with pytest.raises(ValueError, match="acyclicity"):
         normalize_and_validate_graph(graph, max_steps=8)
+
+
+def test_geoflow_g5_rejects_node_not_reachable_from_context() -> None:
+    graph = {
+        "graph": [
+            {
+                "id": "context",
+                "operator": "place_search",
+                "arguments": {"query": "서울역"},
+                "role": "extent",
+            },
+            {
+                "id": "orphan",
+                "operator": "place_search",
+                "arguments": {"query": "경복궁"},
+                "role": "support",
+            },
+            {
+                "id": "measure",
+                "operator": "merge_places",
+                "arguments": {"items": ["$context", "$orphan"]},
+                "depends_on": ["context", "orphan"],
+                "role": "measure",
+            },
+        ]
+    }
+
+    with pytest.raises(ValueError, match="not reachable from EXTENT"):
+        normalize_and_validate_graph(graph, max_steps=8)
+
+
+def test_factorization_binds_every_analysis_concept_and_validates() -> None:
+    analysis = normalize_analysis(
+        {
+            "intent": "nearby",
+            "concepts": [
+                {
+                    "id": "anchor",
+                    "text": "서울역",
+                    "concept_type": "location",
+                    "role": "extent",
+                },
+                {
+                    "id": "candidate_set",
+                    "text": "카페",
+                    "concept_type": "object",
+                    "role": "sub_condition",
+                    "depends_on": ["anchor"],
+                },
+                {
+                    "id": "answer",
+                    "text": "nearest cafe",
+                    "concept_type": "object",
+                    "role": "measure",
+                    "depends_on": ["candidate_set"],
+                },
+            ],
+        },
+        "서울역에서 가장 가까운 카페는?",
+        "nearby",
+    )
+    factorized = factorize_geoflow(
+        analysis,
+        {
+            "graph": [
+                {
+                    "id": "anchor_lookup",
+                    "operator": "batch_geocode",
+                    "arguments": {"place_names": ["서울역"]},
+                },
+                {
+                    "id": "candidates",
+                    "operator": "nearby_places",
+                    "arguments": {"center": "$anchor_lookup.0.place", "query": "카페"},
+                },
+                {
+                    "id": "answer_measure",
+                    "operator": "identity_measure",
+                    "arguments": {"value": "$candidates"},
+                },
+            ]
+        },
+    )
+
+    ordered, constraints = normalize_and_validate_graph(factorized.as_dict(), max_steps=8)
+    bound = {concept_id for step in ordered for concept_id in step["concept_ids"]}
+    expected = {node["id"] for node in factorized.as_dict()["concept_graph"]["nodes"]}
+    assert expected <= bound
+    assert constraints["contextual_connectivity"]
+    assert constraints["concept_factorization"]
+
+
+def test_concept_graph_g5_rejects_disconnected_bound_concept() -> None:
+    payload = {
+        "concept_graph": {
+            "nodes": [
+                {"id": "ctx", "role": "extent"},
+                {"id": "orphan", "role": "support"},
+                {"id": "answer", "role": "measure"},
+            ],
+            "edges": [{"source": "ctx", "target": "answer"}],
+        },
+        "graph": [
+            {
+                "id": "context",
+                "operator": "place_search",
+                "arguments": {"query": "서울역"},
+                "role": "extent",
+                "concept_ids": ["ctx", "orphan"],
+                "output_bindings": [
+                    {"concept_id": "ctx", "path": "$"},
+                    {"concept_id": "orphan", "path": "$"},
+                ],
+            },
+            {
+                "id": "measure",
+                "operator": "identity_measure",
+                "arguments": {"value": "$context"},
+                "role": "measure",
+                "concept_ids": ["answer"],
+                "output_bindings": [{"concept_id": "answer", "path": "$"}],
+            },
+        ],
+    }
+
+    with pytest.raises(ValueError, match="Concept is not reachable"):
+        normalize_and_validate_graph(payload, max_steps=8)
+
+
+def test_multiple_concepts_can_bind_to_distinct_operator_output_paths() -> None:
+    output = [{"place": {"name": "서울역"}}, {"place": {"name": "숭례문"}}]
+    assert _resolve_output_binding(output, "$.0.place")["name"] == "서울역"
+    assert _resolve_output_binding(output, "$.1.place")["name"] == "숭례문"
+
+
+def test_operator_contracts_cover_all_scientific_core_concepts() -> None:
+    assert CORE_CONCEPTS <= {contract.output_type for contract in OPERATOR_CONTRACTS.values()}
+
+
+def test_template_catalog_covers_appendix_e_macro_families() -> None:
+    assert {template["name"] for template in TEMPLATES.values()} == {
+        "Filter-Aggregate-Measure",
+        "Object-Field-Measure",
+        "Route-Optimize",
+        "Geocode-Batch-Compare",
+        "Location-Bearing-Classify",
+        "Route-Step-Extract",
+        "Multi-Route-Compare",
+        "Place-Attribute-Query",
+        "Multi-Segment-Aggregate",
+        "Time-Window-Reverse",
+    }
 
 
 def test_geoflow_validation_rejects_incompatible_dependency_types() -> None:
@@ -231,7 +511,7 @@ def test_geoflow_validation_rejects_incompatible_dependency_types() -> None:
                     "place_a": {"latitude": 37.0, "longitude": 127.0},
                     "place_b": {"latitude": 37.1, "longitude": 127.1},
                 },
-                "role": "support",
+                "role": "extent",
             },
             {
                 "id": "route_totals",
@@ -243,6 +523,217 @@ def test_geoflow_validation_rejects_incompatible_dependency_types() -> None:
     }
     with pytest.raises(ValueError, match="Type compatibility"):
         normalize_and_validate_graph(graph, max_steps=8)
+
+
+def test_geoflow_accepts_braced_references_and_execution_resolves_them() -> None:
+    graph = {
+        "graph": [
+            {
+                "id": "places",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["경복궁"]},
+                "role": "extent",
+            },
+            {
+                "id": "nearby",
+                "operator": "nearby_places",
+                "arguments": {"center": "${places[0].place}", "query": "카페"},
+                "role": "measure",
+            },
+        ]
+    }
+    ordered, _ = normalize_and_validate_graph(graph, max_steps=8)
+    assert ordered[1]["depends_on"] == ["places"]
+    place = FakeProvider().place.model_dump()
+    assert _resolve_references("${places[0].place}", {"places": [{"place": place}]}) == place
+
+
+def test_geoflow_repairs_numeric_dependencies_and_placeholder_node_references() -> None:
+    graph = {
+        "graph": [
+            {
+                "id": "ref",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["회기"]},
+                "role": "extent",
+            },
+            {
+                "id": "measure",
+                "operator": "nearby_places",
+                "arguments": {
+                    "center": "$node.0.place",
+                    "category_code": "SC4",
+                    "radius_m": 500,
+                },
+                "depends_on": [0],
+                "role": "measure",
+            },
+        ]
+    }
+    ordered, _ = normalize_and_validate_graph(graph, max_steps=8)
+    assert ordered[1]["depends_on"] == ["ref"]
+    assert ordered[1]["arguments"]["center"] == "$ref.0.place"
+
+
+def test_graph_grounding_restores_verbatim_anchor_and_options() -> None:
+    steps = [
+        {
+            "id": "places",
+            "operator": "batch_geocode",
+            "arguments": {
+                "place_names": ["양꼬치", "A", "B"],
+                "anchor": "양꼬치",
+            },
+            "depends_on": [],
+            "output_type": "object",
+            "role": "support",
+        }
+    ]
+    grounded = _ground_graph_literals(
+        steps,
+        "뜻밖에 양꼬치에서 남쪽에 있는 가장 가까운 카페 중 어디인가요?",
+        ["포근한 다락방 카페", "코티지블루"],
+        "direction",
+    )
+    assert grounded[0]["arguments"]["anchor"] == "뜻밖에 양꼬치"
+    assert grounded[0]["arguments"]["place_names"] == [
+        "뜻밖에 양꼬치",
+        "포근한 다락방 카페",
+        "코티지블루",
+    ]
+
+
+def test_radius_grounding_builds_candidate_set_graph() -> None:
+    grounded = _bind_prevalidated_template(
+        "radius",
+        "기준점 반경 500m 안에 있는 패스트푸드점 목록은 무엇인가요?",
+        ["롯데리아 | 윤토스트", "롯데리아 | 노브랜드버거"],
+        "기준점",
+    )
+
+    assert grounded is not None
+    assert grounded[0]["operator"] == "batch_geocode"
+    assert grounded[0]["arguments"]["place_names"] == ["기준점"]
+    assert [step["operator"] for step in grounded] == [
+        "batch_geocode",
+        "nearby_places",
+        "nearby_places",
+        "merge_places",
+        "match_options",
+    ]
+    assert grounded[1]["arguments"]["query"] == "패스트푸드"
+    assert grounded[2]["arguments"]["category_code"] == "FD6"
+    assert grounded[-1]["arguments"]["mode"] == "radius_set"
+
+
+def test_match_options_recovers_minor_historical_name_changes() -> None:
+    anchor = FakeProvider().place.model_dump()
+    places = [
+        {
+            **anchor,
+            "place_id": "toast",
+            "name": "토스티드클럽",
+            "latitude": 37.58,
+        },
+        {
+            **anchor,
+            "place_id": "burger",
+            "name": "회기버거 경희궁자이점",
+            "latitude": 37.60,
+        },
+    ]
+
+    result = SpatialOperatorRegistry().invoke(
+        "match_options",
+        {
+            "anchor": anchor,
+            "places": places,
+            "options": ["지미존스", "Olive Chicken Cafe", "토스티트 클럽", "회기버거"],
+            "mode": "nearest",
+        },
+    )
+
+    assert result["best_option"] == 2
+    assert result["option_matches"][2]["matched"]["name"] == "토스티드클럽"
+
+
+def test_match_options_rejects_unrelated_names_with_shared_category_suffix() -> None:
+    anchor = FakeProvider().place.model_dump()
+    places = [
+        {
+            **anchor,
+            "place_id": "art-center",
+            "name": "정수아트센터",
+            "latitude": 37.58,
+        }
+    ]
+
+    result = SpatialOperatorRegistry().invoke(
+        "match_options",
+        {"options": ["김희수아트센터"], "places": places, "anchor": anchor},
+    )
+
+    assert result["best_option"] is None
+    assert result["option_matches"][0]["matched"] is None
+
+
+def test_match_distance_options_uses_computed_measure() -> None:
+    result = SpatialOperatorRegistry().invoke(
+        "match_distance_options",
+        {"distance": {"distance_m": 1058}, "options": ["1036 m", "1061 m", "1.2 km"]},
+    )
+
+    assert result["best_option"] == 1
+
+
+def test_event_network_proportion_temporal_and_tsp_operators_execute() -> None:
+    operators = SpatialOperatorRegistry()
+    events = operators.invoke(
+        "events_from_objects",
+        {"objects": [{"kind": "crime"}, {"kind": "other"}], "event_type": "incident"},
+    )
+    filtered = operators.invoke(
+        "filter_events",
+        {"events": events, "field": "object.kind", "operator": "eq", "value": "crime"},
+    )
+    proportion = operators.invoke(
+        "calculate_proportion", {"numerator": filtered, "denominator": events}
+    )
+    network = operators.invoke(
+        "build_route_network",
+        {"nodes": [{"id": "a"}, {"id": "b"}], "edges": [{"source": "a", "target": "b"}]},
+    )
+    converted = operators.invoke(
+        "timezone_convert",
+        {
+            "local_time": "2026-01-01T09:00:00",
+            "from_timezone": "Asia/Seoul",
+            "to_timezone": "UTC",
+        },
+    )
+    route = operators.invoke(
+        "tsp_tw",
+        {
+            "nodes": [{"id": "a"}, {"id": "b"}, {"id": "c"}],
+            "distance_matrix": [[0, 10, 20], [10, 0, 5], [20, 5, 0]],
+            "start_index": 0,
+        },
+    )
+
+    assert len(filtered) == 1
+    assert proportion["proportion"] == 0.5
+    assert network["edge_count"] == 1
+    assert converted["converted_time"].endswith("+00:00")
+    assert route["order"] == [0, 1, 2]
+
+
+def test_spatial_operators_skip_unresolved_candidates() -> None:
+    anchor = FakeProvider().place.model_dump()
+    nearby = {**anchor, "place_id": "2", "latitude": 37.58}
+    nearest = SpatialOperatorRegistry().invoke(
+        "nearest", {"anchor": anchor, "candidates": [None, nearby]}
+    )
+    assert nearest["nearest"]["candidate_index"] == 1
 
 
 def test_directions_accepts_a_normalized_place_from_a_plan_reference() -> None:

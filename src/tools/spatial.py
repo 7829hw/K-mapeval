@@ -8,6 +8,27 @@ from itertools import permutations
 from typing import Any
 from zoneinfo import ZoneInfo
 
+COORDINATE_LITERAL = re.compile(r"(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)")
+
+
+def parse_coordinate_literal(value: str) -> tuple[float, float] | None:
+    """A "latitude,longitude" string used where a place is expected.
+
+    An agent that already holds a POI's coordinates asks for what is near *them*, not near a
+    place named "37.5771,126.9694". Sending that through the keyword search raises
+    PlaceNotFoundError, and a ReAct run then spends its remaining steps re-searching a name that
+    was never a name. Coordinates are evidence the agent already has, so resolve them directly.
+    Every provider owes the agent this, which is why it lives here and not in one of them.
+    """
+
+    match = COORDINATE_LITERAL.fullmatch(value.strip())
+    if not match:
+        return None
+    latitude, longitude = float(match.group(1)), float(match.group(2))
+    if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+        return None
+    return latitude, longitude
+
 
 def haversine_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Great-circle distance in metres. The one place this repo computes it."""
@@ -162,7 +183,7 @@ class SpatialOperatorRegistry:
         expected = _cardinal_direction(direction)
         center = _as_place(center, "center")
         matches: list[dict[str, Any]] = []
-        for candidate_index, place in _as_place_list(places):
+        for candidate_index, place in _excluding_self(center, _as_place_list(places)):
             bearing = cls.bearing_to_direction(center, place)
             if bearing["cardinal_direction"] != expected:
                 continue
@@ -179,7 +200,7 @@ class SpatialOperatorRegistry:
         routes: list[dict[str, Any]] | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         anchor = _as_place(anchor, "anchor")
-        resolved = _as_place_list(candidates)
+        resolved = _excluding_self(anchor, _as_place_list(candidates))
         if metric == "haversine":
             ranked = [
                 {
@@ -873,6 +894,39 @@ def _normalize_arguments(name: str, arguments: dict[str, Any]) -> dict[str, Any]
 _PLACE_WRAPPER_KEYS = ("place", "location", "nearest", "matched")
 _LATITUDE_KEYS = ("latitude", "lat", "y")
 _LONGITUDE_KEYS = ("longitude", "lng", "lon", "x")
+
+
+def _excluding_self(
+    anchor: dict[str, Any], resolved: list[tuple[int, dict[str, Any]]]
+) -> list[tuple[int, dict[str, Any]]]:
+    """Drop the anchor from its own neighbour ranking — a place is not near itself.
+
+    "가장 가까운 X" never means X, but the anchor is a place of the type being asked about often
+    enough to sit among the candidates: the options of a nearest-convenience-store question include
+    the convenience store the question starts from, and a stored retrieval heads its own block at
+    zero metres. Ranked by distance it wins with 0.0 m every time, and the generation stage then
+    reports that faithfully — GS25 화곡초교점 was answered as its own nearest neighbour. A place is
+    the anchor when it carries the anchor's id or stands on the same spot. Kept when it is the only
+    candidate there is, because an empty ranking answers nothing at all.
+    """
+
+    anchor_id = anchor.get("place_id")
+    kept = [
+        (index, place)
+        for index, place in resolved
+        if not (
+            (anchor_id is not None and place.get("place_id") == anchor_id)
+            or _coordinate(place, ("latitude", "lat", "y")) is not None
+            and haversine_meters(
+                float(anchor["latitude"]),
+                float(anchor["longitude"]),
+                float(_coordinate(place, ("latitude", "lat", "y")) or 0.0),
+                float(_coordinate(place, ("longitude", "lng", "lon", "x")) or 0.0),
+            )
+            < 1.0
+        )
+    ]
+    return kept or resolved
 
 
 def _coordinate(value: dict[str, Any], keys: tuple[str, ...]) -> float | None:

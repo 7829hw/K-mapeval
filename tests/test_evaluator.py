@@ -194,3 +194,27 @@ def test_parallel_evaluator_rejects_a_shared_agent() -> None:
     with pytest.raises(ValueError, match="isolated agent_factory"):
         Evaluator(FixedAgent(), [], max_workers=4)
 
+
+
+def test_an_agent_without_an_intent_stage_is_not_scored_as_wrong(tmp_path) -> None:
+    """ReAct has no classifier, so 0.0% was a verdict on a stage the architecture never had."""
+
+    class SilentAgent(BenchmarkAgent):
+        agent_type = "react"
+
+        def answer(self, question: str, options: list[str]) -> AgentResult:
+            return AgentResult(agent_type=self.agent_type, predicted_answer=0, response="^^0^^")
+
+    items = [
+        BenchmarkItem(id="a", question="q", options=["x", "y"], answer=0, classification="poi"),
+        BenchmarkItem(id="b", question="q2", options=["x", "y"], answer=0, classification="nearby"),
+    ]
+    report = Evaluator(
+        SilentAgent(), items, output_dir=None, log_dir=tmp_path / "logs"
+    ).run()
+
+    intent = report.statistics["intent_classification_accuracy"]
+    assert intent["classified"] == 0
+    assert intent["accuracy"] is None
+    assert intent["total"] == 2
+    assert report.statistics["overall_answer_accuracy"]["accuracy"] == 1.0

@@ -241,3 +241,57 @@ def test_every_benchmark_context_parses_into_evidence() -> None:
             assert document.routes, item.id
         if item.classification in ("nearby", "radius"):
             assert document.nearby, item.id
+
+
+def test_a_place_the_agent_already_holds_is_addressable_by_id_and_by_coordinates() -> None:
+    """Both are references this provider handed out itself, so it has to take them back.
+
+    A ReAct run searched 커피바이, read the place_id off the result, asked what was near it, and
+    got PlaceNotFoundError; it then tried the coordinates and got the same. Two of its remaining
+    steps went on re-searching a name that was never a name, and the question was lost.
+    """
+
+    provider = ContextMapProvider()
+    provider.activate_context(RADIUS_CONTEXT)
+
+    by_id = provider.nearby_search("node/12192225021", query="은행", radius_m=500)
+    by_point = provider.nearby_search("37.5021773,126.9877564", query="은행", radius_m=500)
+    assert [place.name for place in by_id] == ["우리은행"]
+    assert [place.name for place in by_point] == [place.name for place in by_id]
+    assert [place.name for place in provider.search_place("node/12192225021")] == ["미소의집"]
+
+    # A point the context does not describe is still a point, and what is near it is answerable.
+    anonymous = provider.nearby_search("37.5021000,126.9870000", query="은행", radius_m=500)
+    assert [place.name for place in anonymous] == ["우리은행", "미소의집"]
+    assert provider.api_call_count == 0
+
+
+def test_a_planners_place_shape_never_ends_a_run() -> None:
+    """Execution is lenient about shape and strict only about evidence — in the tools too.
+
+    The local operators already normalized these; the tool arguments did not, so the same planner
+    artifact failed as a pydantic ValidationError before any tool ran.
+    """
+
+    provider = ContextMapProvider()
+    provider.activate_context(NEARBY_CONTEXT)
+    registry = ToolRegistry(provider)
+    anchor = registry.invoke("batch_geocode", {"place_names": ["평화시장"]}).output[0]["place"]
+
+    shapes: list[object] = [
+        [anchor],  # the geocode result the planner forgot to index into
+        {"place": anchor},  # the wrapper that carries the place
+        dict(anchor, candidate_index=0, distance_m=12.5, rank=0),  # enriched by an earlier step
+    ]
+    for shape in shapes:
+        execution = registry.invoke("nearby_places", {"center": shape, "query": "서점"})
+        assert execution.status == "ok", execution.error
+        assert execution.output[0]["name"] == "어라운드북"
+
+    # A planner that writes the anchor's name where a place belongs is naming the same place.
+    recovered = registry.invoke(
+        "recover_option_places",
+        {"options": ["소요서가"], "candidates": [], "anchor": "평화시장", "radius_m": 5000},
+    )
+    assert recovered.status == "ok", recovered.error
+    assert [place["name"] for place in recovered.output] == ["소요서가"]

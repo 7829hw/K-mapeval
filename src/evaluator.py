@@ -362,6 +362,10 @@ class Evaluator:
 def calculate_statistics(results: list[dict[str, Any]]) -> dict[str, Any]:
     total = len(results)
     intent_correct = sum(1 for row in results if row.get("intent_correct"))
+    # ReAct has no intent stage at all, so every row carries predicted_intent=None. Scoring those
+    # as wrong reported 0.0% accuracy for a classifier the architecture does not have; the honest
+    # denominator is the questions an intent was actually predicted for.
+    intent_classified = sum(1 for row in results if row.get("predicted_intent"))
     answer_correct = sum(1 for row in results if row.get("answer_correct"))
     failed = [row["id"] for row in results if row.get("error")]
     by_intent: dict[str, dict[str, Any]] = {}
@@ -381,7 +385,10 @@ def calculate_statistics(results: list[dict[str, Any]]) -> dict[str, Any]:
         "intent_classification_accuracy": {
             "correct": intent_correct,
             "total": total,
-            "accuracy": round(intent_correct / total, 4) if total else 0.0,
+            "classified": intent_classified,
+            "accuracy": (
+                round(intent_correct / intent_classified, 4) if intent_classified else None
+            ),
         },
         "answer_accuracy_by_intent": by_intent,
         "overall_answer_accuracy": {
@@ -412,9 +419,14 @@ def print_summary(statistics: dict[str, Any]) -> None:
     intent = statistics["intent_classification_accuracy"]
     overall = statistics["overall_answer_accuracy"]
     performance = statistics["performance"]
-    print(
-        f"Intent accuracy: {intent['correct']}/{intent['total']} ({intent['accuracy'] * 100:.1f}%)"
-    )
+    classified = intent.get("classified", intent["total"])
+    if classified:
+        print(
+            f"Intent accuracy: {intent['correct']}/{classified} "
+            f"({intent['accuracy'] * 100:.1f}% of {classified} classified)"
+        )
+    else:
+        print("Intent accuracy: n/a (this architecture has no intent-classification stage)")
     print("Answer accuracy by intent:")
     for classification, stats in sorted(statistics["answer_accuracy_by_intent"].items()):
         print(

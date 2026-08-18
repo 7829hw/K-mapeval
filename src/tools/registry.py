@@ -64,6 +64,44 @@ KAKAO_CATEGORY_ALIASES = {
 }
 
 
+PLACE_FIELDS = frozenset(Place.model_fields)
+# Wrappers a planner reaches a place through instead of referencing the place itself.
+PLACE_WRAPPER_KEYS = ("place", "location", "nearest", "center", "anchor")
+
+
+def _as_place_argument(value: Any) -> Any:
+    """Accept the shapes a planner reaches a place through, not only a place.
+
+    Execution is lenient about shape and strict only about evidence, and the local operators
+    already normalize their inputs through `_as_place`. The tool arguments did not, so the same
+    planner artifact that an operator shrugs off failed here as a pydantic ValidationError before
+    any tool ran: a one-element list is the geocode result the planner forgot to index into, a
+    wrapper carries the place under `place` or `location`, and a place an earlier operator enriched
+    with `distance_m` or `candidate_index` is still that place — `Place` just forbids the extra
+    keys. None of these is missing evidence, so none of them may end a run.
+    """
+
+    if isinstance(value, list) and len(value) == 1:
+        return _as_place_argument(value[0])
+    if not isinstance(value, dict):
+        return value
+    for key in PLACE_WRAPPER_KEYS:
+        nested = value.get(key)
+        if isinstance(nested, dict | list) and key not in PLACE_FIELDS:
+            return _as_place_argument(nested)
+    if "latitude" in value or "longitude" in value:
+        extra = set(value) - PLACE_FIELDS
+        if extra:
+            return {key: item for key, item in value.items() if key in PLACE_FIELDS}
+    return value
+
+
+def _as_place_list_argument(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_as_place_argument(item) for item in value]
+    return value
+
+
 class PlaceSearchArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
     query: str | None = None
@@ -88,6 +126,11 @@ class PlaceSearchArgs(BaseModel):
         if self.center is None:
             self.limit = min(self.limit, 15)
         return self
+
+    @field_validator("center", mode="before")
+    @classmethod
+    def normalize_center(cls, value: Any) -> Any:
+        return _as_place_argument(value)
 
 
 class PlaceDetailsArgs(BaseModel):
@@ -156,6 +199,11 @@ class NearbyPlacesArgs(BaseModel):
             self.category_code = KAKAO_CATEGORY_ALIASES.get("".join(self.query.split()))
         return self
 
+    @field_validator("center", mode="before")
+    @classmethod
+    def normalize_center(cls, value: Any) -> Any:
+        return _as_place_argument(value)
+
 
 class DirectionsArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -170,6 +218,16 @@ class DirectionsArgs(BaseModel):
     waypoints: list[str | Place] = Field(default_factory=list, max_length=30)
     include_steps: bool = False
 
+    @field_validator("origin", "destination", mode="before")
+    @classmethod
+    def normalize_endpoint(cls, value: Any) -> Any:
+        return _as_place_argument(value)
+
+    @field_validator("waypoints", mode="before")
+    @classmethod
+    def normalize_waypoints(cls, value: Any) -> Any:
+        return _as_place_list_argument(value)
+
 
 class CalculateFinishTimeArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -179,6 +237,11 @@ class CalculateFinishTimeArgs(BaseModel):
     timezone: str = "Asia/Seoul"
     mode: str = "driving"
     priority: str = "TIME"
+
+    @field_validator("locations", mode="before")
+    @classmethod
+    def normalize_locations(cls, value: Any) -> Any:
+        return _as_place_list_argument(value)
 
     @model_validator(mode="after")
     def validate_stays(self) -> CalculateFinishTimeArgs:
@@ -220,7 +283,9 @@ class RecoverOptionPlacesArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
     options: list[str] = Field(min_length=1, max_length=15)
     candidates: list[Place] = Field(default_factory=list)
-    anchor: Place
+    # A planner routinely writes the anchor's name here rather than referencing the step that
+    # resolved it. That is a shape artifact, not missing evidence, so the tool resolves the name.
+    anchor: str | Place
     category_code: KakaoCategoryCode | None = Field(
         default=None,
         description=(
@@ -234,6 +299,16 @@ class RecoverOptionPlacesArgs(BaseModel):
     @classmethod
     def clamp_radius(cls, value: Any) -> int:
         return _clamp_int(value, minimum=1, maximum=20_000)
+
+    @field_validator("anchor", mode="before")
+    @classmethod
+    def normalize_anchor(cls, value: Any) -> Any:
+        return _as_place_argument(value)
+
+    @field_validator("candidates", mode="before")
+    @classmethod
+    def normalize_candidates(cls, value: Any) -> Any:
+        return _as_place_list_argument(value)
 
 
 class RoutePair(BaseModel):
@@ -646,14 +721,25 @@ class ToolRegistry:
                 )
         return {"routes": routes, "route_count": len(routes)}
 
+    def _require_place(self, value: str | Place) -> Place:
+        """Resolve a place reference a planner wrote as a name."""
+
+        if isinstance(value, Place):
+            return value
+        match = _best_place_match(value, _search_place_candidates(self.provider, value, limit=15))
+        if match is None:
+            raise PlaceNotFoundError(f"No place matched {value!r}")
+        return match
+
     def _recover_option_places(self, args: RecoverOptionPlacesArgs) -> list[Place]:
+        anchor = self._require_place(args.anchor)
         places = list(args.candidates)
         seen_place_ids = {place.place_id for place in places}
         for option in args.options:
             if any(_place_represents_option(option, place) for place in places):
                 continue
             matches = self.provider.nearby_search(
-                args.anchor,
+                anchor,
                 query=option,
                 category_code=args.category_code,
                 radius_m=args.radius_m,
@@ -667,13 +753,13 @@ class ToolRegistry:
             # The anchor is the question's reference point, never one of its answers. Recovering
             # "목동" around 교보문고 목동점 otherwise returns the bookstore itself, and a radius-set
             # question then reports the station 목동 as present when only 오목교 is.
-            matches = [match for match in matches if match.place_id != args.anchor.place_id]
-            match = _best_place_match(option, matches, anchor=args.anchor)
+            matches = [match for match in matches if match.place_id != anchor.place_id]
+            match = _best_place_match(option, matches, anchor=anchor)
             if (
                 match
                 and _place_represents_option(option, match)
                 and match.place_id not in seen_place_ids
-                and _within_anchor_radius(args.anchor, match, args.radius_m)
+                and _within_anchor_radius(anchor, match, args.radius_m)
             ):
                 places.append(match)
                 seen_place_ids.add(match.place_id)

@@ -24,7 +24,12 @@ from src.tools.map import (
     RouteNotFoundError,
     UnsupportedTravelModeError,
 )
-from src.tools.spatial import distinguishing_similarity, haversine_meters, strip_location_qualifier
+from src.tools.spatial import (
+    distinguishing_similarity,
+    haversine_meters,
+    parse_coordinate_literal,
+    strip_location_qualifier,
+)
 
 # A context block writes "주소 정보 없음" where OSM carries no address for the place.
 MISSING_ADDRESS = "주소 정보 없음"
@@ -325,7 +330,38 @@ class ContextMapProvider(MapProvider):
         scored.sort(key=lambda pair: (-pair[0], pair[1].name))
         return [place for _, place in scored[: max(1, limit)]]
 
+    def _dereference(self, value: str) -> Place | None:
+        """A place the agent is already holding, addressed by id or by its coordinates.
+
+        Both are references this provider handed out itself: an id it minted, or the latitude and
+        longitude it printed on a place. An agent that reads them out of one tool result and passes
+        them to the next is not naming a place, so sending them through the name search answers
+        `PlaceNotFoundError` and a ReAct run spends its remaining steps re-searching a name that
+        was never a name.
+        """
+
+        reference = value.strip()
+        place = self._active._by_id.get(reference)
+        if place is not None:
+            return place
+        coordinates = parse_coordinate_literal(reference)
+        if coordinates is None:
+            return None
+        latitude, longitude = coordinates
+        for candidate in self._active.all_places():
+            if (
+                haversine_meters(latitude, longitude, candidate.latitude, candidate.longitude)
+                < 1.0
+            ):
+                return candidate
+        # A point this context does not describe is still a point, and what is near it is a
+        # question the context can answer.
+        return Place(place_id=reference, name=reference, latitude=latitude, longitude=longitude)
+
     def search_place(self, query: str, *, limit: int = 5) -> list[Place]:
+        referenced = self._dereference(query)
+        if referenced is not None:
+            return self._served([referenced])
         return self._served(self._ranked(query, self._active.all_places(), limit))
 
     def geocode(self, address: str, *, limit: int = 5) -> list[Place]:
@@ -362,6 +398,9 @@ class ContextMapProvider(MapProvider):
     def _resolve_center(self, center: str | Place) -> Place:
         if isinstance(center, Place):
             return center
+        referenced = self._dereference(center)
+        if referenced is not None:
+            return referenced
         matches = self._ranked(center, self._active.all_places(), 1)
         if not matches:
             self._cache_misses += 1

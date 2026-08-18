@@ -39,7 +39,11 @@ Core concepts: location, object, field, event, network, amount, proportion.
 Functional roles: extent, temporal_extent, sub_condition, condition, support, measure.
 Classify intent as nearby, poi, routing, trip, type, direction, distance, or radius.
 Use distance only for straight-line/geodesic distance, routing for road-network routes, and radius
-when an explicit search radius is given. Include all named places and spatial/temporal constraints.
+when an explicit search radius is given. A question that names a cardinal direction (동/서/남/북쪽,
+북동/남동/남서/북서쪽) is direction even when it also asks for the nearest one: the direction is
+the constraint that decides the answer. A question asking which place is nearest is nearby, not
+distance; distance is for a numeric separation. Include all named places and spatial/temporal
+constraints.
 Return JSON only:
 {"intent":"direction","concepts":[{"id":"anchor","text":"서울역","concept_type":"location","role":"extent","attributes":{},"depends_on":[]},{"id":"answer","text":"direction","concept_type":"field","role":"measure","attributes":{},"depends_on":["anchor"]}],"measure":"direction"}
 Do not answer the multiple-choice question and do not invent coordinates."""

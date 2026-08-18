@@ -115,11 +115,13 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   is left alone. `_names_the_same_place` applies the same test, which is what stops the
   brand-only retry in `_query_variants` — `CU` for `CU 구로소담점` — from resolving to whichever
   branch of the brand sits nearest the region prior's centre.
-- **Coordinates are a place reference.** `_parse_coordinate_literal` (`src/tools/kakao.py`) lets a
-  `"lat,lng"` string stand where a place is expected. An agent that already holds a POI's
-  coordinates is asking what is near *them*; sending that through the keyword search raised
-  `PlaceNotFoundError`, and a ReAct run then burned its remaining steps re-searching a name that
-  was never a name.
+- **A reference the provider handed out is a reference it must take back.**
+  `parse_coordinate_literal` (`src/tools/spatial.py`, shared by every provider) lets a `"lat,lng"`
+  string stand where a place is expected, and `ContextMapProvider._dereference` accepts a
+  `place_id` it minted as well. An agent that already holds a POI's coordinates or id is asking
+  what is near *them*; sending either through the keyword search raised `PlaceNotFoundError`, and
+  a ReAct run then burned its remaining steps re-searching a name that was never a name. Adding a
+  provider means implementing both.
 - **A ranking never invents evidence.** `max` always yields a candidate, so `_best_place_match`
   applies `NAME_EVIDENCE_FLOOR` and returns `None` when the winner shares no containment and too
   little similarity with the query — a name Kakao does not have must fail as `PlaceNotFoundError`,
@@ -150,6 +152,21 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   similarity below the floor and the option cannot resolve at all. `_search_key` folds 파출소 into
   치안센터 for the same reason: which of the two names an institution goes by is editorial, so the
   distinguishing part (연남) has to decide, not the institution word.
+- **A place is not near itself.** `_excluding_self` (`src/tools/spatial.py`) drops the anchor from
+  its own `nearest` ranking and its own `filter_by_direction` sector, by id or by standing on the
+  same spot. The anchor is a place of the type being asked about often enough to appear among the
+  candidates — a nearest-convenience-store question lists the store it starts from, and a stored
+  retrieval heads its own block — and ranked by distance it wins with 0.0 m every time, which the
+  generation stage then reports faithfully. It is kept only when it is the sole candidate, because
+  an empty ranking answers nothing.
+- **Leniency about shape is a property of the tools, not only the operators.**
+  `_as_place_argument` / `_as_place_list_argument` (`src/tools/registry.py`) normalize every
+  `Place`-typed tool argument the way `_as_place` normalizes an operator's: a one-element list is
+  the geocode result the planner forgot to index into, a wrapper carries the place under `place` or
+  `location`, an enriched place still is that place (`Place` forbids the `distance_m` /
+  `candidate_index` keys an operator staples on), and an anchor written as a name is that place
+  named. Without this the artifact `_as_place` shrugs off failed as a `ValidationError` before any
+  tool ran, and the cascade emptied the rest of the graph.
 - No separate HTTP backend server, web UI, or extra datastore beyond the SQLite cache. Keep
   `src/agent/` and `src/tools/` as the only source subpackages and `main.py` as the only entry
   point.
@@ -168,6 +185,10 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   prefix, so keep those names when adding exception types. Place-not-found, timeout, auth failure,
   rate limit, route-not-found, and unsupported travel mode must each fail as their own explicit
   `ProviderError` subclass rather than degrade silently.
+- **Intent accuracy is scored over the questions an intent was predicted for.** ReAct has no
+  classification stage, so every row carries `predicted_intent=None`; the old denominator reported
+  0.0% for a classifier the architecture does not have. `statistics.intent_classification_accuracy`
+  now carries `classified` alongside `total`, and `accuracy` is `None` when nothing was classified.
 - Counters (`api_calls`, `cache_hits`, `cache_misses`, `tool_calls`) are recorded as deltas around
   each question, read off the shared provider/registry — new tool paths must go through the
   registry or their calls vanish from the metrics.

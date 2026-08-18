@@ -114,3 +114,50 @@ def test_planner_argument_aliases_from_recent_logs_are_supported() -> None:
         },
     )
     assert candidate["candidate"] == "Option 1"
+
+
+def test_a_place_is_not_its_own_nearest_neighbour() -> None:
+    """The anchor sits among the candidates often enough that 0.0 m would always win.
+
+    A nearest-convenience-store question lists the convenience store it starts from among its
+    options, and a stored retrieval heads its own block; ranked by distance the anchor answers its
+    own question, which is never what "가장 가까운" asks.
+    """
+
+    ops = SpatialOperatorRegistry()
+    spot = {"latitude": 37.542619, "longitude": 126.847355}
+    anchor = {"place_id": "a", "name": "GS25 화곡초교점", **spot}
+    twin = {"place_id": "elsewhere", "name": "GS25 화곡초교점", **spot}
+    neighbour = {
+        "place_id": "b",
+        "name": "CU 화곡본동점",
+        "latitude": 37.543215,
+        "longitude": 126.848,
+    }
+
+    ranked = ops.invoke("nearest", {"anchor": anchor, "candidates": [anchor, neighbour]})
+    assert ranked["nearest"]["name"] == "CU 화곡본동점"
+
+    # Same place under another id, because the context minted one per block entry.
+    ranked = ops.invoke("nearest", {"anchor": anchor, "candidates": [twin, neighbour]})
+    assert ranked["nearest"]["name"] == "CU 화곡본동점"
+
+    # An empty ranking answers nothing, so the self-match stays when it is all there is.
+    ranked = ops.invoke("nearest", {"anchor": anchor, "candidates": [anchor]})
+    assert ranked["nearest"]["name"] == "GS25 화곡초교점"
+
+
+def test_a_direction_filter_drops_the_centre_it_measures_from() -> None:
+    ops = SpatialOperatorRegistry()
+    centre = {"place_id": "a", "name": "안도로메다", "latitude": 37.5620, "longitude": 126.9881}
+    south = {
+        "place_id": "b",
+        "name": "Seoul Namsan Elementary School",
+        "latitude": 37.5570,
+        "longitude": 126.9880,
+    }
+
+    matches = ops.invoke(
+        "filter_by_direction", {"center": centre, "places": [centre, south], "direction": "남쪽"}
+    )
+    assert [place["name"] for place in matches] == ["Seoul Namsan Elementary School"]

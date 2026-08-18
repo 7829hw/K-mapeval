@@ -109,23 +109,53 @@ def test_the_corpus_is_shared_by_every_question_the_way_upstreams_cache_is() -> 
     assert provider.directions("회기버거", "GS25 서대문남가좌점").distance_m == 4994
 
 
-def test_a_k_nearest_block_is_served_whole_and_a_radius_block_is_bounded() -> None:
-    """The radius argument narrows a stored retrieval only when the retrieval had one.
+def test_a_retrieval_is_computed_over_the_corpus_not_replayed_from_a_block() -> None:
+    """The corpus is a place database, not an answer sheet.
 
-    A k-nearest block records no radius, so cutting it down to whatever radius the agent guessed
-    would report an absence the context never states; a bounded block already is the answer set.
+    A MapEval context stores the result of the query its question asks — already filtered by type,
+    already sorted by distance — so replaying that block hands the agent the answer for one tool
+    call and makes the benchmark indistinguishable from MapEval-Textual. The block's places are
+    kept; the ranking is computed here, over every place the corpus holds.
     """
 
     provider = ContextMapProvider([NEARBY_CONTEXT, RADIUS_CONTEXT])
-    assert [place.name for place in provider.nearby_search("평화시장", radius_m=100)] == [
+
+    # The radius applies to every retrieval, because it is applied rather than looked up.
+    near = provider.nearby_search("평화시장", query="서점", radius_m=190)
+    assert [place.name for place in near] == ["어라운드북"]
+    assert [place.name for place in provider.nearby_search("평화시장", query="서점")] == [
         "어라운드북",
         "교보문고",
         "소요서가",
     ]
 
-    bounded = provider.nearby_search("미소의집", radius_m=500)
-    assert [place.name for place in bounded] == ["우리은행"]
-    assert provider.nearby_search("미소의집", radius_m=10) == []
+    # A place from another question's context is a neighbour like any other when it is one.
+    assert [place.name for place in provider.nearby_search("미소의집", query="은행")] == [
+        "우리은행"
+    ]
+
+
+def test_a_retrieval_filters_by_type_in_whichever_vocabulary_the_caller_speaks() -> None:
+    provider = ContextMapProvider([NEARBY_CONTEXT, RADIUS_CONTEXT])
+
+    by_noun = provider.nearby_search("평화시장", query="서점", radius_m=20000)
+    by_code = provider.nearby_search("평화시장", category_code="BK9", radius_m=20000)
+    by_token = provider.nearby_search("평화시장", query="book_store", radius_m=20000)
+    assert [place.name for place in by_noun] == [place.name for place in by_token]
+    assert "우리은행" in [place.name for place in by_code]
+    assert "어라운드북" not in [place.name for place in by_code]
+
+    # A type this corpus does not record is not evidence of absence, so the neighbourhood answers.
+    unknown = provider.nearby_search("평화시장", query="병원", radius_m=20000)
+    assert [place.name for place in unknown][0] == "어라운드북"
+
+
+def test_a_place_is_not_among_its_own_neighbours() -> None:
+    """The anchor stands at zero metres from itself and would head every ranking it appears in."""
+
+    provider = ContextMapProvider([NEARBY_CONTEXT])
+    found = provider.nearby_search("평화시장", query="서점", radius_m=20000)
+    assert "평화시장" not in [place.name for place in found]
 
 
 def test_a_type_word_does_not_resolve_to_the_place_that_ends_in_it() -> None:
@@ -168,30 +198,6 @@ def test_a_branch_name_does_not_resolve_to_the_bare_brand_the_context_stores() -
     ])
     assert provider.search_place("GS25 합정프리미엄점") == []
     assert [place.name for place in provider.search_place("GS25")] == ["GS25"]
-
-
-def test_an_anchor_of_the_type_asked_about_still_heads_its_own_retrieval() -> None:
-    """Served as recorded: the context lists the anchor first, at zero metres, and so do we.
-
-    A convenience store asked for its nearest convenience store is in its own result, exactly as a
-    live API would return it. Reading past it is the agent's job, and it is the same job for both
-    architectures.
-    """
-
-    provider = ContextMapProvider([
-        "Information of <b>GS25 화곡초교점</b>:\n"
-        "- Location: 주소 정보 없음(37.5400000, 126.8400000).\n"
-        "- OSM ID: node/3.\n"
-        "- Type: convenience_store.\n"
-        "\n"
-        "Nearby convenience_store of GS25 화곡초교점 are (sorted by distance in ascending order):\n"
-        "1. <b>GS25 화곡초교점</b>(37.5400000, 126.8400000)\n"
-        "   - Address: 주소 정보 없음.\n"
-        "2. <b>CU 화곡본동점</b>(37.5410000, 126.8410000)\n"
-        "   - Address: 주소 정보 없음.\n"
-    ])
-    found = provider.nearby_search("GS25 화곡초교점", query="편의점")
-    assert [place.name for place in found] == ["GS25 화곡초교점", "CU 화곡본동점"]
 
 
 def test_a_recorded_route_is_returned_and_an_unrecorded_one_fails() -> None:
@@ -255,9 +261,9 @@ def test_a_place_the_agent_already_holds_is_addressable_by_id_and_by_coordinates
     assert [place.name for place in by_point] == [place.name for place in by_id]
     assert [place.name for place in provider.search_place("node/12192225021")] == ["미소의집"]
 
-    # A point the context does not describe is still a point, and what is near it is answerable.
+    # A point the corpus does not describe is still a point, and what is near it is answerable.
     anonymous = provider.nearby_search("37.5021000,126.9870000", query="은행", radius_m=500)
-    assert [place.name for place in anonymous] == ["우리은행", "미소의집"]
+    assert [place.name for place in anonymous] == ["우리은행"]
     assert provider.api_call_count == 0
 
 

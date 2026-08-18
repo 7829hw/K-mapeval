@@ -261,6 +261,67 @@ def _absorb(
                 )
 
 
+# A place type, in every vocabulary the three sides of this system speak: the token the context
+# writes, the Kakao category code a planner emits, and the Korean noun a question asks by. This is
+# generic over place types, never over questions — it is the same lexicon a geocoder keeps.
+TYPE_SYNONYMS: tuple[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]], ...] = (
+    (("convenience_store", "convenience"), ("CS2",), ("편의점",)),
+    (("supermarket",), ("MT1",), ("슈퍼마켓", "마트")),
+    # The source tags a butcher, a stationer and an electronics dealer alike as `store`, so this
+    # token answers only a generic noun. A question asking for one of those kinds finds no type
+    # match and gets the unfiltered neighbourhood, which is the honest answer: this corpus does not
+    # record the distinction, and the agent has to pick its option out of what is actually there.
+    (("store",), (), ("매장", "상점", "가게")),
+    (("bank",), ("BK9",), ("은행",)),
+    (("school",), ("SC4",), ("학교", "초등학교", "중학교", "고등학교")),
+    (("gas_station", "fuel"), ("OL7",), ("주유소", "충전소")),
+    (("train_station", "station"), ("SW8",), ("역", "지하철역", "기차역")),
+    (("cafe",), ("CE7",), ("카페", "커피")),
+    (("restaurant", "fast_food"), ("FD6",), ("음식점", "식당", "패스트푸드점", "패스트푸드")),
+    (("pharmacy",), ("PM9",), ("약국",)),
+    (("post_office",), ("PO3",), ("우체국",)),
+    (("police",), ("PO3",), ("경찰서", "파출소", "치안센터")),
+    (("library",), ("CT1",), ("도서관", "문고")),
+    (("museum",), ("CT1",), ("박물관",)),
+    (("art_gallery",), ("CT1",), ("미술관", "갤러리")),
+    (("tourist_attraction",), ("AT4",), ("관광명소", "관광안내소", "관광지")),
+    (("book_store", "books"), (), ("서점", "책방")),
+    (("bakery",), (), ("빵집", "베이커리", "제과")),
+    (("electronics_store", "electronics"), (), ("전자제품 매장", "전자제품", "가전")),
+    (("cosmetics",), (), ("화장품 매장", "화장품")),
+    (("florist", "flowers"), (), ("꽃집", "화원")),
+    (("laundry",), (), ("세탁소", "빨래방")),
+    (("stationery",), (), ("문구점", "문방구")),
+    (("butcher",), (), ("정육점", "축산")),
+    (("optician",), (), ("안경점",)),
+)
+
+
+def _type_token(value: str) -> str:
+    """The bare type, whether the context wrote `book_store` or `shop=books`."""
+
+    return value.strip().casefold().split("=")[-1]
+
+
+def _type_matches(place_type: str, query: str | None, category_code: str | None) -> bool:
+    """Whether a place of this type answers a retrieval asked for by keyword or Kakao code."""
+
+    token = _type_token(place_type)
+    if not token:
+        return False
+    normalized_query = " ".join((query or "").split()).casefold()
+    for tokens, codes, nouns in TYPE_SYNONYMS:
+        if token not in tokens:
+            continue
+        if category_code and category_code.upper() in codes:
+            return True
+        if normalized_query and any(noun.casefold() in normalized_query for noun in nouns):
+            return True
+        if normalized_query and token in normalized_query:
+            return True
+    return False
+
+
 def _distance(anchor: Place, place: Place) -> float:
     return haversine_meters(anchor.latitude, anchor.longitude, place.latitude, place.longitude)
 
@@ -458,43 +519,43 @@ class ContextMapProvider(MapProvider):
         radius_m: int = 2000,
         limit: int = 15,
     ) -> list[Place]:
-        """Answer with the retrieval the corpus stored for this anchor.
+        """Compute the retrieval over the corpus, the way a map database answers one.
 
-        Upstream's `get_nearby_places` looks the reference place up in the `nearby_places` table
-        and returns that block, re-ranked by distance — nothing else. A stored block *is* the
-        provider's answer for its anchor, so the radius argument narrows it only when the block is
-        itself radius-bounded (`in requested radius`); a k-nearest block carries no radius, and
-        trimming it to whatever radius the agent guessed would report an absence the corpus never
-        states. Kakao category codes do not filter it either: the block was retrieved by type
-        already, and re-filtering by a code the context never carried can only drop evidence.
+        The corpus is a place database, not an answer sheet. A MapEval context stores the *result*
+        of the query its question asks — a nearby list already filtered by type and already sorted
+        by distance — so replaying that block hands the agent the answer for the price of one tool
+        call, which is what upstream's `get_nearby_places` does and what made this benchmark
+        indistinguishable from MapEval-Textual. What a stored block legitimately contributes is its
+        places: a name, coordinates, an address, a type. Those go into the corpus like any other
+        place, and the ranking is computed here from coordinates, over every place the corpus
+        holds — including the ones that belong to other questions.
 
-        Where upstream misses and calls the Google Maps API, an anchor with no stored block falls
-        back to the places the corpus holds within the radius asked for — our direction and
-        distance questions ship coordinates without a retrieval — and then to the live provider
-        when one is configured.
+        Filtering is by type when the caller names one, in whichever vocabulary it speaks (a Kakao
+        category code, a Korean noun, or the context's own token). A filter that matches nothing
+        is not evidence of absence in a sparse corpus, so the unfiltered neighbourhood answers
+        instead and the agent sees what is actually there.
         """
 
         anchor = self._resolve_center(center)
-        stored: list[Place] = []
-        for block in self._corpus.nearby:
-            if _name_score(block.anchor, anchor.name) <= 0:
-                continue
-            for place in block.places:
-                if block.radius_bounded and _distance(anchor, place) > radius_m:
-                    continue
-                stored.append(place)
-        results = stored or [
+        within = [
             place
             for place in self._corpus.all_places()
             if place.place_id != anchor.place_id and _distance(anchor, place) <= radius_m
         ]
-        if query and not stored:
-            named = [place for place in results if _name_score(query, place.name) > 0]
-            results = named or results
-        results.sort(key=lambda place: _distance(anchor, place))
-        if results:
+        if query or category_code:
+            typed = [
+                place
+                for place in within
+                if _type_matches(place.category, query, category_code)
+            ]
+            named = [place for place in within if query and _name_score(query, place.name) > 0]
+            matched = typed or named
+            if matched:
+                within = matched
+        within.sort(key=lambda place: _distance(anchor, place))
+        if within:
             self._cache_hits += 1
-            return results[: max(1, limit)]
+            return within[: max(1, limit)]
         return self._miss(
             lambda provider: provider.nearby_search(
                 anchor,

@@ -71,6 +71,16 @@ What upstream does:
 - Operators query the cache first and **fall back to the Google Maps API on a miss**
   (`query_local_place` returns `None`, the geocode call runs). The README states this plainly:
   "Google Maps API fallback for cache misses."
+- **The cache is optional and is not the paper's evaluation setting.** `SpatialAgent.__init__`
+  always constructs a `GoogleMapsClient` and only initializes the cache `if db_path.exists()`,
+  logging a fall-through to the live API otherwise; `test_agent.py` has no flag for it at all; and
+  the README calls it "an optional local context cache" for "faster and more reliable evaluation",
+  shipping no prebuilt database. It is a cost and latency shortcut in a reimplementation, not the
+  arrangement the paper's MapEval-API numbers come from — which is live API calls.
+- **MapEval-API and MapEval-Textual are the same 300 questions**, ids included; API is Textual
+  with the `context` field removed. So a cache built from Textual and used on API is, question for
+  question, the retrieval that answers it — which is what "the strongest results depend on a local
+  SQLite context cache" amounts to.
 - `get_nearby_places(reference_place, category)` returns **the stored block for that reference
   place and nothing else**, re-ranked by haversine distance. It never scans the place table by
   radius.
@@ -91,12 +101,16 @@ What this repo does, and why:
 - `--provider hybrid` is upstream's cache-then-live arrangement with Kakao in Google's place.
   `--provider context` (the default) runs the corpus alone, so a run needs no Kakao key and a miss
   stays a miss.
-- A stored nearby block is returned alone, as upstream returns it. Only a radius-bounded block
-  honours the radius argument; a k-nearest block has no radius to honour, and Kakao category codes
-  cannot filter a block the context never tagged with one. Where upstream misses and calls the API,
-  an anchor with no stored block falls back to the corpus places within the radius asked for — our
-  direction and distance questions ship coordinates without a retrieval — and then to the live
-  provider when one is configured.
+- **Retrievals are computed, not replayed.** This is the one place the port deliberately does not
+  follow upstream, and the reason is an evaluation-validity flaw in upstream that this repo
+  reproduced and then measured. MapEval-API is MapEval-Textual with the `context` field removed —
+  the same 300 questions, the same ids — so a cache built from Textual holds, for every API
+  question, the retrieval result that answers it. `get_nearby_places` returns that block already
+  filtered by type and already sorted by distance, which makes one tool call sufficient and
+  collapses the API setting into the Textual one. Ported faithfully, it produced ReAct 100/100.
+  Here the block contributes its *places* to the corpus and `nearby_search` computes the ranking
+  from coordinates over the whole corpus, filtered by type through `TYPE_SYNONYMS`. That is also
+  what a live map API does: Kakao and Google compute, only a frozen context is pre-computed.
 - Counters follow the upstream framing: the corpus *is* the cache, so it costs no API call; an
   answered lookup is a hit, an unanswerable one a miss.
 

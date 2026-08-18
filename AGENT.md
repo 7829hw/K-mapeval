@@ -324,14 +324,24 @@ records the file-by-file comparison against `ecerybao/Spatial-Agent@6876bba`; th
   it cannot answer is a cache miss. With a `fallback` provider the miss goes there, which is
   upstream's Google Maps fallback; without one the miss is the answer and the caller raises the
   `PlaceNotFoundError` / `RouteNotFoundError` a missing POI deserves.
-- **A stored nearby block is the answer for its anchor, and is served alone.** Upstream's
-  `get_nearby_places` returns that block and nothing else. The radius argument narrows it only when
-  the block is itself radius-bounded (`in requested radius`); a k-nearest block (`sorted by
-  distance`) carries no radius, so trimming it to whatever radius the agent guessed would report an
-  absence the corpus never states. Kakao category codes do not filter a block either — it was
-  retrieved by type already. An anchor with *no* stored block falls back to the corpus places
-  within the radius asked for (our direction and distance questions ship coordinates without a
-  retrieval), and then to the live provider when one is configured.
+- **The corpus is a place database, not an answer sheet.** A MapEval context stores the *result*
+  of the query its question asks: a nearby list already filtered by type and already sorted by
+  distance. Replaying that block — which is what upstream's `get_nearby_places` does — hands the
+  agent the answer for the price of one tool call, and the benchmark stops being distinguishable
+  from MapEval-Textual, which is exactly what happened: ReAct scored 100/100. What a stored block
+  legitimately contributes is its *places*; the ranking is computed in `nearby_search` from
+  coordinates, over every place the corpus holds, including the ones belonging to other questions.
+  Do not restore block replay.
+- **A retrieval filters by type, in whichever vocabulary the caller speaks.** `TYPE_SYNONYMS` maps
+  the context's own token, the Kakao category code a planner emits, and the Korean noun a question
+  asks by onto one place type. It is generic over place types, never over questions — the same
+  lexicon a geocoder keeps. A filter that matches nothing is not evidence of absence in a sparse
+  corpus, so the unfiltered neighbourhood answers instead: the source tags a butcher, a stationer
+  and an electronics dealer alike as `store`, and a question asking for one of those has to be
+  answered from what is actually there. Never conflate two types to make a filter hit — lumping
+  `store` with `supermarket` put 정육점 above the supermarkets in a supermarket question.
+- **A place is not among its own neighbours,** in the provider as well as in `nearest`: the anchor
+  stands at zero metres from itself and would head every ranking it appears in.
 - **Containment is evidence in one direction only.** A brand may lead the branch that extends it
   (`CU` → `CU 삼청점`), because the registry's own query variants shorten names that way. The
   reverse must not match: a corpus entry for a bare `GS25` recorded whichever GS25 the retrieval

@@ -10,7 +10,7 @@ from src.config import Settings
 from src.dataset import load_dataset
 from src.evaluator import Evaluator
 from src.llm import OpenAIChatClient
-from src.tools import KakaoMapProvider, ToolRegistry
+from src.tools import ContextMapProvider, KakaoMapProvider, MapProvider, ToolRegistry
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -21,7 +21,16 @@ def build_parser() -> argparse.ArgumentParser:
         default="both",
         help="Agent architecture to evaluate (default: both)",
     )
-    result.add_argument("--dataset", default="dataset/sample.jsonl")
+    result.add_argument("--dataset", default="dataset/seoul_mapeval_v1_mcq_100.jsonl")
+    result.add_argument(
+        "--provider",
+        choices=("auto", "context", "kakao"),
+        default="auto",
+        help=(
+            "Where tools get their evidence: the context each dataset row carries, or the live "
+            "Kakao APIs (default: auto, which picks context when every row has one)"
+        ),
+    )
     result.add_argument("--output-dir", default="reports")
     result.add_argument("--ids", nargs="*", help="Optional question IDs")
     result.add_argument(
@@ -33,13 +42,12 @@ def build_parser() -> argparse.ArgumentParser:
     return result
 
 
-@contextmanager
-def create_agent_session(
-    agent_type: str, settings: Settings
-) -> Iterator[ReactAgent | SpatialAgent]:
-    """Create resources owned by exactly one benchmark worker thread."""
+def build_provider(provider_kind: str, settings: Settings) -> MapProvider:
+    """Build the evidence source both architectures share for this run."""
 
-    provider = KakaoMapProvider(
+    if provider_kind == "context":
+        return ContextMapProvider()
+    return KakaoMapProvider(
         settings.kakao_rest_api_key,
         timeout=settings.kakao_timeout_seconds,
         cache_path=settings.kakao_cache_db_path,
@@ -47,6 +55,15 @@ def create_agent_session(
         search_center=settings.search_center(),
         search_radius_m=settings.kakao_search_radius_m,
     )
+
+
+@contextmanager
+def create_agent_session(
+    agent_type: str, settings: Settings, provider_kind: str
+) -> Iterator[ReactAgent | SpatialAgent]:
+    """Create resources owned by exactly one benchmark worker thread."""
+
+    provider = build_provider(provider_kind, settings)
     llm: OpenAIChatClient | None = None
     try:
         llm = OpenAIChatClient(settings)
@@ -65,23 +82,42 @@ def create_agent_session(
             provider.close()
 
 
+def resolve_provider_kind(requested: str, dataset: list) -> str:
+    """Choose the evidence source, and refuse to silently answer from the wrong one."""
+
+    with_context = sum(1 for item in dataset if item.context)
+    if requested == "context":
+        if with_context != len(dataset):
+            raise ValueError(
+                f"--provider context needs a context on every row; {with_context}/{len(dataset)} "
+                "have one"
+            )
+        return "context"
+    if requested == "kakao":
+        return "kakao"
+    return "context" if with_context == len(dataset) else "kakao"
+
+
 def run(agent_type: str, args: argparse.Namespace) -> dict:
     settings = Settings()
     settings.require_llm()
-    settings.require_kakao()
     dataset = load_dataset(args.dataset)
     if args.ids:
         wanted = set(args.ids)
         dataset = [item for item in dataset if item.id in wanted]
         if not dataset:
             raise ValueError("None of --ids were found in the dataset")
+    provider_kind = resolve_provider_kind(args.provider, dataset)
+    if provider_kind == "kakao":
+        settings.require_kakao()
+    print(f"Evidence source: {provider_kind}")
     concurrency = settings.benchmark_concurrency if args.concurrency is None else args.concurrency
     if not 1 <= concurrency <= 32:
         raise ValueError("--concurrency must be between 1 and 32")
     report = Evaluator(
         None,
         dataset,
-        agent_factory=lambda: create_agent_session(agent_type, settings),
+        agent_factory=lambda: create_agent_session(agent_type, settings, provider_kind),
         max_workers=concurrency,
         output_dir=Path(args.output_dir),
         dataset_path=args.dataset,
@@ -90,6 +126,7 @@ def run(agent_type: str, args: argparse.Namespace) -> dict:
         llm_profile={
             "llm_model": settings.llm_model,
             "llm_base_url": settings.llm_base_url,
+            "provider": provider_kind,
         },
         question_retries=settings.benchmark_question_retries,
         question_retry_backoff_seconds=settings.benchmark_question_retry_backoff_seconds,

@@ -234,6 +234,7 @@ class Evaluator:
                 log_dir=self.log_dir,
                 option_count=len(options),
             ) as logger:
+                agent.use_question_context(item.context)
                 result = agent.answer(question, options)
                 log_agent_result(logger, result, correct_answer=item.answer)
             elapsed = time.time() - started

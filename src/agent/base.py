@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to type checkers
+    from src.tools import ToolRegistry
 
 
 class AgentResult(BaseModel):
@@ -26,9 +29,22 @@ class AgentResult(BaseModel):
 
 class BenchmarkAgent(ABC):
     agent_type: str
+    # Every benchmarked agent owns one; a test double answering from a script owns none.
+    tools: ToolRegistry | None = None
 
     @abstractmethod
     def answer(self, question: str, options: list[str]) -> AgentResult: ...
+
+    def use_question_context(self, context: str | None) -> None:
+        """Point the tool layer at the evidence cached for the next question.
+
+        The context reaches the provider, never the agent: both architectures still have to choose
+        tools and still read the same normalized objects, so the comparison is unchanged by where
+        the evidence came from.
+        """
+
+        if self.tools is not None:
+            self.tools.provider.activate_context(context)
 
 
 def format_question(question: str, options: list[str]) -> str:

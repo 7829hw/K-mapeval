@@ -26,6 +26,9 @@ class BenchmarkItem(BaseModel):
     options: list[str] = Field(min_length=2, max_length=4)
     answer: int = Field(ge=0)
     classification: BenchmarkClassification
+    # Retrieval results the dataset ships for this question, in MapEval's context format. It is
+    # provider evidence, not agent input: the tool layer serves it, `agent_input` never returns it.
+    context: str | None = None
     region: str | None = None
     difficulty: Literal["easy", "medium", "hard"] | None = None
     verified_at: str | None = None

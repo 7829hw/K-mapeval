@@ -27,7 +27,9 @@
 
 - Template retrieval is keyword based, not embedding based.
 - Factorization and concept binding are deterministic, not SFT/DPO learned.
-- Kakao live POIs replace the upstream Google/MapEval-Textual evidence snapshot.
+- Evidence comes from one of two interchangeable sources, recorded per run in
+  `metadata.provider`: a per-question context shipped with the dataset (the port of upstream's
+  MapEval-Textual setting, see below), or live Kakao POIs.
 - Kakao Mobility support is driving-only.
 - The benchmark router uses the LLM analysis intent; Korean heuristics are only a fallback when the
   returned intent is missing or unsupported.
@@ -52,6 +54,32 @@ map-data environment.
 Reports from this repository must therefore be labeled **prompting-only**. They are not directly
 comparable to the paper's SFT+DPO headline results, because the learned policy, original weights,
 embedding example store, and original map evidence snapshot are not included.
+
+## Context evidence (MapEval-Textual port)
+
+- **Upstream:** MapEval-Textual gives the model the retrieval results in the prompt and the model
+  answers without tools. **Here:** the same context is loaded *behind* the tool layer by
+  `ContextMapProvider`, so both architectures still choose tools and still read normalized
+  `Place` / `Route` objects. Handing the text to the agent would remove the tool layer from the
+  experiment, and the experiment is about agent architecture.
+- `BenchmarkItem.context` is provider evidence, not agent input: `agent_input()` is unchanged, and
+  the evaluator binds the context through `agent.use_question_context` → `activate_context` before
+  every question — including with `None`, so no context outlives its question.
+- Counters map the upstream framing exactly: the context *is* the cache, so `api_call_count` stays
+  0, an answered lookup is a cache hit, and an unanswerable one is a cache miss followed by the same
+  `ProviderError` the Kakao path raises.
+- A stored nearby retrieval is served as recorded. Only a radius-bounded block honours the radius
+  argument; a k-nearest block has no radius to honour, and Kakao category codes cannot filter a
+  block the context never tagged with one.
+- Name matching reuses the Kakao path's floor and distinguishing-residue guard, with containment
+  narrowed to one direction (a brand may lead its branch; a branch may not match a bare brand).
+  In a closed world of a dozen places the undirected rule let a place-type option resolve to the
+  place the question was asking about.
+- Place types are served in the context's own vocabulary (`convenience_store`, `amenity=bank`).
+  Translating them into the Korean nouns a place-type question offers as options would be supplying
+  part of the answer.
+- The context can only answer what its generator recorded, so a distractor invented for the MCQ
+  legitimately does not exist. That is the upstream property too, not a provider defect.
 
 ## Kakao-specific constraints
 
@@ -84,3 +112,18 @@ embedding example store, and original map evidence snapshot are not included.
   two different places. `distinguishing_similarity` compares only what is left between the shared
   prefix and suffix, and option-to-POI matching (`_assign_unique_matches`) is one-to-one so a
   single retrieved POI cannot answer several options at once.
+- **Neighbourhood membership is not name evidence.** Google Places answers a keyword query with
+  places bearing that name, so upstream can trust a location-biased search. Kakao Local answers a
+  name it does not carry with places of the same *kind* near the bias point: `신사정육점` returned
+  `한아름축산`, `쌍문1치안센터` returned `수유6치안센터`. Both looked resolved, and both replaced
+  the question's POI with a different one. The anchored branch of `_resolve_batch` therefore applies
+  the same name-evidence floor as the nationwide branch, and falls back to the nationwide search
+  when the neighbourhood has nothing by that name. The one licence proximity buys is
+  `allow_cross_script`, for a brand whose Kakao entry is transliterated (`A TWOSOME PLACE` /
+  투썸플레이스); `strict_names`, which the distance path sets, withdraws it.
+- **Option texts may carry an address, and institutions may carry two names.** The Korean source
+  datasets disambiguate namesakes by appending the address to the option text and follow OSM's
+  choice between 치안센터 and 파출소, neither of which appears in a Kakao place name.
+  `strip_location_qualifier` drops the appended address before any name comparison or keyword
+  query, and `_search_key` folds the two institution words together. Upstream needs neither: its
+  option texts are bare names over a single naming authority.

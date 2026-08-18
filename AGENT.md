@@ -6,10 +6,18 @@ edit here, not there.
 ## What this is
 
 A research MVP that compares a MapEval-style **ReAct** agent against a **Spatial-Agent** (GeoFlow)
-port on Korean multiple-choice map questions, both driven by the same Kakao-backed tool layer. The
-research question is whether Spatial-Agent's reported gains reproduce on Korean geography and POI
-data. The independent variable is agent architecture — everything below the agent (provider, tools,
-cache, normalized schemas, evaluator) must stay identical for both.
+port on Korean multiple-choice map questions, both driven by the same tool layer. The research
+question is whether Spatial-Agent's reported gains reproduce on Korean geography and POI data. The
+independent variable is agent architecture — everything below the agent (provider, tools, cache,
+normalized schemas, evaluator) must stay identical for both.
+
+The tool layer has two interchangeable evidence sources, chosen per run and never mixed:
+
+- **context** (`ContextMapProvider`) — the default. Each dataset row ships the retrieval results it
+  can be answered from, in MapEval's context format, and the provider serves those instead of
+  calling anything. This is the port of upstream Spatial-Agent's MapEval-Textual setting.
+- **kakao** (`KakaoMapProvider`) — live Kakao Local / Kakao Mobility, with the SQLite cache and the
+  region prior. Needed only for a dataset whose rows carry no context.
 
 `K-MapEval_PRD.md` is the full spec. `docs/REFERENCE_MAPPING.md` records every deliberate deviation
 from the upstream MapEval / Spatial-Agent implementations — update it when you add another one.
@@ -34,23 +42,24 @@ pytest tests/test_tools_and_agents.py::test_react_executes_common_tool_then_pars
 pytest -k geoflow
 ruff check .                 # line-length 100, rules E,F,I,UP,B
 
-python main.py --agent react
+python main.py --agent react                  # dataset/seoul_mapeval_v1_mcq_100.jsonl, context evidence
 python main.py --agent spatial
-python main.py --agent both --dataset dataset/seoul_mapqa_kr_mcq_100.jsonl
-python main.py --agent both --dataset dataset/test.jsonl --ids nearby_001 poi_001
+python main.py --agent both --ids seoul_mapqa_v0_000907 seoul_mapqa_v0_000009
+python main.py --agent both --provider kakao   # live Kakao instead of the shipped context
 python main.py --agent spatial --concurrency 4
 ```
 
-Running `main.py` costs real LLM tokens and Kakao API quota. Every test in `tests/` fakes both, so
-verify with `pytest` first and only run the benchmark when the user asks for live numbers. Keep unit
-tests mocked (`httpx.MockTransport` for Kakao, a queued fake for the LLM); any live-API test stays
-separate and optional.
+Running `main.py` costs real LLM tokens, and `--provider kakao` costs Kakao API quota on top. Every
+test in `tests/` fakes both, so verify with `pytest` first and only run the benchmark when the user
+asks for live numbers. Keep unit tests mocked (`httpx.MockTransport` for Kakao, a queued fake for
+the LLM); any live-API test stays separate and optional.
 
 ## Layering (do not shortcut it)
 
 ```
-main.py → Evaluator → ReactAgent | SpatialAgent → ToolRegistry → MapProvider (KakaoMapProvider)
-                                                              → SQLiteMapCache → Kakao HTTP APIs
+main.py → Evaluator → ReactAgent | SpatialAgent → ToolRegistry → MapProvider
+                                                    ├→ ContextMapProvider → the row's own context
+                                                    └→ KakaoMapProvider → SQLiteMapCache → Kakao
 Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, zero API calls)
 ```
 
@@ -115,15 +124,32 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   applies `NAME_EVIDENCE_FLOOR` and returns `None` when the winner shares no containment and too
   little similarity with the query — a name Kakao does not have must fail as `PlaceNotFoundError`,
   not resolve to whatever scored least badly (`마천1치안센터` → `웅동파출소`, 100 km away, zero
-  characters in common). The floor applies only where the name *is* the evidence: candidates from a
-  nationwide keyword search must clear it, while candidates from an anchored neighbourhood search
-  are already spatially constrained, so a brand written the question's way (`S-OIL` for 에쓰오일,
-  `OLYMPUS` for 올림푸스한국) still resolves — `require_name_evidence` carries that distinction, and
-  enforcing the floor on both paths empties `filter_by_direction` and collapses direction accuracy.
+  characters in common). Every candidate must clear it, wherever it came from.
   `match_distance_options` reports the same idea as `fits` / `error_ratio`:
   the nearest option is always *some* option, and a kilometre-scale error means the places were
   resolved wrong, not that the answer is the least-bad number. Do not restore a "closest wins"
   fallback in either place.
+- **Proximity is not identity, and containment is not always evidence.** Kakao's keyword search
+  is tolerant, so asking an anchor's neighbourhood for a name Kakao does not carry answers with
+  places of the same *kind*: `신사정육점` came back as `한아름축산`, `쌍문1치안센터` as
+  `수유6치안센터`. Both resolved, both were a different POI, and every operator downstream then
+  computed correctly over the wrong place. So the anchored path in `_resolve_batch` requires name
+  evidence too; being near the anchor buys exactly one licence, `allow_cross_script`, for a brand
+  whose Kakao entry is written in the other script (`A TWOSOME PLACE` / 투썸플레이스, `S-OIL` /
+  에쓰오일), where characters cannot testify either way — and `strict_names` withdraws even that.
+  When the neighbourhood holds nothing by that name, widen to the nationwide search before giving
+  up; that recovers more places than the old exemption ever fabricated. `_containment_is_evidence`
+  guards the other end: a short name is a substring of a great many long ones, so containment
+  counts only when the shorter key leads the longer (올리브영 / 올리브영 거여역점) or makes up half
+  of it — `압구정` inside `해피냠냠라면가게한강버스압구정선착장점` resolved a distance question to a
+  POI 12 km from the one asked about.
+- **A name is a name, not a name plus an address.** A dataset that has to separate two same-named
+  options appends the address to the option text (`버거킹 - 서울특별시 용산구 한강로2가 한강대로
+  92`). Kakao indexes names only, so `strip_location_qualifier` (`src/tools/spatial.py`) drops that
+  tail inside `_search_key`, `_name_key`, and `_query_variants` — without it the tail drags every
+  similarity below the floor and the option cannot resolve at all. `_search_key` folds 파출소 into
+  치안센터 for the same reason: which of the two names an institution goes by is editorial, so the
+  distinguishing part (연남) has to decide, not the institution word.
 - No separate HTTP backend server, web UI, or extra datastore beyond the SQLite cache. Keep
   `src/agent/` and `src/tools/` as the only source subpackages and `main.py` as the only entry
   point.
@@ -254,17 +280,74 @@ expire) and a `SCHEMA_VERSION` that must be bumped when the stored payload shape
 `statistics` / `results`. Primary metric is overall MCQ accuracy; per-classification accuracy, tool
 calls, API calls, cache hits/misses, latency, and failures are reported alongside it.
 
+## The context provider
+
+`src/tools/context.py` ports upstream Spatial-Agent's MapEval-Textual setting: the evidence a
+question is answered from travels with the question instead of coming from an API.
+
+- **The context reaches the provider, never the agent.** `BenchmarkItem.context` is provider
+  evidence, not agent input — `agent_input()` still returns only `(question, options)`. The
+  evaluator calls `agent.use_question_context(item.context)` before every question, which forwards
+  to `MapProvider.activate_context`; both architectures then discover the same evidence only by
+  calling the same tools. Handing the text to the agent instead would delete the tool layer from
+  the experiment and measure prompt reading, not agent architecture.
+- **Bind on every question, including `None`.** One question's context must never answer the next
+  one's lookups, and the evaluator's per-question call is what guarantees it.
+- **The context is the cache.** No lookup is an API call (`api_call_count` stays 0); a lookup the
+  context answers is a cache hit and one it cannot answer is a cache miss. A name the context does
+  not hold raises `PlaceNotFoundError`, and a route it did not record raises `RouteNotFoundError` —
+  a fabricated distractor has to fail the way a missing Kakao POI fails, not resolve to a neighbour.
+- **A nearby block is a stored retrieval, and is served as recorded.** The radius argument narrows
+  it only when the block is itself radius-bounded (`in requested radius`). A k-nearest block
+  (`sorted by distance`) carries no radius, so trimming it to whatever radius the agent guessed
+  would report an absence the context never states. Places mentioned outside any block were not
+  retrieved together, so those *are* filtered by the radius asked for. Kakao category codes do not
+  filter a block either: the block was retrieved by type already, and re-filtering by a code the
+  context never carried can only drop evidence. For the same reason the anchor stays in its own
+  block when the dataset put it there — reading past a 0 m self-match is the agent's job, equally
+  for both architectures.
+- **Containment is evidence in one direction only.** A brand may lead the branch that extends it
+  (`CU` → `CU 삼청점`), because the registry's own query variants shorten names that way. The
+  reverse must not match: a context storing a bare `GS25` recorded whichever GS25 the retrieval
+  found, not the `GS25 합정프리미엄점` an option names. Allowing it also lets a place-type question
+  answer itself, since `편의점` sits inside `다모아편의점` — the option would resolve to the very
+  place being asked about. Below containment, `NAME_MATCH_FLOOR` and `distinguishing_similarity`
+  apply exactly as on the Kakao path.
+- **The category is served as the context wrote it** (`convenience_store`, `amenity=bank`), not
+  translated into Korean. A cache serves what it stored; inventing a Korean label for a place-type
+  question would be supplying part of the answer.
+
 ## Datasets
 
 JSONL, one `BenchmarkItem` per line, unique ids, 2–4 options, `answer` a 0-based index, and
 `classification` from `nearby | poi | routing | trip | type | direction | distance | radius`
 (the same eight values are `SUPPORTED_INTENTS` in `src/agent/spatial.py` — extending the set means
 touching both, plus the intent heuristics and evaluation rules). Extra fields are allowed
-(`verification_status`, etc.). `dataset/sample.jsonl` is an unverified development fixture; treat
-answers as unvalidated until someone confirms them against live Kakao data and sets `verified_at`.
-Building the full Korean research benchmark is a separate task, not something to expand into
-incidentally.
+(`context`, `template_id`, `verification_status`, …). Building the full Korean research benchmark is
+a separate task, not something to expand into incidentally.
 
-Because this repo runs the prompting-only path (no SFT/DPO, no embedding retrieval, Kakao instead of
-the paper's Google/MapEval-Textual snapshot), reports must be labeled prompting-only and must not be
-presented as reproducing the paper's headline numbers.
+`dataset/seoul_mapeval_v1_mcq_100.jsonl` is the benchmark: 100 rows sampled from
+`dataset/seoul_mapeval_v1.json` (an OSM-derived Seoul pool, 1530 complete records — the file was
+transferred truncated mid-record, so a reader must decode the complete objects and stop at the
+break). The recipe, seed `20260818`:
+
+- One quota per source template, so no family is spent on one question shape: `nearest_by_type` 20,
+  `direction_by_type` 20, `distance_between` 20, `within_radius_by_type` 15, `type` 15,
+  `routing_duration_value` 4, `routing_distance_value` 3, `routing_shortest_duration` 3.
+- Distinct anchor place per row (100/100), and no repeated question text.
+- `classification` comes from the source `template_id`, not its coarse `nearby|poi|routing` label —
+  the eight-way vocabulary is what this benchmark reports by, and the template already encodes it.
+- **Options are shuffled per row**, seeded by question id. The source generator emits distance
+  options in ascending order and never shuffles, so its entire `distance_between` family carries
+  gold at index 2; shuffling every row alike removes option position as evidence in every family
+  without special-casing one.
+
+All 100 gold answers are derivable from the shipped context by deterministic computation through
+the provider — verify that before trusting a run's accuracy, since a wrong answer then means the
+agent, not the evidence.
+
+Because this repo runs the prompting-only path (no SFT/DPO, no embedding retrieval, and an
+OSM-derived Korean context rather than the paper's MapEval-Textual snapshot), reports must be
+labeled prompting-only and must not be presented as reproducing the paper's headline numbers. A
+report's `metadata.provider` records which evidence source produced it, and runs from different
+sources must never be pooled.

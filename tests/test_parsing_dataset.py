@@ -23,11 +23,28 @@ def test_json_parser_handles_fenced_output() -> None:
     assert parse_json_object('```json\n{"intent":"poi"}\n```') == {"intent": "poi"}
 
 
-def test_sample_dataset_is_valid_and_balanced() -> None:
-    items = load_dataset(Path("dataset/sample.jsonl"))
-    assert len(items) == 8
-    assert {item.classification for item in items} == {"nearby", "poi", "routing", "trip"}
+def test_context_benchmark_is_valid_and_carries_its_own_evidence() -> None:
+    items = load_dataset(Path("dataset/seoul_mapeval_v1_mcq_100.jsonl"))
+    assert len(items) == 100
+    assert {item.classification for item in items} == {
+        "nearby",
+        "radius",
+        "type",
+        "direction",
+        "distance",
+        "routing",
+    }
     assert all(0 <= item.answer < len(item.options) for item in items)
+    assert all(item.context for item in items)
+
+
+def test_the_context_never_reaches_the_agent() -> None:
+    items = load_dataset(Path("dataset/seoul_mapeval_v1_mcq_100.jsonl"))
+    question, options = items[0].agent_input()
+    assert question == items[0].question
+    assert options == items[0].options
+    assert items[0].context not in question
+    assert all(items[0].context not in option for option in options)
 
 
 def test_invalid_gold_index_is_rejected() -> None:

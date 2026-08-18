@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from src.models import Place
 from src.tools.map import MapProvider, PlaceNotFoundError
-from src.tools.spatial import haversine_meters
+from src.tools.spatial import distinguishing_similarity, haversine_meters
 
 KakaoCategoryCode = Literal[
     "MT1",
@@ -661,10 +661,27 @@ class ToolRegistry:
                 match
                 and _place_represents_option(option, match)
                 and match.place_id not in seen_place_ids
+                and _within_anchor_radius(args.anchor, match, args.radius_m)
             ):
                 places.append(match)
                 seen_place_ids.add(match.place_id)
         return places
+
+
+
+def _within_anchor_radius(anchor: Place, place: Place, radius_m: int) -> bool:
+    """Whether a recovered place is close enough to the anchor to be one of the answers.
+
+    The anchored search is already bounded, but the nationwide name fallback is not: it answered
+    "is there a 꽃담공방 anywhere" with one 129 km away, and the option then entered the candidate
+    set as if it were near the anchor. A proximity question cannot be answered by a place outside
+    the radius it was asked about.
+    """
+
+    return (
+        haversine_meters(anchor.latitude, anchor.longitude, place.latitude, place.longitude)
+        <= radius_m
+    )
 
 
 def _jsonable(value: Any) -> Any:
@@ -810,7 +827,14 @@ def _names_the_same_place(normalized_query: str, place: Place) -> bool:
     normalized_name = _search_key(place.name)
     if normalized_query in normalized_name or normalized_name in normalized_query:
         return True
-    return SequenceMatcher(None, normalized_query, normalized_name).ratio() >= NAME_EVIDENCE_FLOOR
+    if SequenceMatcher(None, normalized_query, normalized_name).ratio() < NAME_EVIDENCE_FLOOR:
+        return False
+    # Two branches of one brand agree on everything except the part that names the branch, so the
+    # bare-brand retry ("CU" for CU 구로소담점) scores above the floor while denoting a different
+    # shop — under the region prior, whichever CU sits nearest the benchmark's centre. Judge the
+    # residue between the shared affixes; a residue too short to distinguish anything
+    # (CU 가락센트럴점 against Kakao's CU 가락센타점) is a spelling variant and is left alone.
+    return distinguishing_similarity(normalized_query, normalized_name) >= NAME_EVIDENCE_FLOOR
 
 
 def _proximity_score(anchor: Place | None, place: Place) -> float:

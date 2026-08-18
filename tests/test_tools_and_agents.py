@@ -1535,3 +1535,137 @@ def test_grounding_gives_option_recovery_the_questions_radius_and_category() -> 
     assert arguments["options"] == ["오목교", "목동", "까치산", "오목교 | 목동"]
     assert arguments["radius_m"] == 500
     assert arguments["category_code"] == "SW8"
+
+
+def test_a_sibling_branch_of_the_same_brand_is_not_the_queried_branch() -> None:
+    """The bare-brand retry finds a different shop; only the branch part tells them apart."""
+
+    class BrandOnlyProvider(FakeProvider):
+        def search_place(self, query: str, *, limit: int = 5) -> list[Place]:
+            self._api_calls += 1
+            # Kakao has no CU 구로소담점, so the exact query is empty and the brand-only retry
+            # answers with whichever CU sits nearest the region prior's centre.
+            if query.strip() != "CU":
+                return []
+            return [
+                Place(
+                    place_id="other",
+                    name="CU 중구세종대로점",
+                    address="서울 중구",
+                    latitude=37.5665,
+                    longitude=126.9780,
+                    category="가정,생활 > 편의점 > CU",
+                )
+            ]
+
+        def nearby_search(self, center: str | Place, **kwargs: Any) -> list[Place]:
+            self._api_calls += 1
+            return []
+
+    execution = ToolRegistry(BrandOnlyProvider()).invoke(
+        "batch_geocode", {"place_names": ["CU 구로소담점"], "limit": 1}
+    )
+
+    assert execution.status == "ok"
+    assert execution.output[0]["place"] is None
+    assert "PlaceNotFoundError" in execution.output[0]["error"]
+
+
+def test_a_kakao_spelling_of_the_same_branch_still_resolves() -> None:
+    """The distinguishing residue must be long enough to distinguish before it can reject."""
+
+    class SpellingProvider(FakeProvider):
+        def search_place(self, query: str, *, limit: int = 5) -> list[Place]:
+            self._api_calls += 1
+            return [
+                Place(
+                    place_id="store",
+                    name="CU 가락센타점",
+                    address="서울 송파구",
+                    latitude=37.4950,
+                    longitude=127.1180,
+                    category="가정,생활 > 편의점 > CU",
+                )
+            ]
+
+    execution = ToolRegistry(SpellingProvider()).invoke(
+        "batch_geocode", {"place_names": ["CU 가락센트럴점"], "limit": 1}
+    )
+
+    assert execution.status == "ok"
+    assert execution.output[0]["place"]["place_id"] == "store"
+
+
+def test_option_recovery_drops_a_namesake_outside_the_asked_radius() -> None:
+    """The nationwide fallback answers "anywhere", which a proximity question never asks."""
+
+    anchor = Place(
+        place_id="anchor", name="먹골", address="서울 중랑구",
+        latitude=37.6100, longitude=127.0770,
+    )
+
+    class NationwideProvider(FakeProvider):
+        def nearby_search(self, center: str | Place, **kwargs: Any) -> list[Place]:
+            self._api_calls += 1
+            return []
+
+        def search_place(self, query: str, *, limit: int = 5) -> list[Place]:
+            self._api_calls += 1
+            return [
+                Place(
+                    place_id="faraway", name="꽃담공방", address="전남 순천시",
+                    latitude=34.9500, longitude=127.4870,
+                )
+            ]
+
+    execution = ToolRegistry(NationwideProvider()).invoke(
+        "recover_option_places",
+        {"anchor": anchor, "candidates": [], "options": ["꽃담공방"], "radius_m": 20000},
+    )
+
+    assert execution.status == "ok"
+    assert execution.output == []
+
+
+def test_one_retrieved_place_cannot_support_two_options() -> None:
+    """A single POI is one place, so it answers at most one candidate option."""
+
+    anchor = {"name": "유진마트", "latitude": 37.6200, "longitude": 127.0700}
+    school = {"name": "서울공릉초등학교", "latitude": 37.6210, "longitude": 127.0710}
+
+    result = SpatialOperatorRegistry.match_options(
+        options=["서울오륜초등학교", "서울평화초등학교"],
+        places=[school],
+        anchor=anchor,
+    )
+
+    matched = [match for match in result["option_matches"] if match["matched"]]
+    assert len(matched) <= 1
+
+
+def test_a_shared_generic_suffix_is_not_evidence_of_the_same_place() -> None:
+    """서울오륜초등학교 and 서울공릉초등학교 differ exactly where the name identifies a school."""
+
+    anchor = {"name": "유진마트", "latitude": 37.6200, "longitude": 127.0700}
+    school = {"name": "서울공릉초등학교", "latitude": 37.6210, "longitude": 127.0710}
+
+    result = SpatialOperatorRegistry.match_options(
+        options=["서울오륜초등학교"], places=[school], anchor=anchor
+    )
+
+    assert result["best_option"] is None
+
+
+def test_coordinates_are_usable_where_a_place_name_is_expected() -> None:
+    """An agent holding a POI's coordinates asks about them, not about a place with that name."""
+
+    from src.tools.kakao import _parse_coordinate_literal
+
+    assert _parse_coordinate_literal("37.5771637987289,126.96943884968") == (
+        37.5771637987289,
+        126.96943884968,
+    )
+    assert _parse_coordinate_literal(" 37.5771 , 126.9694 ") == (37.5771, 126.9694)
+    assert _parse_coordinate_literal("경복궁") is None
+    assert _parse_coordinate_literal("서울 종로구 1,2") is None
+    assert _parse_coordinate_literal("991.0,126.9") is None

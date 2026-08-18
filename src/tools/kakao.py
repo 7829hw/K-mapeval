@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -17,6 +18,8 @@ from src.tools.map import (
     RouteNotFoundError,
     UnsupportedTravelModeError,
 )
+
+_COORDINATE_LITERAL = re.compile(r"(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)")
 
 LOCAL_BASE_URL = "https://dapi.kakao.com/v2/local"
 MOBILITY_DIRECTIONS_URL = "https://apis-navi.kakaomobility.com/v1/directions"
@@ -438,6 +441,17 @@ class KakaoMapProvider(MapProvider):
             return value
         if value in self._places:
             return self._places[value]
+        coordinates = _parse_coordinate_literal(value)
+        if coordinates is not None:
+            latitude, longitude = coordinates
+            return Place(
+                place_id=f"{latitude},{longitude}",
+                name=value,
+                address="",
+                latitude=latitude,
+                longitude=longitude,
+                category="COORDINATE",
+            )
         cached_place = self._cache.get_place(value)
         if cached_place is not None:
             self._cache_hit_count += 1
@@ -538,3 +552,21 @@ def _verify_waypoint_summary(
             raise RouteNotFoundError("Kakao waypoint has invalid coordinates") from exc
         if abs(x - requested.longitude) > 1e-5 or abs(y - requested.latitude) > 1e-5:
             raise RouteNotFoundError(f"Waypoint coordinates do not match {requested.name}")
+
+
+def _parse_coordinate_literal(value: str) -> tuple[float, float] | None:
+    """A "latitude,longitude" string used where a place is expected.
+
+    An agent that already holds a POI's coordinates asks for what is near *them*, not near a
+    place named "37.5771,126.9694". Sending that through the keyword search raises
+    PlaceNotFoundError, and a ReAct run then spends its remaining steps re-searching a name that
+    was never a name. Coordinates are evidence the agent already has, so resolve them directly.
+    """
+
+    match = _COORDINATE_LITERAL.fullmatch(value.strip())
+    if not match:
+        return None
+    latitude, longitude = float(match.group(1)), float(match.group(2))
+    if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+        return None
+    return latitude, longitude

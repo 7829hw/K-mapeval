@@ -73,3 +73,14 @@ embedding example store, and original map evidence snapshot are not included.
   and applied inside `KakaoMapProvider`, identically for ReAct and Spatial-Agent: it says where to
   look, never which option is correct, and no `BenchmarkItem` field reaches it. Blank disables it.
   Reports must state whether it was enabled, since it changes which places the tool layer can see.
+- **Coordinate literals accepted where a place name is expected.** Google's Places API takes a
+  `location` bias directly, so upstream never has to name a point. Kakao Local resolves a place
+  reference by keyword search, so an agent passing back coordinates it already retrieved got
+  `PlaceNotFoundError`. `_parse_coordinate_literal` resolves a `"lat,lng"` string into a `Place`
+  without a network call. It adds no evidence — the coordinates came from an earlier tool result.
+- **Name matching is capped by the distinguishing residue.** Upstream compares English POI names,
+  where a brand and its branch share little. Korean POI names of one kind share long generic
+  affixes (서울…초등학교, …주유소, CU …점), so plain string similarity clears any sane floor for
+  two different places. `distinguishing_similarity` compares only what is left between the shared
+  prefix and suffix, and option-to-POI matching (`_assign_unique_matches`) is one-to-one so a
+  single retrieved POI cannot answer several options at once.

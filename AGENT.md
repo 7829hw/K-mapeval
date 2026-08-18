@@ -87,11 +87,30 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   anchored search has already placed each option, and "tightest span" lets scattered option brands
   out-vote a correct anchor and drag the batch to another district. A wrongly distant option is
   harmless — `nearest` never picks it — but a moved anchor invalidates every operator after it.
-- **Option recovery answers the question's category, and never returns the anchor.**
-  `recover_option_places` takes the `category_code` the retrieval used (bound by
+- **Option recovery answers the question's category, stays inside its radius, and never returns
+  the anchor.** `recover_option_places` takes the `category_code` the retrieval used (bound by
   `_ground_graph_literals` from `_nearby_retrieval_specs`) and skips the nationwide fallback when
   it is set, so an option is satisfied by the kind of place being asked for rather than any
-  namesake — `목동` in a station question otherwise matched 교보문고 목동점, the anchor itself.
+  namesake — `목동` in a station question otherwise matched 교보문고 목동점, the anchor itself. The
+  uncategorised fallback that remains is a nationwide search, so `_within_anchor_radius` keeps only
+  what is actually within the radius asked about: `꽃담공방` came back from 순천, 129 km away, and
+  entered the candidate set as if it were a neighbour.
+- **A name matches one place, and a place answers one option.** `_assign_unique_matches`
+  (`src/tools/spatial.py`) pairs option texts with retrieved POIs so neither side is used twice —
+  scoring each option independently let one 서울공릉초등학교 clear the floor for both
+  서울오륜초등학교 and 서울평화초등학교, and the tie-break then handed the answer to whichever came
+  first in the list. `distinguishing_similarity` supplies the other half: Korean POI names of one
+  kind share long generic affixes, so similarity is capped by how well the *residue* between the
+  shared prefix and suffix matches (오륜 vs 공릉, not 서울…초등학교). A residue too short to
+  distinguish anything (`CU 가락센트럴점` against Kakao's `CU 가락센타점`) is a spelling variant and
+  is left alone. `_names_the_same_place` applies the same test, which is what stops the
+  brand-only retry in `_query_variants` — `CU` for `CU 구로소담점` — from resolving to whichever
+  branch of the brand sits nearest the region prior's centre.
+- **Coordinates are a place reference.** `_parse_coordinate_literal` (`src/tools/kakao.py`) lets a
+  `"lat,lng"` string stand where a place is expected. An agent that already holds a POI's
+  coordinates is asking what is near *them*; sending that through the keyword search raised
+  `PlaceNotFoundError`, and a ReAct run then burned its remaining steps re-searching a name that
+  was never a name.
 - **A ranking never invents evidence.** `max` always yields a candidate, so `_best_place_match`
   applies `NAME_EVIDENCE_FLOOR` and returns `None` when the winner shares no containment and too
   little similarity with the query — a name Kakao does not have must fail as `PlaceNotFoundError`,

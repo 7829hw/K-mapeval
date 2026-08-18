@@ -436,29 +436,29 @@ class SpatialOperatorRegistry:
         if mode == "radius_set":
             return _match_option_sets(options, ranked, minimum_similarity)
 
+        assignments = _assign_unique_matches(options, ranked, minimum_similarity)
         option_matches: list[dict[str, Any]] = []
         for option_index, option in enumerate(options):
-            scored = [
-                (_name_similarity(option, str(place.get("name", ""))), place)
-                for place in ranked
-            ]
-            similarity, matched = max(scored, key=lambda entry: entry[0], default=(0.0, None))
+            assigned = assignments.get(option_index)
+            matched = assigned[0] if assigned else None
             option_matches.append(
                 {
                     "option_index": option_index,
                     "option": option,
-                    "similarity": similarity,
-                    "matched": matched if similarity >= minimum_similarity else None,
-                    "rank": (
-                        matched.get("rank")
-                        if matched and similarity >= minimum_similarity
-                        else None
+                    "similarity": (
+                        assigned[1]
+                        if assigned
+                        else max(
+                            (
+                                _name_similarity(option, str(place.get("name", "")))
+                                for place in ranked
+                            ),
+                            default=0.0,
+                        )
                     ),
-                    "distance_m": (
-                        matched.get("distance_m")
-                        if matched and similarity >= minimum_similarity
-                        else None
-                    ),
+                    "matched": matched,
+                    "rank": matched.get("rank") if matched else None,
+                    "distance_m": matched.get("distance_m") if matched else None,
                 }
             )
         supported = [match for match in option_matches if match["matched"] is not None]
@@ -997,7 +997,35 @@ def _name_similarity(left: str, right: str) -> float:
         # Shared generic suffixes (for example, 아트센터) must not make unrelated
         # proper names look like a reliable historical-name match.
         sequence = min(sequence, 0.64)
+    if not containment:
+        sequence = min(sequence, distinguishing_similarity(left_key, right_key))
     return max(sequence, min(0.98, 0.78 + 0.2 * containment) if containment else 0.0)
+
+
+def distinguishing_similarity(left_key: str, right_key: str) -> float:
+    """How alike two names are once the part they share with their whole type is removed.
+
+    Korean POI names of the same kind share long generic affixes: 서울오륜초등학교 and
+    서울공릉초등학교 agree on six of eight characters and score 0.75, well above the matching
+    floor, while naming different schools. What identifies the place is the residue — 오륜 versus
+    공릉 — so cap the score by how well *that* matches. Short residues (CU 가락센트럴점 against
+    Kakao's CU 가락센타점) are spelling variants of one name, not two names, and are left alone.
+    """
+
+    prefix = 0
+    while prefix < min(len(left_key), len(right_key)) and left_key[prefix] == right_key[prefix]:
+        prefix += 1
+    suffix = 0
+    while (
+        suffix < min(len(left_key), len(right_key)) - prefix
+        and left_key[len(left_key) - 1 - suffix] == right_key[len(right_key) - 1 - suffix]
+    ):
+        suffix += 1
+    left_core = left_key[prefix : len(left_key) - suffix]
+    right_core = right_key[prefix : len(right_key) - suffix]
+    if len(left_core) < 2 or len(right_core) < 2:
+        return 1.0
+    return SequenceMatcher(None, left_core, right_core).ratio()
 
 
 def _match_option_sets(
@@ -1008,17 +1036,15 @@ def _match_option_sets(
             member.strip() for option in options for member in option.split("|") if member.strip()
         )
     )
-    member_matches: dict[str, dict[str, Any] | None] = {}
-    for member in members:
-        scored = [
-            (_name_similarity(member, str(place.get("name", ""))), place) for place in places
-        ]
-        similarity, place = max(scored, key=lambda entry: entry[0], default=(0.0, None))
-        member_matches[member] = (
-            {"place": place, "similarity": similarity}
-            if place is not None and similarity >= minimum_similarity
+    assignments = _assign_unique_matches(members, places, minimum_similarity)
+    member_matches: dict[str, dict[str, Any] | None] = {
+        member: (
+            {"place": assignments[index][0], "similarity": assignments[index][1]}
+            if index in assignments
             else None
         )
+        for index, member in enumerate(members)
+    }
     present = {member for member, match in member_matches.items() if match is not None}
     option_scores: list[dict[str, Any]] = []
     for option_index, option in enumerate(options):
@@ -1054,6 +1080,39 @@ def _match_option_sets(
         "best_option": best["option_index"] if best else None,
         "confidence": 1.0 if best and best["exact_set_match"] else 0.75 if best else 0.0,
     }
+
+
+
+def _assign_unique_matches(
+    labels: list[str], places: list[dict[str, Any]], minimum_similarity: float
+) -> dict[int, tuple[dict[str, Any], float]]:
+    """Pair labels with places so that neither side is used twice.
+
+    A retrieved POI is one physical place, so it can support one option at most. Scoring every
+    option independently against the whole result set let a single hit answer several options at
+    once — 서울오륜초등학교 and 서울평화초등학교 both cleared the floor against the same
+    서울공릉초등학교, and the tie-break then handed the answer to whichever came first in the
+    option list. Assign the strongest pairings first, nearest place first when scores tie.
+    """
+
+    scored = sorted(
+        (
+            (-_name_similarity(label, str(place.get("name", ""))), place_index, label_index)
+            for label_index, label in enumerate(labels)
+            for place_index, place in enumerate(places)
+        )
+    )
+    assignments: dict[int, tuple[dict[str, Any], float]] = {}
+    claimed: set[int] = set()
+    for negative_similarity, place_index, label_index in scored:
+        similarity = -negative_similarity
+        if similarity < minimum_similarity:
+            break
+        if label_index in assignments or place_index in claimed:
+            continue
+        assignments[label_index] = (places[place_index], similarity)
+        claimed.add(place_index)
+    return assignments
 
 
 def _match_confidence(best: dict[str, Any] | None, second: dict[str, Any] | None) -> float:

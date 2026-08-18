@@ -93,8 +93,9 @@ Exact operator contracts:
 - aggregate_route_groups(routes,groups) -> amount; groups contains route indexes per option and
   returns option_totals plus best_distance_option and best_duration_option.
 - merge_places(items) -> object; merges and de-duplicates multiple retrieval branches
-- recover_option_places(options,candidates,anchor,radius_m) -> object; conditionally resolves
-  options absent from ranked retrieval and merges their POIs into the candidate list
+- recover_option_places(options,candidates,anchor,radius_m,category_code?) -> object;
+  conditionally resolves options absent from ranked retrieval and merges their POIs into the
+  candidate list. Pass the same category_code the retrieval used.
 - match_options(options,places,anchor?,mode) -> object; grounds options to retrieved POIs
 - match_distance_options(distance,options) -> object; maps a computed distance to numeric options.
   Pass the haversine node itself as distance and copy the option texts verbatim
@@ -621,6 +622,24 @@ def _ground_graph_literals(
             direction = _extract_requested_direction(question)
             if direction:
                 arguments["direction"] = direction
+            grounded.append({**step, "arguments": arguments})
+            continue
+        if operator == "recover_option_places":
+            # Recovery has to look for the same kind of place the retrieval did, or an option is
+            # satisfied by any namesake: "목동" in a station question matched 교보문고 목동점.
+            arguments["options"] = options
+            if radius_m is not None:
+                arguments["radius_m"] = radius_m
+            category = next(
+                (
+                    specification["category_code"]
+                    for specification in specifications
+                    if specification.get("category_code")
+                ),
+                None,
+            )
+            if category and len(specifications) == 1:
+                arguments["category_code"] = category
             grounded.append({**step, "arguments": arguments})
             continue
         if operator in {"match_options", "match_distance_options", "match_type_options"}:

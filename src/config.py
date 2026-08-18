@@ -27,11 +27,6 @@ class Settings(BaseSettings):
     # Stop a batch once this many questions in a row die on the LLM endpoint. A run that keeps
     # going through an outage produces a 0% report that reads like a result.
     benchmark_abort_after_llm_failures: int = Field(default=10, ge=0)
-    # Grading tolerance for `distance` questions, in metres. The dataset's coordinates are
-    # OSM-derived while the tools measure against Kakao, so a few metres of drift is not a
-    # reasoning error. Set it below the option spacing or the choice stops being graded at
-    # all; `strict_answer_accuracy` in every report records the untolerated number.
-    benchmark_distance_tolerance_m: float = Field(default=20.0, ge=0)
 
     kakao_rest_api_key: str = ""
     # Region prior for name lookups, as "lat,lng". Korean POI names repeat across cities, so a

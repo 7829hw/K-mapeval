@@ -1399,3 +1399,139 @@ def test_spatial_router_prioritizes_trip_and_routing_over_nearest_wording() -> N
         == "trip"
     )
     assert _heuristic_intent("서울역에서 자동차 최단거리 경로로 가장 가까운 목적지는?") == "routing"
+
+
+def test_batch_geocode_prefers_the_right_brand_over_an_unrelated_namesake() -> None:
+    """Branch-suffix mismatch must not outrank being the wrong kind of business entirely."""
+
+    class BrandProvider(FakeProvider):
+        def search_place(self, query: str, *, limit: int = 5) -> list[Place]:
+            self._api_calls += 1
+            return [
+                # No branch suffix at all, so the branch term scores it 0 while every real CU
+                # branch scores -2; only the category term separates them.
+                Place(
+                    place_id="tower",
+                    name="센트럴타워",
+                    address="서울",
+                    latitude=37.50,
+                    longitude=127.11,
+                    category="부동산 > 건물",
+                ),
+                Place(
+                    place_id="store",
+                    name="CU 가락센타점",
+                    address="서울",
+                    latitude=37.49,
+                    longitude=127.12,
+                    category="가정,생활 > 편의점 > CU",
+                ),
+            ]
+
+    execution = ToolRegistry(BrandProvider()).invoke(
+        "batch_geocode", {"place_names": ["CU 가락센트럴점"], "limit": 1}
+    )
+
+    assert execution.status == "ok"
+    assert execution.output[0]["place"]["place_id"] == "store"
+
+
+def test_batch_reconciliation_leaves_a_multi_name_anchor_where_it_resolved() -> None:
+    """Scattered option brands must not out-vote the anchor and move the whole batch."""
+
+    anchor = Place(
+        place_id="anchor", name="GS25 오류행복점", address="서울 구로구",
+        latitude=37.4940, longitude=126.8420,
+    )
+    near = Place(
+        place_id="near", name="파리바게뜨 오류역점", address="서울 구로구",
+        latitude=37.4960, longitude=126.8450,
+    )
+    far = Place(
+        place_id="far", name="뚜레쥬르 영등포도림점", address="서울 영등포구",
+        latitude=37.5100, longitude=126.9000,
+    )
+
+    class ScatteredProvider(FakeProvider):
+        def search_place(self, query: str, *, limit: int = 5) -> list[Place]:
+            self._api_calls += 1
+            return [anchor if "GS25" in query else far]
+
+        def nearby_search(self, center: str | Place, **kwargs: Any) -> list[Place]:
+            self._api_calls += 1
+            query = str(kwargs.get("query") or "")
+            if "파리바게뜨" in query:
+                return [near]
+            if "뚜레쥬르" in query:
+                return [far]
+            return []
+
+    execution = ToolRegistry(ScatteredProvider()).invoke(
+        "batch_geocode",
+        {
+            "place_names": ["GS25 오류행복점", "파리바게뜨", "뚜레쥬르"],
+            "anchor": "GS25 오류행복점",
+            "limit": 1,
+        },
+    )
+
+    assert execution.status == "ok"
+    assert execution.output[0]["place"]["place_id"] == "anchor"
+    assert execution.output[1]["place"]["place_id"] == "near"
+
+
+def test_option_recovery_excludes_the_anchor_and_honours_the_asked_for_category() -> None:
+    anchor = Place(
+        place_id="bookstore", name="교보문고 목동점", address="서울 양천구",
+        latitude=37.5280, longitude=126.8750,
+    )
+    station = Place(
+        place_id="station", name="오목교역 5호선", address="서울 양천구",
+        latitude=37.5245, longitude=126.8752, category="교통,수송 > 지하철 > 수도권",
+    )
+
+    class StationProvider(FakeProvider):
+        def nearby_search(self, center: str | Place, **kwargs: Any) -> list[Place]:
+            self._api_calls += 1
+            if kwargs.get("category_code") == "SW8":
+                return [station]
+            # Uncategorised, the anchor's own name satisfies the option "목동".
+            return [anchor, station]
+
+    execution = ToolRegistry(StationProvider()).invoke(
+        "recover_option_places",
+        {
+            "options": ["오목교", "목동", "까치산"],
+            "candidates": [station.model_dump()],
+            "anchor": anchor.model_dump(),
+            "radius_m": 500,
+            "category_code": "SW8",
+        },
+    )
+
+    assert execution.status == "ok"
+    assert [place["name"] for place in execution.output] == ["오목교역 5호선"]
+
+
+def test_grounding_gives_option_recovery_the_questions_radius_and_category() -> None:
+    graph = [
+        {
+            "id": "recover",
+            "operator": "recover_option_places",
+            "arguments": {"options": ["오목교"], "candidates": "$n", "anchor": "$a"},
+            "depends_on": [],
+            "output_type": "object",
+            "role": "support",
+        }
+    ]
+    grounded = _ground_graph_literals(
+        graph,
+        "교보문고 목동점 반경 500m 안에 있는 역 목록은 무엇인가요?",
+        ["오목교", "목동", "까치산", "오목교 | 목동"],
+        "radius",
+    )
+
+    arguments = grounded[0]["arguments"]
+    assert arguments["options"] == ["오목교", "목동", "까치산", "오목교 | 목동"]
+    assert arguments["radius_m"] == 500
+    assert arguments["category_code"] == "SW8"

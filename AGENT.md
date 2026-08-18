@@ -82,6 +82,16 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   can never hide a place; the cache key carries it so biased and unbiased runs cannot share entries.
   It applies to both agents identically and reads nothing from `BenchmarkItem` — deriving it from
   `region` would leak eval-only metadata. Blank disables it, and reports must say which it was.
+- **Reconciliation is for pairs only, and the anchor is authoritative.** `_reconcile_batch` runs
+  when exactly two names resolved. With three or more the batch is an anchor plus option texts, the
+  anchored search has already placed each option, and "tightest span" lets scattered option brands
+  out-vote a correct anchor and drag the batch to another district. A wrongly distant option is
+  harmless — `nearest` never picks it — but a moved anchor invalidates every operator after it.
+- **Option recovery answers the question's category, and never returns the anchor.**
+  `recover_option_places` takes the `category_code` the retrieval used (bound by
+  `_ground_graph_literals` from `_nearby_retrieval_specs`) and skips the nationwide fallback when
+  it is set, so an option is satisfied by the kind of place being asked for rather than any
+  namesake — `목동` in a station question otherwise matched 교보문고 목동점, the anchor itself.
 - **A ranking never invents evidence.** `max` always yields a candidate, so `_best_place_match`
   applies `NAME_EVIDENCE_FLOOR` and returns `None` when the winner shares no containment and too
   little similarity with the query — a name Kakao does not have must fail as `PlaceNotFoundError`,
@@ -206,14 +216,6 @@ report is attributable after the fact.
 `SQLiteMapCache` (`src/tools/cache.py`) is keyed by operation + canonicalized arguments, stores
 normalized `Place`/`Route` payloads only — never raw responses or keys — with a TTL (`0` = never
 expire) and a `SCHEMA_VERSION` that must be bumped when the stored payload shape changes.
-
-`distance` answers are graded with `BENCHMARK_DISTANCE_TOLERANCE_M` (default 20 m), because the
-dataset's coordinates are OSM-derived while the tools measure against Kakao. The tolerance lives in
-`Evaluator`, never in an agent, and applies to both alike. It is blunt on the current dataset: 14 of
-20 distance questions have all four options inside 20 m of each other, so every option grades as
-correct there and guessing scores 85% on that intent. Every report therefore carries
-`strict_answer_accuracy` (exact option match) beside the headline number and stamps
-`metadata.distance_tolerance_m`; quote both, and never compare a tolerated run against a strict one.
 
 `logs/`, `reports/`, and `data/*.db` are generated and gitignored: per-question traces at
 `logs/<UTC>_id<id>_<slug>.log`, one `reports/test_<UTC>.json` per batch with `metadata` /

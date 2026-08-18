@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 import time
 from collections import Counter
 from collections.abc import Callable
@@ -21,39 +20,6 @@ from src.logging import log_agent_result, query_log
 
 INFRASTRUCTURE_FAILURE = "llm_unavailable"
 ABORTED_FAILURE = "run_aborted"
-
-# Straight-line-distance answers are graded with a tolerance, because the dataset's coordinates come
-# from OSM while the tool layer measures against Kakao's. A few metres of provenance drift is not a
-# reasoning error. Applied by the evaluator to both agents alike, never inside an agent.
-DISTANCE_TOLERANCE_M = 20.0
-_DISTANCE_VALUE = re.compile(r"([\d,.]+)\s*(km|m)?", re.IGNORECASE)
-
-
-def _distance_option_metres(text: str | None) -> float | None:
-    match = _DISTANCE_VALUE.search(text or "")
-    if not match:
-        return None
-    try:
-        value = float(match.group(1).replace(",", ""))
-    except ValueError:
-        return None
-    return value * 1000 if (match.group(2) or "m").lower() == "km" else value
-
-
-def _within_distance_tolerance(
-    classification: str,
-    predicted_text: str | None,
-    correct_text: str,
-    *,
-    tolerance_m: float,
-) -> bool:
-    if tolerance_m <= 0 or classification != "distance" or predicted_text is None:
-        return False
-    predicted = _distance_option_metres(predicted_text)
-    correct = _distance_option_metres(correct_text)
-    if predicted is None or correct is None:
-        return False
-    return abs(predicted - correct) <= tolerance_m
 
 
 class EvaluationReport(BaseModel):
@@ -81,7 +47,6 @@ class Evaluator:
         agent_type: str | None = None,
         llm_profile: dict[str, Any] | None = None,
         abort_after_llm_failures: int = 0,
-        distance_tolerance_m: float = 0.0,
     ) -> None:
         if agent is None and agent_factory is None:
             raise ValueError("Evaluator requires agent or agent_factory")
@@ -100,7 +65,6 @@ class Evaluator:
         self.agent_type = agent_type
         self.llm_profile = dict(llm_profile) if llm_profile else {}
         self.abort_after_llm_failures = abort_after_llm_failures
-        self.distance_tolerance_m = distance_tolerance_m
         self.report_path: Path | None = None
         self._failure_lock = Lock()
         self._consecutive_llm_failures = 0
@@ -131,7 +95,6 @@ class Evaluator:
             "concurrency": worker_count,
             "dataset_source": self.dataset_path,
             "agent_type": self.agent_type,
-            "distance_tolerance_m": self.distance_tolerance_m,
             **self.llm_profile,
         }
         report = EvaluationReport(metadata=metadata, statistics=statistics, results=results)
@@ -239,13 +202,7 @@ class Evaluator:
             )
             error = result.failure_message
             intent_correct = result.predicted_intent == item.classification
-            strict_correct = predicted_option == correct_option
-            answer_correct = strict_correct or _within_distance_tolerance(
-                item.classification,
-                predicted_text,
-                correct_text,
-                tolerance_m=self.distance_tolerance_m,
-            )
+            answer_correct = predicted_option == correct_option
             self._print_result(
                 item,
                 index=index,
@@ -270,7 +227,6 @@ class Evaluator:
                 "predicted_answer": predicted_text,
                 "intent_correct": intent_correct,
                 "answer_correct": answer_correct,
-                "strict_answer_correct": strict_correct,
                 "time": elapsed,
                 "error": error,
                 "failure_type": result.failure_type,
@@ -332,7 +288,6 @@ class Evaluator:
             "predicted_answer": None,
             "intent_correct": False,
             "answer_correct": False,
-            "strict_answer_correct": False,
             "time": elapsed,
             "error": error,
             "failure_type": failure_type,
@@ -399,7 +354,6 @@ def calculate_statistics(results: list[dict[str, Any]], *, aborted: bool = False
     total = len(results)
     intent_correct = sum(1 for row in results if row.get("intent_correct"))
     answer_correct = sum(1 for row in results if row.get("answer_correct"))
-    strict_correct = sum(1 for row in results if row.get("strict_answer_correct"))
     failed = [row["id"] for row in results if row.get("error")]
     by_intent: dict[str, dict[str, Any]] = {}
     for row in results:
@@ -424,13 +378,6 @@ def calculate_statistics(results: list[dict[str, Any]], *, aborted: bool = False
             "correct": answer_correct,
             "total": total,
             "accuracy": round(answer_correct / total, 4) if total else 0.0,
-        },
-        # Exact option match, ungraded by any tolerance. Kept beside the headline number so a
-        # tolerant run stays comparable with a strict one instead of quietly replacing it.
-        "strict_answer_accuracy": {
-            "correct": strict_correct,
-            "total": total,
-            "accuracy": round(strict_correct / total, 4) if total else 0.0,
         },
         "performance": {
             "average_time_seconds": round(average_time, 3),
@@ -469,12 +416,6 @@ def print_summary(statistics: dict[str, Any]) -> None:
         f"Overall answer accuracy: {overall['correct']}/{overall['total']} "
         f"({overall['accuracy'] * 100:.1f}%)"
     )
-    strict = statistics.get("strict_answer_accuracy")
-    if strict and strict["correct"] != overall["correct"]:
-        print(
-            f"Strict answer accuracy (exact option): {strict['correct']}/{strict['total']} "
-            f"({strict['accuracy'] * 100:.1f}%)"
-        )
     print(f"Average time: {performance['average_time_seconds']:.2f}s")
     if performance["failed_count"]:
         print(f"Failed samples: {performance['failed_ids']}")

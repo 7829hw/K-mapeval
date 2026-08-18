@@ -217,6 +217,13 @@ class RecoverOptionPlacesArgs(BaseModel):
     options: list[str] = Field(min_length=1, max_length=15)
     candidates: list[Place] = Field(default_factory=list)
     anchor: Place
+    category_code: KakaoCategoryCode | None = Field(
+        default=None,
+        description=(
+            "Kakao category the question asks about. Set it when the retrieval was categorised, "
+            "so an option is only satisfied by a place of the kind being asked for."
+        ),
+    )
     radius_m: int = Field(default=20_000, ge=1, le=20_000)
 
     @field_validator("radius_m", mode="before")
@@ -448,7 +455,12 @@ class ToolRegistry:
         """
 
         resolved = _resolved_places(results)
-        if len(resolved) < 2:
+        # Only a pair. With three or more names the batch is an anchor plus option texts, the
+        # anchored search has already put each option in the right neighbourhood, and "tightest
+        # span" becomes the wrong objective: scattered option brands could out-vote a correct
+        # anchor and drag the whole batch to another district. A wrongly distant option is
+        # harmless — `nearest` simply never picks it — but a moved anchor invalidates everything.
+        if len(resolved) != 2:
             return results
         best, best_span = results, _batch_span(resolved)
         if best_span <= min(args.radius_m, BATCH_LOCALITY_SPAN_M):
@@ -631,12 +643,20 @@ class ToolRegistry:
             matches = self.provider.nearby_search(
                 args.anchor,
                 query=option,
+                category_code=args.category_code,
                 radius_m=args.radius_m,
                 limit=15,
             )
-            if not matches:
+            if not matches and args.category_code is None:
+                # A categorised question wants a place of that kind near the anchor. Widening to a
+                # nationwide name search would answer "is there a 목동 anywhere", not "is there a
+                # 목동 station here", so only an uncategorised recovery falls back.
                 matches = _search_place_candidates(self.provider, option, limit=15)
-            match = _best_place_match(option, matches)
+            # The anchor is the question's reference point, never one of its answers. Recovering
+            # "목동" around 교보문고 목동점 otherwise returns the bookstore itself, and a radius-set
+            # question then reports the station 목동 as present when only 오목교 is.
+            matches = [match for match in matches if match.place_id != args.anchor.place_id]
+            match = _best_place_match(option, matches, anchor=args.anchor)
             if (
                 match
                 and _place_represents_option(option, match)
@@ -756,8 +776,12 @@ def _best_place_match(
         similarity = SequenceMatcher(None, normalized_query, normalized_name).ratio()
         return (
             exact,
-            _branch_compatibility(query, place.name),
+            # What kind of business this is outranks which outlet of it. "CU 가락센트럴점" has no
+            # exact match, so every real CU branch scores -2 on the branch suffix while an unrelated
+            # "센트럴타워" scores 0 for having no suffix at all — with branch ranked first, the
+            # unrelated place won and then failed the evidence floor, resolving nothing.
             _category_compatibility(query, place),
+            _branch_compatibility(query, place.name),
             containment,
             _proximity_score(anchor, place),
             similarity,

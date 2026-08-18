@@ -210,3 +210,180 @@ def test_a_healthy_run_stays_valid_and_records_the_agent_it_measured(tmp_path) -
     assert report.statistics["run_validity"]["valid"] is True
     assert report.metadata["agent_type"] == "spatial_agent"
     assert report.metadata["llm_model"] == "test-model"
+
+
+class FlakyAgent(BenchmarkAgent):
+    """Fails the first `failures` attempts on the endpoint, then answers."""
+
+    agent_type = "flaky"
+
+    def __init__(self, failures: int) -> None:
+        self.remaining = failures
+        self.attempts = 0
+
+    def answer(self, question: str, options: list[str]) -> AgentResult:
+        self.attempts += 1
+        if self.remaining > 0:
+            self.remaining -= 1
+            return AgentResult(
+                agent_type=self.agent_type,
+                failure_type="llm_unavailable",
+                failure_message="LLMUnavailableError: endpoint down",
+            )
+        return AgentResult(
+            agent_type=self.agent_type,
+            predicted_intent="poi",
+            predicted_answer=0,
+        )
+
+
+def one_question() -> list[BenchmarkItem]:
+    return [
+        BenchmarkItem(id="a", question="q", options=["x", "y"], answer=0, classification="poi")
+    ]
+
+
+def test_a_question_the_endpoint_failed_is_asked_again(tmp_path) -> None:
+    agent = FlakyAgent(failures=1)
+
+    report = Evaluator(
+        agent,
+        one_question(),
+        output_dir=None,
+        log_dir=tmp_path / "logs",
+        question_retries=2,
+        question_retry_backoff_seconds=0.001,
+    ).run()
+
+    assert agent.attempts == 2
+    assert report.results[0]["answer_correct"] is True
+    assert report.results[0]["attempts"] == 2
+    assert report.results[0]["failure_type"] is None
+    assert report.statistics["run_validity"]["valid"] is True
+    assert report.statistics["performance"]["retried_question_count"] == 1
+    assert report.statistics["performance"]["retry_recovered_ids"] == ["a"]
+
+
+def test_a_recovered_question_does_not_count_toward_the_abort_threshold(tmp_path) -> None:
+    """The circuit breaker measures the endpoint's state, not how hard we had to try."""
+
+    agent = FlakyAgent(failures=1)
+
+    report = Evaluator(
+        agent,
+        one_question(),
+        output_dir=None,
+        log_dir=tmp_path / "logs",
+        abort_after_llm_failures=1,
+        question_retries=2,
+        question_retry_backoff_seconds=0.001,
+    ).run()
+
+    assert report.statistics["run_validity"]["aborted"] is False
+    assert report.statistics["performance"]["failure_types"] == {}
+
+
+def test_retries_stop_once_the_attempts_are_spent(tmp_path) -> None:
+    agent = FlakyAgent(failures=99)
+
+    report = Evaluator(
+        agent,
+        one_question(),
+        output_dir=None,
+        log_dir=tmp_path / "logs",
+        question_retries=2,
+        question_retry_backoff_seconds=0.001,
+    ).run()
+
+    assert agent.attempts == 3
+    assert report.results[0]["attempts"] == 3
+    assert report.results[0]["failure_type"] == "llm_unavailable"
+    assert report.statistics["run_validity"]["valid"] is False
+    assert report.statistics["performance"]["retry_recovered_ids"] == []
+
+
+def test_a_wrong_answer_is_never_retried(tmp_path) -> None:
+    """Re-rolling the agent's own reasoning would measure luck, not architecture."""
+
+    class WrongAgent(BenchmarkAgent):
+        agent_type = "wrong"
+
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        def answer(self, question: str, options: list[str]) -> AgentResult:
+            self.attempts += 1
+            return AgentResult(
+                agent_type=self.agent_type,
+                predicted_intent="poi",
+                predicted_answer=1,
+            )
+
+    agent = WrongAgent()
+    report = Evaluator(
+        agent,
+        one_question(),
+        output_dir=None,
+        log_dir=tmp_path / "logs",
+        question_retries=3,
+        question_retry_backoff_seconds=0.001,
+    ).run()
+
+    assert agent.attempts == 1
+    assert report.results[0]["answer_correct"] is False
+
+
+def test_a_missing_place_is_evidence_and_a_timed_out_provider_is_not(tmp_path) -> None:
+    from src.evaluator import is_transient_failure
+
+    assert is_transient_failure(
+        {"failure_type": "provider_failure", "error": "ProviderTimeoutError: Kakao timed out"}
+    )
+    assert is_transient_failure(
+        {"failure_type": "provider_failure", "error": "ProviderRateLimitError: slow down"}
+    )
+    assert not is_transient_failure(
+        {
+            "failure_type": "provider_failure",
+            "error": "PlaceNotFoundError: No place matched '만화시장'",
+        }
+    )
+    assert not is_transient_failure(
+        {"failure_type": "provider_failure", "error": "ProviderAuthError: bad key"}
+    )
+    assert not is_transient_failure({"failure_type": "agent_reasoning_failure", "error": "boom"})
+
+
+def test_a_transient_provider_failure_is_asked_again(tmp_path) -> None:
+    class RateLimitedAgent(BenchmarkAgent):
+        agent_type = "limited"
+
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        def answer(self, question: str, options: list[str]) -> AgentResult:
+            self.attempts += 1
+            if self.attempts == 1:
+                return AgentResult(
+                    agent_type=self.agent_type,
+                    failure_type="provider_failure",
+                    failure_message="ProviderRateLimitError: Kakao rate limit",
+                )
+            return AgentResult(
+                agent_type=self.agent_type,
+                predicted_intent="poi",
+                predicted_answer=0,
+            )
+
+    agent = RateLimitedAgent()
+    report = Evaluator(
+        agent,
+        one_question(),
+        output_dir=None,
+        log_dir=tmp_path / "logs",
+        question_retries=1,
+        question_retry_backoff_seconds=0.001,
+    ).run()
+
+    assert agent.attempts == 2
+    assert report.results[0]["answer_correct"] is True

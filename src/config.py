@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     # Stop a batch once this many questions in a row die on the LLM endpoint. A run that keeps
     # going through an outage produces a 0% report that reads like a result.
     benchmark_abort_after_llm_failures: int = Field(default=10, ge=0)
+    # Extra attempts for a single question the endpoint failed to serve. The client already retries
+    # each request; this catches the case where the endpoint stayed down for a whole question, so
+    # one blip does not cost a data point that says nothing about the architecture. 0 disables it.
+    benchmark_question_retries: int = Field(default=2, ge=0, le=5)
+    benchmark_question_retry_backoff_seconds: float = Field(default=10.0, gt=0)
 
     kakao_rest_api_key: str = ""
     # Region prior for name lookups, as "lat,lng". Korean POI names repeat across cities, so a

@@ -232,6 +232,20 @@ call before each agent leg, so `--agent both` cannot score its second agent 0% o
 died between legs. Report `metadata` carries `agent_type`, `llm_model`, and `llm_base_url` so a
 report is attributable after the fact.
 
+Resilience is layered, and each layer answers a different question. The client retries one
+*request*. `Evaluator._run_single` retries one *question* — `BENCHMARK_QUESTION_RETRIES` extra
+attempts with exponential backoff and jitter (workers must not retry in lockstep) — because an
+endpoint can stay down for the whole minute a question takes and lose a data point that says
+nothing about either architecture. The circuit breaker gives up on the *run*. Only what
+`is_transient_failure` accepts qualifies for a question-level retry: `llm_unavailable`, plus a
+`provider_failure` whose message starts with `ProviderTimeoutError` / `ProviderRateLimitError`.
+Never retry a wrong answer, an `agent_reasoning_failure`, an `answer_parse_failure`, or a
+`PlaceNotFoundError` — those are the
+result the architecture earned, and re-rolling them measures luck. Retries are counted, not hidden:
+each row carries `attempts`, and `performance` carries `retried_question_count` and
+`retry_recovered_ids`. Because a recovered question is no longer a failure, it does not feed the
+circuit breaker — `_note_failure` sees only the final outcome.
+
 `SQLiteMapCache` (`src/tools/cache.py`) is keyed by operation + canonicalized arguments, stores
 normalized `Place`/`Route` payloads only — never raw responses or keys — with a TTL (`0` = never
 expire) and a `SCHEMA_VERSION` that must be bumped when the stored payload shape changes.

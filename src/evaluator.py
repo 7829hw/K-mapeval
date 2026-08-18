@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 import time
 from collections import Counter
 from collections.abc import Callable
@@ -20,6 +21,26 @@ from src.logging import log_agent_result, query_log
 
 INFRASTRUCTURE_FAILURE = "llm_unavailable"
 ABORTED_FAILURE = "run_aborted"
+PROVIDER_FAILURE = "provider_failure"
+# Provider errors that say the API could not answer right now, as opposed to answering that the
+# place does not exist. Only these are worth asking again for; a PlaceNotFoundError is evidence.
+TRANSIENT_PROVIDER_ERRORS = ("ProviderTimeoutError", "ProviderRateLimitError")
+
+
+def is_transient_failure(row: dict[str, Any]) -> bool:
+    """Whether a question failed because an API could not answer, not because of its answer.
+
+    Retrying anything else would re-roll the architecture under measurement: a question the agent
+    reasoned its way to the wrong end of, or one whose place genuinely is not in Kakao, has to keep
+    the result it earned.
+    """
+
+    failure_type = row.get("failure_type")
+    if failure_type == INFRASTRUCTURE_FAILURE:
+        return True
+    if failure_type != PROVIDER_FAILURE:
+        return False
+    return str(row.get("error") or "").startswith(TRANSIENT_PROVIDER_ERRORS)
 
 
 class EvaluationReport(BaseModel):
@@ -47,6 +68,8 @@ class Evaluator:
         agent_type: str | None = None,
         llm_profile: dict[str, Any] | None = None,
         abort_after_llm_failures: int = 0,
+        question_retries: int = 0,
+        question_retry_backoff_seconds: float = 10.0,
     ) -> None:
         if agent is None and agent_factory is None:
             raise ValueError("Evaluator requires agent or agent_factory")
@@ -65,6 +88,8 @@ class Evaluator:
         self.agent_type = agent_type
         self.llm_profile = dict(llm_profile) if llm_profile else {}
         self.abort_after_llm_failures = abort_after_llm_failures
+        self.question_retries = max(0, question_retries)
+        self.question_retry_backoff_seconds = question_retry_backoff_seconds
         self.report_path: Path | None = None
         self._failure_lock = Lock()
         self._consecutive_llm_failures = 0
@@ -180,6 +205,42 @@ class Evaluator:
         index: int,
         total: int,
     ) -> dict[str, Any]:
+        """Answer one question, asking again when an API — not the agent — is what failed."""
+
+        attempt = 1
+        while True:
+            row = self._attempt_single(agent, item, index=index, total=total)
+            if (
+                attempt > self.question_retries
+                or self._aborted
+                or not is_transient_failure(row)
+            ):
+                break
+            delay = self._retry_delay(attempt)
+            print(
+                f"[{index}/{total}] ID {item.id!s:>3} | RETRY {attempt}/{self.question_retries} "
+                f"in {delay:.1f}s: {str(row.get('error'))[:60]}",
+                flush=True,
+            )
+            time.sleep(delay)
+            attempt += 1
+        row["attempts"] = attempt
+        self._note_failure(row.get("failure_type"))
+        return row
+
+    def _retry_delay(self, attempt: int) -> float:
+        """Exponential backoff with jitter, so concurrent workers do not retry in lockstep."""
+
+        return self.question_retry_backoff_seconds * (2 ** (attempt - 1)) * (0.5 + random.random())
+
+    def _attempt_single(
+        self,
+        agent: BenchmarkAgent,
+        item: BenchmarkItem,
+        *,
+        index: int,
+        total: int,
+    ) -> dict[str, Any]:
         question, options = item.agent_input()
         correct_option = item.answer
         correct_text = options[correct_option].strip()
@@ -215,7 +276,6 @@ class Evaluator:
                 answer_correct=answer_correct,
                 elapsed=elapsed,
             )
-            self._note_failure(result.failure_type)
             return {
                 "id": item.id,
                 "question": question,
@@ -230,6 +290,7 @@ class Evaluator:
                 "time": elapsed,
                 "error": error,
                 "failure_type": result.failure_type,
+                "attempts": 1,
             }
         except Exception as exc:
             elapsed = time.time() - started
@@ -242,7 +303,6 @@ class Evaluator:
                 if isinstance(exc, LLMUnavailableError)
                 else "agent_reasoning_failure"
             )
-            self._note_failure(failure_type)
             return self._failed_row(
                 item,
                 question,
@@ -265,6 +325,7 @@ class Evaluator:
             error="Run aborted before this question: the LLM endpoint was unavailable",
             failure_type=ABORTED_FAILURE,
             elapsed=0.0,
+            attempts=0,
         )
 
     @staticmethod
@@ -276,6 +337,7 @@ class Evaluator:
         error: str,
         failure_type: str,
         elapsed: float,
+        attempts: int = 1,
     ) -> dict[str, Any]:
         return {
             "id": item.id,
@@ -291,6 +353,7 @@ class Evaluator:
             "time": elapsed,
             "error": error,
             "failure_type": failure_type,
+            "attempts": attempts,
         }
 
     def _note_failure(self, failure_type: str | None) -> None:
@@ -367,6 +430,8 @@ def calculate_statistics(results: list[dict[str, Any]], *, aborted: bool = False
     average_time = sum(float(row.get("time", 0.0)) for row in results) / total if total else 0.0
     failure_types = Counter(str(row["failure_type"]) for row in results if row.get("failure_type"))
     infrastructure = failure_types[INFRASTRUCTURE_FAILURE] + failure_types[ABORTED_FAILURE]
+    retried = [row for row in results if int(row.get("attempts") or 1) > 1]
+    recovered = [row["id"] for row in retried if not is_transient_failure(row)]
     return {
         "intent_classification_accuracy": {
             "correct": intent_correct,
@@ -384,6 +449,10 @@ def calculate_statistics(results: list[dict[str, Any]], *, aborted: bool = False
             "failed_count": len(failed),
             "failed_ids": failed,
             "failure_types": dict(failure_types),
+            # A question the endpoint failed and we asked again for. Recovered ones carry a real
+            # result; the rest were unanswerable however many times we asked.
+            "retried_question_count": len(retried),
+            "retry_recovered_ids": recovered,
         },
         # Accuracy only means something when the questions were actually answered. An outage on the
         # LLM endpoint scores 0% exactly like a wrong answer does, so say so here rather than
@@ -421,6 +490,12 @@ def print_summary(statistics: dict[str, Any]) -> None:
         print(f"Failed samples: {performance['failed_ids']}")
     if performance.get("failure_types"):
         print(f"Failure types: {performance['failure_types']}")
+    if performance.get("retried_question_count"):
+        recovered = performance.get("retry_recovered_ids") or []
+        print(
+            f"Retried after an API failure: {performance['retried_question_count']} "
+            f"({len(recovered)} recovered)"
+        )
     validity = statistics.get("run_validity", {})
     if not validity.get("valid", True):
         print()

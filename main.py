@@ -113,6 +113,8 @@ def run(agent_type: str, args: argparse.Namespace) -> dict:
             "llm_base_url": settings.llm_base_url,
         },
         abort_after_llm_failures=settings.benchmark_abort_after_llm_failures,
+        question_retries=settings.benchmark_question_retries,
+        question_retry_backoff_seconds=settings.benchmark_question_retry_backoff_seconds,
     ).run()
     return report.statistics
 

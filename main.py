@@ -49,6 +49,8 @@ def create_agent_session(
         timeout=settings.kakao_timeout_seconds,
         cache_path=settings.kakao_cache_db_path,
         cache_ttl_seconds=settings.kakao_cache_ttl_seconds,
+        search_center=settings.search_center(),
+        search_radius_m=settings.kakao_search_radius_m,
     )
     llm: OpenAIChatClient | None = None
     try:

@@ -450,3 +450,62 @@ def test_four_provider_sessions_share_sqlite_cache_concurrently(tmp_path) -> Non
         assert cached.cache_hit_count == 4
     finally:
         cached.close()
+
+
+def test_region_prior_biases_a_name_search_without_hiding_places_outside_it() -> None:
+    requests: list[httpx.Request] = []
+    in_region = _document("1", "선진약국", 126.9800, 37.5670)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        found = "radius" in request.url.params and request.url.params["query"] == "선진약국"
+        return httpx.Response(200, json={"documents": [in_region] if found else []})
+
+    provider = KakaoMapProvider(
+        "test-key",
+        cache_path=":memory:",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        search_center=(37.5665, 126.9780),
+        search_radius_m=20_000,
+    )
+
+    biased = provider.search_place("선진약국", limit=5)
+    assert [place.name for place in biased] == ["선진약국"]
+    assert requests[0].url.params["radius"] == "20000"
+    assert requests[0].url.params["y"] == "37.5665"
+    assert requests[0].url.params["x"] == "126.978"
+
+    # A name the region does not have must still reach the unbiased nationwide search.
+    assert provider.search_place("부산에만있는가게", limit=5) == []
+    assert "radius" in requests[1].url.params
+    assert "radius" not in requests[2].url.params
+
+
+def test_region_prior_does_not_reuse_an_unbiased_cache_entry(tmp_path) -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200, json={"documents": [_document("1", "선진약국", 127.0, 37.5)]})
+
+    cache = str(tmp_path / "cache.db")
+    unbiased = KakaoMapProvider(
+        "test-key",
+        cache_path=cache,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    unbiased.search_place("선진약국", limit=5)
+    unbiased.close()
+
+    biased = KakaoMapProvider(
+        "test-key",
+        cache_path=cache,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        search_center=(37.5665, 126.9780),
+        search_radius_m=20_000,
+    )
+    biased.search_place("선진약국", limit=5)
+    biased.close()
+
+    assert len(calls) == 2
+    assert "radius" in calls[1].url.params

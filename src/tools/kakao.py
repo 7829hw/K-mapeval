@@ -62,10 +62,14 @@ class KakaoMapProvider(MapProvider):
         cache_path: str = "data/kakao_cache.db",
         cache_ttl_seconds: int = 86_400,
         client: httpx.Client | None = None,
+        search_center: tuple[float, float] | None = None,
+        search_radius_m: int = 0,
     ) -> None:
         if not rest_api_key:
             raise ValueError("Kakao REST API key must not be empty")
         self._rest_api_key = rest_api_key
+        self._search_center = search_center if search_radius_m > 0 else None
+        self._search_radius_m = search_radius_m if search_center is not None else 0
         self._client = client or httpx.Client(timeout=timeout)
         self._owns_client = client is None
         self._cache = SQLiteMapCache(cache_path, ttl_seconds=cache_ttl_seconds)
@@ -175,16 +179,37 @@ class KakaoMapProvider(MapProvider):
         if not query.strip():
             raise ValueError("query must not be empty")
         size = _size(limit)
-        cache_args = {"query": _normalized_text(query), "limit": size}
+        cache_args = {"query": _normalized_text(query), "limit": size, **self._region_cache_args()}
         cached = self._cache.get_places("search_place", cache_args)
         if cached is not None:
             self._record_cache_hit(cached)
             return cached
         self._cache_miss_count += 1
-        data = self._get_local("/search/keyword.json", {"query": query, "size": size})
-        places = self._normalize_places(data, size)
+        params: dict[str, Any] = {"query": query, "size": size}
+        places: list[Place] = []
+        if self._search_center is not None:
+            latitude, longitude = self._search_center
+            places = self._normalize_places(
+                self._get_local(
+                    "/search/keyword.json",
+                    {**params, "x": longitude, "y": latitude, "radius": self._search_radius_m},
+                ),
+                size,
+            )
+        if not places:
+            # The prior says where to look first, not where a place may exist. A name with no match
+            # in the region still resolves nationwide, so the prior can never lose evidence.
+            places = self._normalize_places(self._get_local("/search/keyword.json", params), size)
         self._cache.set_places("search_place", cache_args, places)
         return places
+
+    def _region_cache_args(self) -> dict[str, Any]:
+        """Keep a region-biased result from being served to an unbiased run, or the reverse."""
+
+        if self._search_center is None:
+            return {}
+        latitude, longitude = self._search_center
+        return {"region": f"{latitude:.4f},{longitude:.4f},{self._search_radius_m}"}
 
     def geocode(self, address: str, *, limit: int = 5) -> list[Place]:
         if not address.strip():

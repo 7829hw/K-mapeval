@@ -75,6 +75,13 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   name never surfaces the intended place as a candidate at all. An argument in
   `PLACE_ARGUMENT_NAMES` that arrives as `None` raises `PlaceNotFoundError` before pydantic can
   report it as a validation error.
+- **The region prior is deployment configuration, not evidence.** `KAKAO_SEARCH_CENTER` /
+  `KAKAO_SEARCH_RADIUS_M` bias the first Kakao keyword query toward the benchmark's region inside
+  `KakaoMapProvider`, because Kakao searches nationwide and Korean POI names repeat across cities. A
+  name with no match in the region still falls back to the unbiased nationwide search, so the prior
+  can never hide a place; the cache key carries it so biased and unbiased runs cannot share entries.
+  It applies to both agents identically and reads nothing from `BenchmarkItem` — deriving it from
+  `region` would leak eval-only metadata. Blank disables it, and reports must say which it was.
 - **A ranking never invents evidence.** `max` always yields a candidate, so `_best_place_match`
   applies `NAME_EVIDENCE_FLOOR` and returns `None` when the winner shares no containment and too
   little similarity with the query — a name Kakao does not have must fail as `PlaceNotFoundError`,

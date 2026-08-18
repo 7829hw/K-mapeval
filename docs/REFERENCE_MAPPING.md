@@ -62,3 +62,14 @@ embedding example store, and original map evidence snapshot are not included.
   `POST /v1/waypoints/directions` and verify returned waypoint names and coordinates.
 - Unsupported travel modes fail explicitly.
 - SQLite stores normalized `Place` and `Route` payloads, not raw Kakao responses or API keys.
+- **Region prior on name lookups (`KAKAO_SEARCH_CENTER` / `KAKAO_SEARCH_RADIUS_M`).** Neither
+  upstream implementation needs one: Google Places disambiguates from a session location, and the
+  paper's MapEval-Textual snapshot is a closed evidence set. Kakao Local searches nationwide, and
+  Korean POI names repeat across cities, so an ambiguous name resolved to whichever city ranked
+  first — 18 of the 100 benchmark anchors landed outside 서울, including 제주, 경남 and 경북, and
+  every operator downstream then computed correctly over a POI in the wrong province. The prior
+  biases the *first* keyword query to the benchmark's region; a name with no match there still
+  resolves nationwide, so it can never hide evidence. It is a deployment setting read from `.env`
+  and applied inside `KakaoMapProvider`, identically for ReAct and Spatial-Agent: it says where to
+  look, never which option is correct, and no `BenchmarkItem` field reaches it. Blank disables it.
+  Reports must state whether it was enabled, since it changes which places the tool layer can see.

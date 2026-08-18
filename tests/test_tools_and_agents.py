@@ -1669,3 +1669,139 @@ def test_coordinates_are_usable_where_a_place_name_is_expected() -> None:
     assert _parse_coordinate_literal("경복궁") is None
     assert _parse_coordinate_literal("서울 종로구 1,2") is None
     assert _parse_coordinate_literal("991.0,126.9") is None
+
+
+def test_a_neighbour_of_the_same_kind_is_not_the_named_place() -> None:
+    """Being near the anchor is not evidence of being the place the question named."""
+
+    class NeighbourhoodProvider(FakeProvider):
+        def search_place(self, query: str, *, limit: int = 5) -> list[Place]:
+            self._api_calls += 1
+            if query.strip() == "CU 성내천오금점":
+                return [self._named(query)]
+            return []  # Kakao has no 신사정육점 under any spelling
+
+        def nearby_search(self, center: str | Place, **kwargs: Any) -> list[Place]:
+            self._api_calls += 1
+            # Kakao's keyword search is tolerant: asked for a butcher it does not have, it
+            # answers with the butchers it does.
+            return [
+                Place(
+                    place_id="butcher",
+                    name="한아름축산",
+                    address="서울 강남구",
+                    latitude=37.5240,
+                    longitude=127.0230,
+                    category="가정,생활 > 정육점",
+                )
+            ]
+
+    execution = ToolRegistry(NeighbourhoodProvider()).invoke(
+        "batch_geocode", {"place_names": ["CU 성내천오금점", "신사정육점"], "limit": 1}
+    )
+
+    assert execution.status == "ok"
+    assert execution.output[1]["place"] is None
+    assert "PlaceNotFoundError" in execution.output[1]["error"]
+
+
+def test_a_transliterated_brand_resolves_inside_the_anchors_neighbourhood() -> None:
+    """Characters cannot testify across scripts, so the bounded search speaks instead."""
+
+    class TransliteratedProvider(FakeProvider):
+        def search_place(self, query: str, *, limit: int = 5) -> list[Place]:
+            self._api_calls += 1
+            if query.strip() == "CU 성내천오금점":
+                return [self._named(query)]
+            return []
+
+        def nearby_search(self, center: str | Place, **kwargs: Any) -> list[Place]:
+            self._api_calls += 1
+            return [
+                Place(
+                    place_id="cafe",
+                    name="투썸플레이스 장안점",
+                    address="서울 동대문구",
+                    latitude=37.5680,
+                    longitude=127.0700,
+                    category="음식점 > 카페",
+                )
+            ]
+
+    execution = ToolRegistry(TransliteratedProvider()).invoke(
+        "batch_geocode", {"place_names": ["CU 성내천오금점", "A TWOSOME PLACE"], "limit": 1}
+    )
+
+    assert execution.output[1]["place"]["name"] == "투썸플레이스 장안점"
+
+
+def test_strict_names_refuses_even_a_cross_script_neighbour() -> None:
+    """A question that states both POIs precisely gets no transliteration licence."""
+
+    class TransliteratedProvider(FakeProvider):
+        def search_place(self, query: str, *, limit: int = 5) -> list[Place]:
+            self._api_calls += 1
+            if query.strip() == "CU 성내천오금점":
+                return [self._named(query)]
+            return []
+
+        def nearby_search(self, center: str | Place, **kwargs: Any) -> list[Place]:
+            self._api_calls += 1
+            return [
+                Place(
+                    place_id="cafe",
+                    name="투썸플레이스 장안점",
+                    address="서울 동대문구",
+                    latitude=37.5680,
+                    longitude=127.0700,
+                    category="음식점 > 카페",
+                )
+            ]
+
+    execution = ToolRegistry(TransliteratedProvider()).invoke(
+        "batch_geocode",
+        {"place_names": ["CU 성내천오금점", "A TWOSOME PLACE"], "strict_names": True, "limit": 1},
+    )
+
+    assert execution.output[1]["place"] is None
+
+
+def test_an_option_carrying_its_address_resolves_by_its_name() -> None:
+    """A dataset separates namesakes with an address; Kakao indexes names."""
+
+    class NameOnlyProvider(FakeProvider):
+        def search_place(self, query: str, *, limit: int = 5) -> list[Place]:
+            self._api_calls += 1
+            if query.strip() != "서울난곡우체국":
+                return []
+            return [self._named("서울난곡우체국")]
+
+        def nearby_search(self, center: str | Place, **kwargs: Any) -> list[Place]:
+            self._api_calls += 1
+            return []
+
+    execution = ToolRegistry(NameOnlyProvider()).invoke(
+        "batch_geocode",
+        {"place_names": ["서울난곡우체국 - 서울특별시 관악구 신림동 난곡로 275"], "limit": 1},
+    )
+
+    assert execution.output[0]["place"]["name"] == "서울난곡우체국"
+
+
+def test_a_short_name_buried_in_a_long_one_is_not_evidence() -> None:
+    """압구정 sits inside a riverboat ramp's name while naming somewhere else entirely."""
+
+    from src.tools.registry import _containment_is_evidence
+
+    assert not _containment_is_evidence("압구정", "해피냠냠라면가게한강버스압구정선착장점")
+    assert _containment_is_evidence("올리브영", "올리브영거여역점")
+    assert _containment_is_evidence("진주리", "카페진주리")
+
+
+def test_one_institution_under_two_names_is_one_place() -> None:
+    """OSM writes 연남치안센터 where Kakao lists 연남파출소; 수유6 is still not 쌍문1."""
+
+    from src.tools.registry import _search_key
+
+    assert _search_key("연남치안센터") == _search_key("연남파출소")
+    assert _search_key("쌍문1치안센터") != _search_key("수유6치안센터")

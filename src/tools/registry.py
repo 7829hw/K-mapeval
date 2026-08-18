@@ -12,7 +12,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from src.models import Place
 from src.tools.map import MapProvider, PlaceNotFoundError
-from src.tools.spatial import distinguishing_similarity, haversine_meters
+from src.tools.spatial import (
+    distinguishing_similarity,
+    haversine_meters,
+    strip_location_qualifier,
+)
 
 KakaoCategoryCode = Literal[
     "MT1",
@@ -195,9 +199,9 @@ class BatchGeocodeArgs(BaseModel):
     strict_names: bool = Field(
         default=False,
         description=(
-            "Require every name to match by name, even inside the anchor's neighbourhood. "
-            "Set when the names are POIs the question states precisely, rather than option "
-            "shorthand that only has to land on the right place."
+            "Require every name to match by name in the same script it was written in. Set "
+            "when the names are POIs the question states precisely, rather than option shorthand "
+            "that may be a transliteration of the Kakao entry."
         ),
     )
 
@@ -485,12 +489,15 @@ class ToolRegistry:
         results: list[dict[str, Any]] = []
         for place_name in args.place_names:
             try:
-                # Whether the name has to carry the evidence depends on where the candidates came
-                # from. A neighbourhood search is already constrained to the right area, so a brand
-                # written the question's way ("S-OIL" for 에쓰오일, "올리브영" for a branch) is the
-                # place meant. A nationwide search has no such constraint, so there the name is the
-                # only evidence there is and a weak match is a different POI entirely.
-                name_is_only_evidence = True
+                # Being near the anchor is not evidence of being the named place. Kakao's keyword
+                # search is tolerant, so asking a neighbourhood for a name it does not contain
+                # returns places of the same *kind* instead: 신사정육점 came back as 한아름축산,
+                # 쌍문1치안센터 as 수유6치안센터. Both resolved, both were a different POI, and
+                # every operator downstream then computed correctly over the wrong place. The
+                # neighbourhood buys one thing only — the right to accept a name written in
+                # another script ("A TWOSOME PLACE" for 투썸플레이스), where characters cannot
+                # testify either way.
+                anchored = False
                 if anchor_place is not None and _same_search_text(place_name, anchor_value):
                     matches = anchor_matches or [anchor_place]
                 elif anchor_place is not None:
@@ -500,7 +507,7 @@ class ToolRegistry:
                         radius_m=args.radius_m,
                         limit=15,
                     )
-                    name_is_only_evidence = not matches
+                    anchored = bool(matches)
                     if not matches:
                         # Nothing within the anchor's radius: widen to a name search, but keep
                         # ranking against the anchor so a same-named place in another city cannot
@@ -512,8 +519,13 @@ class ToolRegistry:
                     place_name,
                     matches,
                     anchor=anchor_place,
-                    require_name_evidence=name_is_only_evidence or args.strict_names,
+                    allow_cross_script=anchored and not args.strict_names,
                 )
+                if best_match is None and anchored:
+                    # The neighbourhood has no place by this name. Widen before giving up: the POI
+                    # may sit just outside the radius the question implied.
+                    matches = _search_place_candidates(self.provider, place_name, limit=15)
+                    best_match = _best_place_match(place_name, matches, anchor=anchor_place)
                 if best_match is None:
                     raise PlaceNotFoundError(f"No place matched {place_name!r}")
                 ordered_matches = [
@@ -771,6 +783,7 @@ def _best_place_match(
     *,
     anchor: Place | None = None,
     require_name_evidence: bool = True,
+    allow_cross_script: bool = False,
 ) -> Place | None:
     """Pick the place a question means, preferring the one nearest a known anchor.
 
@@ -805,7 +818,9 @@ def _best_place_match(
         )
 
     best = max(matches, key=score)
-    if require_name_evidence and not _names_the_same_place(normalized_query, best):
+    if require_name_evidence and not _names_the_same_place(
+        normalized_query, best, allow_cross_script=allow_cross_script
+    ):
         return None
     return best
 
@@ -815,7 +830,29 @@ def _best_place_match(
 NAME_EVIDENCE_FLOOR = 0.55
 
 
-def _names_the_same_place(normalized_query: str, place: Place) -> bool:
+def _containment_is_evidence(left: str, right: str) -> bool:
+    """Is one name inside the other because they name one place, or by coincidence?
+
+    A short query is a substring of a great many long names. 압구정 sits inside
+    해피냠냠라면가게한강버스압구정선착장점 while naming a different place entirely, and treating
+    that as a match resolved a distance question to a POI 12 km from the one asked about. A brand
+    followed by its branch (올리브영 / 올리브영 거여역점) leads the name it extends; anything else
+    has to make up a real share of it.
+    """
+
+    shorter, longer = sorted((left, right), key=len)
+    if not shorter or shorter not in longer:
+        return False
+    return longer.startswith(shorter) or len(shorter) / len(longer) >= 0.5
+
+
+def _has_latin_letters(value: str) -> bool:
+    return any("a" <= character <= "z" for character in value.casefold())
+
+
+def _names_the_same_place(
+    normalized_query: str, place: Place, *, allow_cross_script: bool = False
+) -> bool:
     """Reject a nearest-but-unrelated match.
 
     `max` always yields a candidate, so a name Kakao simply does not have ("마천1치안센터") comes
@@ -825,7 +862,15 @@ def _names_the_same_place(normalized_query: str, place: Place) -> bool:
     """
 
     normalized_name = _search_key(place.name)
-    if normalized_query in normalized_name or normalized_name in normalized_query:
+    if _containment_is_evidence(normalized_query, normalized_name):
+        return True
+    if allow_cross_script and _has_latin_letters(normalized_query) != _has_latin_letters(
+        normalized_name
+    ):
+        # A brand transliterated across scripts shares no characters with its Kakao entry at all
+        # ("A TWOSOME PLACE" / 투썸플레이스, "Lush" / 러쉬), so character similarity cannot speak
+        # for or against it and whatever constrained the candidate set has to. Only the caller that
+        # searched a bounded neighbourhood may ask for this.
         return True
     if SequenceMatcher(None, normalized_query, normalized_name).ratio() < NAME_EVIDENCE_FLOOR:
         return False
@@ -846,9 +891,13 @@ def _proximity_score(anchor: Place | None, place: Place) -> float:
 
 
 def _search_key(value: str) -> str:
-    normalized = value.casefold()
+    normalized = strip_location_qualifier(value).casefold()
     for source in ("공립작은도서관", "작은도서관", "새마을문고", "도서관"):
         normalized = normalized.replace(source, "문고")
+    # 치안센터 and 파출소 are the same institution under two names, and which one a source uses is
+    # editorial: OSM writes 연남치안센터 where Kakao lists 연남파출소. Folding them together lets
+    # the *distinguishing* part of the name (연남) decide, instead of the institution word.
+    normalized = normalized.replace("파출소", "치안센터")
     return "".join(character for character in normalized if character.isalnum())
 
 
@@ -932,7 +981,12 @@ def _search_place_candidates(provider: MapProvider, query: str, *, limit: int) -
 def _query_variants(query: str) -> list[str]:
     normalized = " ".join(query.split()).strip()
     variants = [normalized]
-    without_company = normalized.replace("(주)", "").strip()
+    # A dataset that had to separate two same-named options appends the address to the name
+    # ("버거킹 - 서울특별시 용산구 ..."). Kakao indexes names, not name-plus-address.
+    unqualified = strip_location_qualifier(normalized)
+    if unqualified != normalized:
+        variants.append(unqualified)
+    without_company = unqualified.replace("(주)", "").strip()
     if without_company != normalized:
         variants.append(without_company)
     for suffix in ("식품관", "푸드코트", "문화센터"):

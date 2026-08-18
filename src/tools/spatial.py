@@ -967,8 +967,26 @@ def _distance_value(value: Any) -> float:
     return float(value)
 
 
+LOCATION_QUALIFIER = re.compile(
+    r"\s+[-–]\s+(?:서울|부산|대구|인천|광주|대전|울산|세종|경기|강원|충청|충북|충남|전북|전라"
+    r"|전남|경북|경상|경남|제주)\S*.*$"
+)
+
+
+def strip_location_qualifier(value: str) -> str:
+    """Drop the address a dataset appends to tell two same-named options apart.
+
+    Option texts arrive as "버거킹 - 서울특별시 용산구 한강로2가 한강대로 92" when the source
+    generator had to separate namesakes. Kakao stores the address in its own field, never in the
+    name, so the appended tail is pure noise to every name comparison and to the keyword search:
+    it drags similarity far below the matching floor and makes the option unresolvable.
+    """
+
+    return LOCATION_QUALIFIER.sub("", value).strip() or value.strip()
+
+
 def _name_key(value: str) -> str:
-    value = value.casefold().replace("(주)", "")
+    value = strip_location_qualifier(value).casefold().replace("(주)", "")
     replacements = {
         "dunkin donuts": "dunkindonuts",
         "paris baguette": "parisbaguette",

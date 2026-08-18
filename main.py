@@ -113,6 +113,7 @@ def run(agent_type: str, args: argparse.Namespace) -> dict:
             "llm_base_url": settings.llm_base_url,
         },
         abort_after_llm_failures=settings.benchmark_abort_after_llm_failures,
+        distance_tolerance_m=settings.benchmark_distance_tolerance_m,
     ).run()
     return report.statistics
 

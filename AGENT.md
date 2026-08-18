@@ -207,6 +207,14 @@ report is attributable after the fact.
 normalized `Place`/`Route` payloads only — never raw responses or keys — with a TTL (`0` = never
 expire) and a `SCHEMA_VERSION` that must be bumped when the stored payload shape changes.
 
+`distance` answers are graded with `BENCHMARK_DISTANCE_TOLERANCE_M` (default 20 m), because the
+dataset's coordinates are OSM-derived while the tools measure against Kakao. The tolerance lives in
+`Evaluator`, never in an agent, and applies to both alike. It is blunt on the current dataset: 14 of
+20 distance questions have all four options inside 20 m of each other, so every option grades as
+correct there and guessing scores 85% on that intent. Every report therefore carries
+`strict_answer_accuracy` (exact option match) beside the headline number and stamps
+`metadata.distance_tolerance_m`; quote both, and never compare a tolerated run against a strict one.
+
 `logs/`, `reports/`, and `data/*.db` are generated and gitignored: per-question traces at
 `logs/<UTC>_id<id>_<slug>.log`, one `reports/test_<UTC>.json` per batch with `metadata` /
 `statistics` / `results`. Primary metric is overall MCQ accuracy; per-classification accuracy, tool

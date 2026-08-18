@@ -514,8 +514,10 @@ class SpatialOperatorRegistry:
         # The nearest option is always *some* option, even when the measured distance is kilometres
         # away from every candidate — which means the places were resolved wrong, not that the
         # answer is the least-bad number. Say so instead of reporting a confident match.
-        spread = max(item["value_m"] for item in comparisons) or 1.0
-        error_ratio = best["absolute_error_m"] / spread
+        # Relative to the measurement itself, not to the largest option: dividing by the option
+        # scale called a 188 m miss on a ~770 m question a fit.
+        scale = max(distance_m, best["value_m"], 1.0)
+        error_ratio = best["absolute_error_m"] / scale
         fits = error_ratio <= 0.25
         return {
             "computed_distance_m": distance_m,

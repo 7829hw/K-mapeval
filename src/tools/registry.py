@@ -192,6 +192,14 @@ class BatchGeocodeArgs(BaseModel):
     )
     radius_m: int = Field(default=20_000, ge=1, le=20_000)
     limit: int = Field(default=1, ge=1, le=15)
+    strict_names: bool = Field(
+        default=False,
+        description=(
+            "Require every name to match by name, even inside the anchor's neighbourhood. "
+            "Set when the names are POIs the question states precisely, rather than option "
+            "shorthand that only has to land on the right place."
+        ),
+    )
 
     @field_validator("limit", mode="before")
     @classmethod
@@ -492,7 +500,7 @@ class ToolRegistry:
                     place_name,
                     matches,
                     anchor=anchor_place,
-                    require_name_evidence=name_is_only_evidence,
+                    require_name_evidence=name_is_only_evidence or args.strict_names,
                 )
                 if best_match is None:
                     raise PlaceNotFoundError(f"No place matched {place_name!r}")

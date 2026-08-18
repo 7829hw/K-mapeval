@@ -637,6 +637,9 @@ def _ground_graph_literals(
         names = list(arguments.get("place_names") or [])
         pair = _extract_compared_places(question) if intent == "distance" else None
         if pair and len(names) == 2:
+            # These two are POIs the question states precisely, not option shorthand, so a
+            # neighbourhood hit still has to match by name: 자양2동문고 must not become 초원책서점.
+            arguments["strict_names"] = True
             # The place names are question literals like the option texts are. A planner that
             # "helpfully" completes 만화시장 into 가좌시장만화카페 or 마천1치안센터 into 웅동파출소
             # sends the geocoder after a different POI in a different province, and every operator

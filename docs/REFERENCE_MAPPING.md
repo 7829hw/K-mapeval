@@ -55,31 +55,72 @@ Reports from this repository must therefore be labeled **prompting-only**. They 
 comparable to the paper's SFT+DPO headline results, because the learned policy, original weights,
 embedding example store, and original map evidence snapshot are not included.
 
-## Context evidence (MapEval-Textual port)
+## Context evidence (upstream's local context cache)
 
-- **Upstream:** MapEval-Textual gives the model the retrieval results in the prompt and the model
-  answers without tools. **Here:** the same context is loaded *behind* the tool layer by
-  `ContextMapProvider`, so both architectures still choose tools and still read normalized
-  `Place` / `Route` objects. Handing the text to the agent would remove the tool layer from the
-  experiment, and the experiment is about agent architecture.
-- `BenchmarkItem.context` is provider evidence, not agent input: `agent_input()` is unchanged, and
-  the evaluator binds the context through `agent.use_question_context` → `activate_context` before
-  every question — including with `None`, so no context outlives its question.
-- Counters map the upstream framing exactly: the context *is* the cache, so `api_call_count` stays
-  0, an answered lookup is a cache hit, and an unanswerable one is a cache miss followed by the same
-  `ProviderError` the Kakao path raises.
-- A stored nearby retrieval is served as recorded. Only a radius-bounded block honours the radius
-  argument; a k-nearest block has no radius to honour, and Kakao category codes cannot filter a
-  block the context never tagged with one.
-- Name matching reuses the Kakao path's floor and distinguishing-residue guard, with containment
-  narrowed to one direction (a brand may lead its branch; a branch may not match a bare brand).
-  In a closed world of a dozen places the undirected rule let a place-type option resolve to the
+Verified against `ecerybao/Spatial-Agent` at `6876bba`: `src/tools/context_parser.py`,
+`src/tools/local_context_db.py`, `data/build_cache.py`, `src/agent/operators.py`, `README.md`.
+
+What upstream does:
+
+- Evaluation runs on **MapEval-API** — the multiple-choice rows *without* context
+  (`test_agent.py`); the cache is built separately from **MapEval-Textual**, whose rows carry the
+  `context` field (`data/build_cache.py` → `data/context_cache.db`).
+- The cache is **one SQLite database over the whole corpus** — tables `places`, `travel_times`,
+  `routes`, `nearby_places` — and every question queries all of it, with a four-level fuzzy
+  cascade (exact → LIKE → normalized → Levenshtein).
+- Operators query the cache first and **fall back to the Google Maps API on a miss**
+  (`query_local_place` returns `None`, the geocode call runs). The README states this plainly:
+  "Google Maps API fallback for cache misses."
+- `get_nearby_places(reference_place, category)` returns **the stored block for that reference
+  place and nothing else**, re-ranked by haversine distance. It never scans the place table by
+  radius.
+- **The agent never sees the context text.** `test_agent.py` does not mention it, and no agent
+  module reads it outside the database.
+
+What this repo does, and why:
+
+- Same shape: the corpus is built from every context in the dataset and shared by all questions,
+  loaded *behind* the tool layer so both architectures still choose tools and still read
+  normalized `Place` / `Route` objects. `BenchmarkItem.agent_input()` is unchanged.
+- The context travels in the benchmark row rather than in a second file. `main.py` collects
+  `item.context` across the dataset and builds one corpus, which is upstream's arrangement without
+  the extra artifact. Nothing per-question is bound: an earlier revision scoped the corpus to the
+  running question, and that made the mere existence of a name an answer signal — "which option
+  exists at all" answered 14 of 100 questions under per-question scoping and 9 under the shared
+  corpus.
+- `--provider hybrid` is upstream's cache-then-live arrangement with Kakao in Google's place.
+  `--provider context` (the default) runs the corpus alone, so a run needs no Kakao key and a miss
+  stays a miss.
+- A stored nearby block is returned alone, as upstream returns it. Only a radius-bounded block
+  honours the radius argument; a k-nearest block has no radius to honour, and Kakao category codes
+  cannot filter a block the context never tagged with one. Where upstream misses and calls the API,
+  an anchor with no stored block falls back to the corpus places within the radius asked for — our
+  direction and distance questions ship coordinates without a retrieval — and then to the live
+  provider when one is configured.
+- Counters follow the upstream framing: the corpus *is* the cache, so it costs no API call; an
+  answered lookup is a hit, an unanswerable one a miss.
+
+Deliberate deviations from upstream, and the reason for each:
+
+- **Normalized objects, not text blocks.** Upstream's `get_place_by_name` returns the context's
+  `information` text. This repo's standing invariant is that raw provider text never reaches an
+  agent, so the corpus is parsed into `Place` / `Route`.
+- **Stricter name matching.** Upstream's cascade ends in a Levenshtein search over every place
+  name in the corpus. Korean POI names of one kind share long generic affixes, so the Kakao path's
+  `NAME_MATCH_FLOOR` and `distinguishing_similarity` apply here too, with containment narrowed to
+  one direction — undirected, `편의점` inside `다모아편의점` let a place-type option resolve to the
   place the question was asking about.
+- **A place is not near itself.** Upstream never excludes the reference place from its own nearby
+  block, and never had to: Google's "Nearby Restaurants of St. Lawrence Market" does not contain
+  the market. Our OSM-derived questions ask a 편의점 for its nearest 편의점, so the anchor heads
+  its own block at 0 m and won every ranking.
+- **No intent gate.** Upstream's `ContextManager.should_use_local_db` restricts the cache to
+  `{routing, trip, poi, nearby}`, which is all four answerable MapEval classes — the gate excludes
+  nothing. Porting it to this repo's eight-way vocabulary would exclude four classes for no reason,
+  so it is not ported.
 - Place types are served in the context's own vocabulary (`convenience_store`, `amenity=bank`).
   Translating them into the Korean nouns a place-type question offers as options would be supplying
   part of the answer.
-- The context can only answer what its generator recorded, so a distractor invented for the MCQ
-  legitimately does not exist. That is the upstream property too, not a provider defect.
 
 ## Kakao-specific constraints
 

@@ -13,11 +13,13 @@ normalized schemas, evaluator) must stay identical for both.
 
 The tool layer has two interchangeable evidence sources, chosen per run and never mixed:
 
-- **context** (`ContextMapProvider`) — the default. Each dataset row ships the retrieval results it
-  can be answered from, in MapEval's context format, and the provider serves those instead of
-  calling anything. This is the port of upstream Spatial-Agent's MapEval-Textual setting.
-- **kakao** (`KakaoMapProvider`) — live Kakao Local / Kakao Mobility, with the SQLite cache and the
-  region prior. Needed only for a dataset whose rows carry no context.
+- **context** (`ContextMapProvider`) — the default. One corpus built from every context the dataset
+  carries, in MapEval's context format, serving the tools instead of any API. This is the port of
+  upstream Spatial-Agent's local context cache.
+- **hybrid** — that corpus with `KakaoMapProvider` behind it for what it does not hold. This is
+  upstream's own arrangement (cache first, Google Maps on a miss) with Kakao in Google's place.
+- **kakao** (`KakaoMapProvider`) — live Kakao Local / Kakao Mobility alone, with the SQLite cache
+  and the region prior. Needed for a dataset whose rows carry no context.
 
 `K-MapEval_PRD.md` is the full spec. `docs/REFERENCE_MAPPING.md` records every deliberate deviation
 from the upstream MapEval / Spatial-Agent implementations — update it when you add another one.
@@ -45,7 +47,8 @@ ruff check .                 # line-length 100, rules E,F,I,UP,B
 python main.py --agent react                  # dataset/seoul_mapeval_v1_mcq_100.jsonl, context evidence
 python main.py --agent spatial
 python main.py --agent both --ids seoul_mapqa_v0_000907 seoul_mapqa_v0_000009
-python main.py --agent both --provider kakao   # live Kakao instead of the shipped context
+python main.py --agent both --provider hybrid  # corpus first, Kakao for what it lacks
+python main.py --agent both --provider kakao   # live Kakao alone
 python main.py --agent spatial --concurrency 4
 ```
 
@@ -303,37 +306,38 @@ calls, API calls, cache hits/misses, latency, and failures are reported alongsid
 
 ## The context provider
 
-`src/tools/context.py` ports upstream Spatial-Agent's MapEval-Textual setting: the evidence a
-question is answered from travels with the question instead of coming from an API.
+`src/tools/context.py` ports upstream Spatial-Agent's local context cache. `docs/REFERENCE_MAPPING.md`
+records the file-by-file comparison against `ecerybao/Spatial-Agent@6876bba`; the invariants are:
 
 - **The context reaches the provider, never the agent.** `BenchmarkItem.context` is provider
-  evidence, not agent input — `agent_input()` still returns only `(question, options)`. The
-  evaluator calls `agent.use_question_context(item.context)` before every question, which forwards
-  to `MapProvider.activate_context`; both architectures then discover the same evidence only by
-  calling the same tools. Handing the text to the agent instead would delete the tool layer from
-  the experiment and measure prompt reading, not agent architecture.
-- **Bind on every question, including `None`.** One question's context must never answer the next
-  one's lookups, and the evaluator's per-question call is what guarantees it.
-- **The context is the cache.** No lookup is an API call (`api_call_count` stays 0); a lookup the
-  context answers is a cache hit and one it cannot answer is a cache miss. A name the context does
-  not hold raises `PlaceNotFoundError`, and a route it did not record raises `RouteNotFoundError` —
-  a fabricated distractor has to fail the way a missing Kakao POI fails, not resolve to a neighbour.
-- **A nearby block is a stored retrieval, and is served as recorded.** The radius argument narrows
-  it only when the block is itself radius-bounded (`in requested radius`). A k-nearest block
-  (`sorted by distance`) carries no radius, so trimming it to whatever radius the agent guessed
-  would report an absence the context never states. Places mentioned outside any block were not
-  retrieved together, so those *are* filtered by the radius asked for. Kakao category codes do not
-  filter a block either: the block was retrieved by type already, and re-filtering by a code the
-  context never carried can only drop evidence. For the same reason the anchor stays in its own
-  block when the dataset put it there — reading past a 0 m self-match is the agent's job, equally
-  for both architectures.
+  evidence, not agent input — `agent_input()` still returns only `(question, options)`. Upstream is
+  the same: `test_agent.py` evaluates on MapEval-API, which has no context field, and no agent
+  module reads the text outside the cache. Handing it to the agent instead would delete the tool
+  layer from the experiment and measure prompt reading, not agent architecture.
+- **One corpus, shared by every question.** `main.py` collects `item.context` across the dataset
+  and builds it once, the way `data/build_cache.py` builds one `context_cache.db` from the whole
+  MapEval-Textual corpus. Do not scope it per question: an earlier revision did, and it made the
+  mere existence of a name an answer signal — "which option exists at all" answered 14 of 100
+  questions under per-question scoping against 9 under the corpus. A real map holds places that
+  are not the answer, and so must this.
+- **The corpus is the cache.** No lookup is an API call; a lookup it answers is a cache hit and one
+  it cannot answer is a cache miss. With a `fallback` provider the miss goes there, which is
+  upstream's Google Maps fallback; without one the miss is the answer and the caller raises the
+  `PlaceNotFoundError` / `RouteNotFoundError` a missing POI deserves.
+- **A stored nearby block is the answer for its anchor, and is served alone.** Upstream's
+  `get_nearby_places` returns that block and nothing else. The radius argument narrows it only when
+  the block is itself radius-bounded (`in requested radius`); a k-nearest block (`sorted by
+  distance`) carries no radius, so trimming it to whatever radius the agent guessed would report an
+  absence the corpus never states. Kakao category codes do not filter a block either — it was
+  retrieved by type already. An anchor with *no* stored block falls back to the corpus places
+  within the radius asked for (our direction and distance questions ship coordinates without a
+  retrieval), and then to the live provider when one is configured.
 - **Containment is evidence in one direction only.** A brand may lead the branch that extends it
   (`CU` → `CU 삼청점`), because the registry's own query variants shorten names that way. The
-  reverse must not match: a context storing a bare `GS25` recorded whichever GS25 the retrieval
+  reverse must not match: a corpus entry for a bare `GS25` recorded whichever GS25 the retrieval
   found, not the `GS25 합정프리미엄점` an option names. Allowing it also lets a place-type question
-  answer itself, since `편의점` sits inside `다모아편의점` — the option would resolve to the very
-  place being asked about. Below containment, `NAME_MATCH_FLOOR` and `distinguishing_similarity`
-  apply exactly as on the Kakao path.
+  answer itself, since `편의점` sits inside `다모아편의점`. Below containment, `NAME_MATCH_FLOOR`
+  and `distinguishing_similarity` apply exactly as on the Kakao path.
 - **The category is served as the context wrote it** (`convenience_store`, `amenity=bank`), not
   translated into Korean. A cache serves what it stored; inventing a Korean label for a place-type
   question would be supplying part of the answer.

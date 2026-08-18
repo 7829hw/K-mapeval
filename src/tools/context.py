@@ -1,19 +1,28 @@
-"""A map provider that answers from a benchmark item's own context instead of a live API.
+"""A map provider that answers from the benchmark's own contexts instead of a live API.
 
-Upstream Spatial-Agent evaluates on MapEval-Textual, where every question ships the retrieval
-results it can be answered from and the agent never calls Google. Ported here, that context is not
-handed to the agent — it is loaded *behind* the tool layer, so both architectures still have to
-decide which tool to call and still read normalized `Place` / `Route` objects. What changes is only
-where those objects come from: a per-question cache the dataset carries, instead of Kakao.
+This is the port of upstream Spatial-Agent's local context cache. Upstream evaluates on
+MapEval-API — multiple-choice questions with no context — and builds one SQLite database
+(`data/build_cache.py` → `data/context_cache.db`) from the *whole* MapEval-Textual corpus, whose
+rows carry the `context` field. Its operators query that database first and fall back to the Google
+Maps API on a miss (`ContextManager.should_use_local_db` → `query_local_place` → geocode API). The
+agent itself never sees the context text: `test_agent.py` does not mention it, and no agent module
+reads it outside the database.
 
-That keeps the independent variable intact (agent architecture) while removing the two things Kakao
-adds to it — nationwide name ambiguity and a POI index that does not contain every OSM place the
-questions were generated from.
+So the cache is a substitute *map database*, not a per-question oracle, and this module matches
+that: one corpus built from every context in the dataset, shared by every question, optionally
+backed by a live provider for what it does not hold. Scoping it per question would have made the
+mere existence of a name an answer signal — a distractor invented for one question's options is
+absent from that question's context but present in the corpus, exactly as a real map holds places
+that are not the answer.
+
+The evidence is loaded *behind* the tool layer either way, so both architectures still choose tools
+and still read normalized `Place` / `Route` objects. What changes is only where those come from.
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 
@@ -87,9 +96,6 @@ class ContextDocument:
         return list(seen.values())
 
 
-EMPTY_DOCUMENT = ContextDocument()
-
-
 def _clean_address(value: str) -> str:
     address = value.strip().rstrip(".").strip()
     return "" if address in ("", MISSING_ADDRESS) else address
@@ -105,11 +111,18 @@ def _place_key(latitude: float, longitude: float) -> str:
 
 
 def parse_context(context: str) -> ContextDocument:
-    """Parse a MapEval-style context block into places, nearby retrievals, and routes.
+    """Parse one MapEval-style context block into places, nearby retrievals, and routes."""
+
+    return parse_contexts([context])
+
+
+def parse_contexts(contexts: Iterable[str]) -> ContextDocument:
+    """Merge every context into one corpus, the way upstream's cache builder does.
 
     The format is fixed by the dataset generator: `Information of` blocks carry a place, `Nearby …`
     blocks carry one retrieval for an anchor, and `Route from … to … by …` blocks carry one route.
-    Anything else in the text is ignored rather than guessed at.
+    Anything else in the text is ignored rather than guessed at. Two contexts describing the same
+    coordinate describe the same place, and the fuller description wins.
     """
 
     places: dict[str, Place] = {}
@@ -136,6 +149,25 @@ def parse_context(context: str) -> ContextDocument:
         )
         places[place_id] = place
         return place
+
+    for context in contexts:
+        _absorb(context, remember, blocks, routes)
+    ordered = tuple(places[place_id] for place_id in dict.fromkeys(places))
+    return ContextDocument(
+        places=ordered,
+        nearby=tuple(blocks),
+        routes=tuple(routes),
+        _by_id={place.place_id: place for place in ordered},
+    )
+
+
+def _absorb(
+    context: str,
+    remember: Callable[[str, float, float, str, str, str], Place],
+    blocks: list[NearbyBlock],
+    routes: list[Route],
+) -> None:
+    """Read one context block into the corpus under construction."""
 
     lines = context.splitlines()
     index = 0
@@ -227,13 +259,10 @@ def parse_context(context: str) -> ContextDocument:
                         duration_s=duration_s,
                     )
                 )
-    ordered = tuple(places[place_id] for place_id in dict.fromkeys(places))
-    return ContextDocument(
-        places=ordered,
-        nearby=tuple(blocks),
-        routes=tuple(routes),
-        _by_id={place.place_id: place for place in ordered},
-    )
+
+
+def _distance(anchor: Place, place: Place) -> float:
+    return haversine_meters(anchor.latitude, anchor.longitude, place.latitude, place.longitude)
 
 
 def _name_score(query: str, name: str) -> float:
@@ -264,62 +293,46 @@ def _name_score(query: str, name: str) -> float:
 
 
 class ContextMapProvider(MapProvider):
-    """Serve one benchmark item's context as the map provider, without any network call.
+    """Serve the benchmark's contexts as the map provider, without any network call.
 
-    Every lookup the active context can answer counts as a cache hit and none as an API call: the
-    context *is* the cache. A lookup it cannot answer counts as a miss and fails with the same
-    `ProviderError` the Kakao provider would raise, so a place the dataset never recorded stays a
-    place-not-found rather than a silently emptier answer.
+    One corpus, shared by every question, matching upstream's single `context_cache.db`. Every
+    lookup the corpus can answer counts as a cache hit and none as an API call: the corpus *is* the
+    cache. A lookup it cannot answer counts as a miss and is passed to `fallback` when one is
+    configured — upstream falls back to the Google Maps API for exactly this — or fails with the
+    same `ProviderError` the Kakao provider would raise when there is nothing to fall back to.
     """
 
-    def __init__(self) -> None:
-        # Parsing is memoized by context text so a repeated question costs nothing to re-bind.
-        self._documents: dict[str, ContextDocument] = {}
-        self._active = EMPTY_DOCUMENT
+    def __init__(
+        self, contexts: Iterable[str] = (), *, fallback: MapProvider | None = None
+    ) -> None:
+        self._corpus = parse_contexts(contexts)
+        self._fallback = fallback
         self._cache_hits = 0
         self._cache_misses = 0
 
     @property
     def api_call_count(self) -> int:
-        return 0
+        return self._fallback.api_call_count if self._fallback is not None else 0
 
     @property
     def cache_hit_count(self) -> int:
-        return self._cache_hits
+        hits = self._fallback.cache_hit_count if self._fallback is not None else 0
+        return self._cache_hits + hits
 
     @property
     def cache_miss_count(self) -> int:
-        return self._cache_misses
+        misses = self._fallback.cache_miss_count if self._fallback is not None else 0
+        return self._cache_misses + misses
 
     @property
-    def active_document(self) -> ContextDocument:
-        return self._active
-
-    def activate_context(self, context: str | None) -> None:
-        """Point every subsequent lookup at this question's evidence.
-
-        Called once per question, always — including with `None`, so one question's context can
-        never answer the next one's lookups.
-        """
-
-        if not context:
-            self._active = EMPTY_DOCUMENT
-            return
-        document = self._documents.get(context)
-        if document is None:
-            document = parse_context(context)
-            self._documents[context] = document
-        self._active = document
+    def corpus(self) -> ContextDocument:
+        return self._corpus
 
     def close(self) -> None:
-        """Match the Kakao provider's lifecycle; a context provider holds no connection."""
+        """Match the Kakao provider's lifecycle; the corpus itself holds no connection."""
 
-    def _served(self, results: list[Place]) -> list[Place]:
-        if results:
-            self._cache_hits += 1
-        else:
-            self._cache_misses += 1
-        return results
+        if self._fallback is not None and hasattr(self._fallback, "close"):
+            self._fallback.close()
 
     def _ranked(self, query: str, candidates: list[Place], limit: int) -> list[Place]:
         scored = [
@@ -341,14 +354,14 @@ class ContextMapProvider(MapProvider):
         """
 
         reference = value.strip()
-        place = self._active._by_id.get(reference)
+        place = self._corpus._by_id.get(reference)
         if place is not None:
             return place
         coordinates = parse_coordinate_literal(reference)
         if coordinates is None:
             return None
         latitude, longitude = coordinates
-        for candidate in self._active.all_places():
+        for candidate in self._corpus.all_places():
             if (
                 haversine_meters(latitude, longitude, candidate.latitude, candidate.longitude)
                 < 1.0
@@ -358,42 +371,68 @@ class ContextMapProvider(MapProvider):
         # question the context can answer.
         return Place(place_id=reference, name=reference, latitude=latitude, longitude=longitude)
 
+    def _miss(self, call: Callable[[MapProvider], list[Place]]) -> list[Place]:
+        """A lookup the corpus cannot answer, handed to the live provider when there is one.
+
+        Upstream's operators do the same: `query_local_place` returns None on a miss and the
+        Google Maps geocode call runs instead. Without a fallback the miss is the answer, and the
+        caller turns it into the `PlaceNotFoundError` a missing POI deserves.
+        """
+
+        self._cache_misses += 1
+        if self._fallback is None:
+            return []
+        return call(self._fallback)
+
     def search_place(self, query: str, *, limit: int = 5) -> list[Place]:
         referenced = self._dereference(query)
         if referenced is not None:
-            return self._served([referenced])
-        return self._served(self._ranked(query, self._active.all_places(), limit))
+            self._cache_hits += 1
+            return [referenced]
+        found = self._ranked(query, self._corpus.all_places(), limit)
+        if found:
+            self._cache_hits += 1
+            return found
+        return self._miss(lambda provider: provider.search_place(query, limit=limit))
 
     def geocode(self, address: str, *, limit: int = 5) -> list[Place]:
         key = _name_key(address)
         by_address = [
             place
-            for place in self._active.all_places()
+            for place in self._corpus.all_places()
             if place.address
             and (key in _name_key(place.address) or _name_key(place.address) in key)
         ]
         if by_address:
-            return self._served(by_address[: max(1, limit)])
+            self._cache_hits += 1
+            return by_address[: max(1, limit)]
         return self.search_place(address, limit=limit)
 
     def reverse_geocode(
         self, latitude: float, longitude: float, *, limit: int = 5
     ) -> list[Place]:
         ordered = sorted(
-            self._active.all_places(),
+            self._corpus.all_places(),
             key=lambda place: haversine_meters(
                 latitude, longitude, place.latitude, place.longitude
             ),
         )
-        return self._served(ordered[: max(1, limit)])
+        if ordered:
+            self._cache_hits += 1
+            return ordered[: max(1, limit)]
+        return self._miss(
+            lambda provider: provider.reverse_geocode(latitude, longitude, limit=limit)
+        )
 
     def place_details(self, place_id: str) -> Place:
-        place = self._active._by_id.get(place_id)
-        if place is None:
-            self._cache_misses += 1
-            raise PlaceNotFoundError(f"Context has no place with id {place_id!r}")
-        self._cache_hits += 1
-        return place
+        place = self._corpus._by_id.get(place_id)
+        if place is not None:
+            self._cache_hits += 1
+            return place
+        self._cache_misses += 1
+        if self._fallback is None:
+            raise PlaceNotFoundError(f"The corpus has no place with id {place_id!r}")
+        return self._fallback.place_details(place_id)
 
     def _resolve_center(self, center: str | Place) -> Place:
         if isinstance(center, Place):
@@ -401,11 +440,14 @@ class ContextMapProvider(MapProvider):
         referenced = self._dereference(center)
         if referenced is not None:
             return referenced
-        matches = self._ranked(center, self._active.all_places(), 1)
-        if not matches:
-            self._cache_misses += 1
-            raise PlaceNotFoundError(f"Context has no place named {center!r}")
-        return matches[0]
+        matches = self._ranked(center, self._corpus.all_places(), 1)
+        if matches:
+            self._cache_hits += 1
+            return matches[0]
+        found = self._miss(lambda provider: provider.search_place(center, limit=1))
+        if not found:
+            raise PlaceNotFoundError(f"The corpus has no place named {center!r}")
+        return found[0]
 
     def nearby_search(
         self,
@@ -416,47 +458,52 @@ class ContextMapProvider(MapProvider):
         radius_m: int = 2000,
         limit: int = 15,
     ) -> list[Place]:
-        """Answer with what the context retrieved around this anchor, plus anything else it holds.
+        """Answer with the retrieval the corpus stored for this anchor.
 
-        A nearby block is the provider's stored result for its anchor, so it is returned as
-        recorded. The radius argument only narrows it when the block is itself radius-bounded: a
-        k-nearest block carries no radius, and truncating it by whatever radius the agent guessed
-        would report an absence the context never states. Places the context mentions outside any
-        block were not retrieved together, so those *are* filtered by the radius asked for.
+        Upstream's `get_nearby_places` looks the reference place up in the `nearby_places` table
+        and returns that block, re-ranked by distance — nothing else. A stored block *is* the
+        provider's answer for its anchor, so the radius argument narrows it only when the block is
+        itself radius-bounded (`in requested radius`); a k-nearest block carries no radius, and
+        trimming it to whatever radius the agent guessed would report an absence the corpus never
+        states. Kakao category codes do not filter it either: the block was retrieved by type
+        already, and re-filtering by a code the context never carried can only drop evidence.
+
+        Where upstream misses and calls the Google Maps API, an anchor with no stored block falls
+        back to the places the corpus holds within the radius asked for — our direction and
+        distance questions ship coordinates without a retrieval — and then to the live provider
+        when one is configured.
         """
 
         anchor = self._resolve_center(center)
-        results: list[Place] = []
-        block_ids: set[str] = set()
-        for block in self._active.nearby:
+        stored: list[Place] = []
+        for block in self._corpus.nearby:
             if _name_score(block.anchor, anchor.name) <= 0:
                 continue
             for place in block.places:
-                distance = haversine_meters(
-                    anchor.latitude, anchor.longitude, place.latitude, place.longitude
-                )
-                if block.radius_bounded and distance > radius_m:
+                if block.radius_bounded and _distance(anchor, place) > radius_m:
                     continue
-                results.append(place)
-                block_ids.add(place.place_id)
-        for place in self._active.all_places():
-            if place.place_id in block_ids or place.place_id == anchor.place_id:
-                continue
-            distance = haversine_meters(
-                anchor.latitude, anchor.longitude, place.latitude, place.longitude
-            )
-            if distance <= radius_m:
-                results.append(place)
-        if query:
+                stored.append(place)
+        results = stored or [
+            place
+            for place in self._corpus.all_places()
+            if place.place_id != anchor.place_id and _distance(anchor, place) <= radius_m
+        ]
+        if query and not stored:
             named = [place for place in results if _name_score(query, place.name) > 0]
-            if named:
-                results = named
-        results.sort(
-            key=lambda place: haversine_meters(
-                anchor.latitude, anchor.longitude, place.latitude, place.longitude
+            results = named or results
+        results.sort(key=lambda place: _distance(anchor, place))
+        if results:
+            self._cache_hits += 1
+            return results[: max(1, limit)]
+        return self._miss(
+            lambda provider: provider.nearby_search(
+                anchor,
+                query=query,
+                category_code=category_code,
+                radius_m=radius_m,
+                limit=limit,
             )
         )
-        return self._served(results[: max(1, limit)])
 
     def directions(
         self,
@@ -472,11 +519,22 @@ class ContextMapProvider(MapProvider):
             raise UnsupportedTravelModeError(f"Context routes are driving only, not {mode!r}")
         start = self._resolve_center(origin)
         end = self._resolve_center(destination)
-        for route in self._active.routes:
+        for route in self._corpus.routes:
             if _name_score(route.origin, start.name) > 0 and (
                 _name_score(route.destination, end.name) > 0
             ):
                 self._cache_hits += 1
                 return route
         self._cache_misses += 1
-        raise RouteNotFoundError(f"Context has no route from {start.name!r} to {end.name!r}")
+        if self._fallback is None:
+            raise RouteNotFoundError(
+                f"The corpus has no route from {start.name!r} to {end.name!r}"
+            )
+        return self._fallback.directions(
+            start,
+            end,
+            mode=mode,
+            priority=priority,
+            waypoints=waypoints,
+            include_steps=include_steps,
+        )

@@ -5,7 +5,8 @@ from pathlib import Path
 import pytest
 
 from src.dataset import load_dataset
-from src.tools import ContextMapProvider, ToolRegistry
+from src.models import Place, Route
+from src.tools import ContextMapProvider, MapProvider, ToolRegistry
 from src.tools.context import parse_context
 from src.tools.map import PlaceNotFoundError, RouteNotFoundError, UnsupportedTravelModeError
 
@@ -73,8 +74,7 @@ def test_a_context_block_becomes_places_a_retrieval_and_a_route() -> None:
 
 
 def test_the_context_is_the_cache_so_no_lookup_costs_an_api_call() -> None:
-    provider = ContextMapProvider()
-    provider.activate_context(NEARBY_CONTEXT)
+    provider = ContextMapProvider([NEARBY_CONTEXT])
 
     assert [place.name for place in provider.search_place("어라운드북")] == ["어라운드북"]
     assert provider.api_call_count == 0
@@ -85,8 +85,7 @@ def test_the_context_is_the_cache_so_no_lookup_costs_an_api_call() -> None:
 def test_a_place_the_context_does_not_hold_is_not_found() -> None:
     """A distractor the dataset invented has to fail the way a missing Kakao POI fails."""
 
-    provider = ContextMapProvider()
-    provider.activate_context(RADIUS_CONTEXT)
+    provider = ContextMapProvider([RADIUS_CONTEXT])
 
     assert provider.search_place("IBK기업은행") == []
     with pytest.raises(PlaceNotFoundError):
@@ -94,15 +93,20 @@ def test_a_place_the_context_does_not_hold_is_not_found() -> None:
     assert provider.cache_miss_count == 2
 
 
-def test_one_questions_context_never_answers_the_next() -> None:
-    provider = ContextMapProvider()
-    provider.activate_context(NEARBY_CONTEXT)
-    assert provider.search_place("어라운드북")
+def test_the_corpus_is_shared_by_every_question_the_way_upstreams_cache_is() -> None:
+    """One database over the whole benchmark, not a per-question oracle.
 
-    provider.activate_context(RADIUS_CONTEXT)
-    assert provider.search_place("어라운드북") == []
-    provider.activate_context(None)
-    assert provider.search_place("우리은행") == []
+    Upstream builds `context_cache.db` from the entire MapEval-Textual corpus and every question
+    queries all of it. Scoping it per question would make the mere existence of a name an answer
+    signal: a distractor invented for one question's options is absent from that question's own
+    context but present in the corpus, exactly as a real map holds places that are not the answer.
+    """
+
+    provider = ContextMapProvider([NEARBY_CONTEXT, RADIUS_CONTEXT, ROUTE_CONTEXT])
+
+    assert [place.name for place in provider.search_place("어라운드북")] == ["어라운드북"]
+    assert [place.name for place in provider.search_place("우리은행")] == ["우리은행"]
+    assert provider.directions("회기버거", "GS25 서대문남가좌점").distance_m == 4994
 
 
 def test_a_k_nearest_block_is_served_whole_and_a_radius_block_is_bounded() -> None:
@@ -112,15 +116,13 @@ def test_a_k_nearest_block_is_served_whole_and_a_radius_block_is_bounded() -> No
     would report an absence the context never states; a bounded block already is the answer set.
     """
 
-    provider = ContextMapProvider()
-    provider.activate_context(NEARBY_CONTEXT)
+    provider = ContextMapProvider([NEARBY_CONTEXT, RADIUS_CONTEXT])
     assert [place.name for place in provider.nearby_search("평화시장", radius_m=100)] == [
         "어라운드북",
         "교보문고",
         "소요서가",
     ]
 
-    provider.activate_context(RADIUS_CONTEXT)
     bounded = provider.nearby_search("미소의집", radius_m=500)
     assert [place.name for place in bounded] == ["우리은행"]
     assert provider.nearby_search("미소의집", radius_m=10) == []
@@ -129,24 +131,22 @@ def test_a_k_nearest_block_is_served_whole_and_a_radius_block_is_bounded() -> No
 def test_a_type_word_does_not_resolve_to_the_place_that_ends_in_it() -> None:
     """Otherwise a place-type question answers itself: the option would find its own anchor."""
 
-    provider = ContextMapProvider()
-    provider.activate_context(
+    provider = ContextMapProvider([
         "Information of <b>다모아편의점</b>:\n"
         "- Location: 주소 정보 없음(37.5658790, 127.0036030).\n"
         "- OSM ID: node/368948685.\n"
         "- Type: convenience_store.\n"
-    )
+    ])
     assert provider.search_place("편의점") == []
     assert [place.name for place in provider.search_place("다모아편의점")] == ["다모아편의점"]
 
 
 def test_a_brand_resolves_to_the_branch_that_extends_it() -> None:
-    provider = ContextMapProvider()
-    provider.activate_context(
+    provider = ContextMapProvider([
         "Information of <b>CU 삼청점</b>:\n"
         "- Location: 서울특별시 종로구 삼청로 68(37.5828000, 126.9810000).\n"
         "- OSM ID: node/1.\n"
-    )
+    ])
     assert [place.name for place in provider.search_place("CU")] == ["CU 삼청점"]
     # A dataset that had to separate namesakes appends the address to the option text.
     assert [
@@ -161,12 +161,11 @@ def test_a_branch_name_does_not_resolve_to_the_bare_brand_the_context_stores() -
     GS25 합정프리미엄점 an option from another district names.
     """
 
-    provider = ContextMapProvider()
-    provider.activate_context(
+    provider = ContextMapProvider([
         "Information of <b>GS25</b>:\n"
         "- Location: 주소 정보 없음(37.5600000, 126.9300000).\n"
         "- OSM ID: node/2.\n"
-    )
+    ])
     assert provider.search_place("GS25 합정프리미엄점") == []
     assert [place.name for place in provider.search_place("GS25")] == ["GS25"]
 
@@ -179,8 +178,7 @@ def test_an_anchor_of_the_type_asked_about_still_heads_its_own_retrieval() -> No
     architectures.
     """
 
-    provider = ContextMapProvider()
-    provider.activate_context(
+    provider = ContextMapProvider([
         "Information of <b>GS25 화곡초교점</b>:\n"
         "- Location: 주소 정보 없음(37.5400000, 126.8400000).\n"
         "- OSM ID: node/3.\n"
@@ -191,14 +189,13 @@ def test_an_anchor_of_the_type_asked_about_still_heads_its_own_retrieval() -> No
         "   - Address: 주소 정보 없음.\n"
         "2. <b>CU 화곡본동점</b>(37.5410000, 126.8410000)\n"
         "   - Address: 주소 정보 없음.\n"
-    )
+    ])
     found = provider.nearby_search("GS25 화곡초교점", query="편의점")
     assert [place.name for place in found] == ["GS25 화곡초교점", "CU 화곡본동점"]
 
 
 def test_a_recorded_route_is_returned_and_an_unrecorded_one_fails() -> None:
-    provider = ContextMapProvider()
-    provider.activate_context(ROUTE_CONTEXT)
+    provider = ContextMapProvider([ROUTE_CONTEXT])
 
     route = provider.directions("회기버거", "GS25 서대문남가좌점")
     assert (route.distance_m, route.duration_s) == (4994, 420)
@@ -212,8 +209,7 @@ def test_a_recorded_route_is_returned_and_an_unrecorded_one_fails() -> None:
 def test_the_shared_tool_layer_reads_the_context_like_any_other_provider() -> None:
     """Both architectures reach the context only through the registry, unchanged."""
 
-    provider = ContextMapProvider()
-    provider.activate_context(NEARBY_CONTEXT)
+    provider = ContextMapProvider([NEARBY_CONTEXT])
     registry = ToolRegistry(provider)
 
     execution = registry.invoke(
@@ -251,8 +247,7 @@ def test_a_place_the_agent_already_holds_is_addressable_by_id_and_by_coordinates
     steps went on re-searching a name that was never a name, and the question was lost.
     """
 
-    provider = ContextMapProvider()
-    provider.activate_context(RADIUS_CONTEXT)
+    provider = ContextMapProvider([RADIUS_CONTEXT])
 
     by_id = provider.nearby_search("node/12192225021", query="은행", radius_m=500)
     by_point = provider.nearby_search("37.5021773,126.9877564", query="은행", radius_m=500)
@@ -273,8 +268,7 @@ def test_a_planners_place_shape_never_ends_a_run() -> None:
     artifact failed as a pydantic ValidationError before any tool ran.
     """
 
-    provider = ContextMapProvider()
-    provider.activate_context(NEARBY_CONTEXT)
+    provider = ContextMapProvider([NEARBY_CONTEXT])
     registry = ToolRegistry(provider)
     anchor = registry.invoke("batch_geocode", {"place_names": ["평화시장"]}).output[0]["place"]
 
@@ -295,3 +289,60 @@ def test_a_planners_place_shape_never_ends_a_run() -> None:
     )
     assert recovered.status == "ok", recovered.error
     assert [place["name"] for place in recovered.output] == ["소요서가"]
+
+
+class StubLiveProvider(MapProvider):
+    """Stands in for Kakao: whatever the corpus does not hold, this does."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.place = Place(
+            place_id="live/1", name="IBK기업은행", latitude=37.5000, longitude=126.9800
+        )
+
+    @property
+    def api_call_count(self) -> int:
+        return self.calls
+
+    def search_place(self, query: str, *, limit: int = 5) -> list[Place]:
+        self.calls += 1
+        return [self.place.model_copy(update={"name": query})]
+
+    def geocode(self, address: str, *, limit: int = 5) -> list[Place]:
+        return self.search_place(address, limit=limit)
+
+    def nearby_search(self, center, **kwargs) -> list[Place]:
+        self.calls += 1
+        return [self.place]
+
+    def place_details(self, place_id: str) -> Place:
+        self.calls += 1
+        return self.place
+
+    def directions(self, origin, destination, **kwargs) -> Route:
+        self.calls += 1
+        return Route(origin="a", destination="b", distance_m=1, duration_s=1)
+
+
+def test_a_miss_falls_back_to_the_live_provider_the_way_upstream_does() -> None:
+    """Upstream's operators query the cache first and call Google Maps when it has nothing.
+
+    `query_local_place` returns None on a miss and the geocode API runs instead, which is what
+    lets one corpus-wide cache be used without its coverage bounding the benchmark.
+    """
+
+    live = StubLiveProvider()
+    provider = ContextMapProvider([RADIUS_CONTEXT], fallback=live)
+
+    assert [place.name for place in provider.search_place("미소의집")] == ["미소의집"]
+    assert live.calls == 0  # the corpus answered, so nothing was spent
+
+    assert [place.name for place in provider.search_place("IBK기업은행")] == ["IBK기업은행"]
+    assert live.calls == 1
+    assert provider.api_call_count == 1
+    assert provider.cache_miss_count == 1
+
+    # Without a fallback the miss is the answer, and a missing place stays missing.
+    alone = ContextMapProvider([RADIUS_CONTEXT])
+    assert alone.search_place("IBK기업은행") == []
+    assert alone.api_call_count == 0

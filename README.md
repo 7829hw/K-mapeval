@@ -4,8 +4,9 @@ MapEval 방식 ReAct와 Spatial-Agent의 공간 추론 성능을 같은 조건�
 
 근거(evidence) 출처는 실행 단위로 하나만 선택되고 서로 섞이지 않습니다.
 
-- `context` (기본값): 데이터셋의 각 문항이 답에 필요한 검색 결과를 MapEval context 형식으로 함께 싣고 있으며, `ContextMapProvider`가 이를 API 대신 제공합니다. 원본 Spatial-Agent의 MapEval-Textual 설정을 이식한 것입니다. context는 에이전트가 아니라 **provider**에 주입되므로 두 에이전트 모두 동일한 도구 호출을 통해서만 근거에 접근합니다.
-- `kakao`: Kakao Local / Kakao Mobility 실호출과 SQLite 캐시. context가 없는 데이터셋에서만 필요합니다.
+- `context` (기본값): 데이터셋 **전체**의 context로 만든 corpus 하나를 `ContextMapProvider`가 API 대신 제공합니다. 원본 Spatial-Agent의 local context cache(`data/build_cache.py` → `context_cache.db`)를 이식한 것입니다. context는 에이전트가 아니라 **provider**에 주입되므로 두 에이전트 모두 동일한 도구 호출을 통해서만 근거에 접근합니다.
+- `hybrid`: 위 corpus를 먼저 보고, 없는 것만 Kakao 실호출로 넘깁니다. 원본이 cache miss를 Google Maps로 넘기는 것과 같은 구성입니다.
+- `kakao`: Kakao Local / Kakao Mobility 실호출과 SQLite 캐시만 사용합니다.
 
 지원 classification은 `nearby`, `poi`, `routing`, `trip`, `type`, `direction`,
 `distance`, `radius`입니다. `answer`와 에이전트의 선택지 번호는 모두 `options`의
@@ -29,7 +30,7 @@ K-MapEval/
 └── reports/             # 배치 평가 보고서(자동 생성)
 ```
 
-두 에이전트 모두 `Place`와 `Route` 정규화 스키마만 봅니다. 정답, classification, region, difficulty, verified_at, 그리고 **context**는 에이전트 입력에 포함되지 않습니다. `BenchmarkItem.agent_input()`은 `(question, options)`만 반환하고, 평가기가 문항마다 `agent.use_question_context()`로 provider에만 context를 바인딩합니다.
+두 에이전트 모두 `Place`와 `Route` 정규화 스키마만 봅니다. 정답, classification, region, difficulty, verified_at, 그리고 **context**는 에이전트 입력에 포함되지 않습니다. `BenchmarkItem.agent_input()`은 `(question, options)`만 반환하고, context는 실행 시작 시 provider의 corpus로만 적재됩니다. 원본 Spatial-Agent도 context 없는 MapEval-API로 평가하고 context는 캐시 구축에만 씁니다.
 
 Spatial-Agent는 `공간 개념/기능 역할 분석 → 매크로 검색 → ConceptGraph 구성 →
 operator-concept hypergraph factorization → 5개 제약 검증 → 위상순 실행 → 근거 기반 선택`
@@ -99,9 +100,10 @@ python main.py --agent both --ids seoul_mapqa_v0_000907 seoul_mapqa_v0_000009
 ```
 
 근거 출처는 `--provider`로 고릅니다. 기본값 `auto`는 모든 행이 context를 가지면 `context`를,
-아니면 `kakao`를 씁니다. `kakao`를 고를 때만 `KAKAO_REST_API_KEY`가 필요합니다.
+아니면 `kakao`를 씁니다. `kakao`와 `hybrid`에만 `KAKAO_REST_API_KEY`가 필요합니다.
 
 ```bash
+python main.py --agent both --provider hybrid
 python main.py --agent both --provider kakao
 ```
 

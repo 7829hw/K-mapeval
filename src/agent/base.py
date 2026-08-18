@@ -35,17 +35,6 @@ class BenchmarkAgent(ABC):
     @abstractmethod
     def answer(self, question: str, options: list[str]) -> AgentResult: ...
 
-    def use_question_context(self, context: str | None) -> None:
-        """Point the tool layer at the evidence cached for the next question.
-
-        The context reaches the provider, never the agent: both architectures still have to choose
-        tools and still read the same normalized objects, so the comparison is unchanged by where
-        the evidence came from.
-        """
-
-        if self.tools is not None:
-            self.tools.provider.activate_context(context)
-
 
 def format_question(question: str, options: list[str]) -> str:
     rendered = "\n".join(f"Option {index}: {option}" for index, option in enumerate(options))

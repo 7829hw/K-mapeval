@@ -40,15 +40,6 @@ class MapProvider(ABC):
     @abstractmethod
     def api_call_count(self) -> int: ...
 
-    def activate_context(self, context: str | None) -> None:
-        """Bind the evidence the next question is answered from.
-
-        A dataset may ship the retrieval results for each question, which a provider can serve
-        instead of calling an API. Providers that answer from a live API ignore this.
-        """
-
-        return None
-
     @property
     def cache_hit_count(self) -> int:
         return 0

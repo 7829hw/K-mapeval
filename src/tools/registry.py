@@ -11,7 +11,8 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from src.models import Place
-from src.tools.map import MapProvider
+from src.tools.map import MapProvider, PlaceNotFoundError
+from src.tools.spatial import haversine_meters
 
 KakaoCategoryCode = Literal[
     "MT1",
@@ -398,6 +399,7 @@ class ToolRegistry:
             self.calls.append(execution)
             return execution
         try:
+            _reject_unresolved_places(name, arguments)
             parsed = tool.args_model.model_validate(arguments)
             output = _jsonable(tool.handler(parsed))
             execution = ToolExecution(name, parsed.model_dump(), output, "ok")
@@ -419,9 +421,56 @@ class ToolRegistry:
         if isinstance(anchor_value, str):
             anchor_matches = _search_place_candidates(self.provider, anchor_value, limit=15)
             anchor_place = _best_place_match(anchor_value, anchor_matches)
+        results = self._resolve_batch(args, anchor_value, anchor_place)
+        return self._reconcile_batch(args, results)
+
+    def _reconcile_batch(
+        self,
+        args: BatchGeocodeArgs,
+        results: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Re-resolve a batch that landed in two places at once.
+
+        A question naming several POIs is asserting they sit in one neighbourhood, so a batch whose
+        resolved places span more than `radius_m` has at least one name resolved wrong — and which
+        one is not knowable from the first pass. Re-resolve the batch around each resolved place in
+        turn and keep the reading that holds together. Re-ranking cannot substitute for this: a
+        keyword search for an ambiguous short name fills every slot with one far-away city, so the
+        intended place was never among the candidates to re-rank.
+        """
+
+        resolved = _resolved_places(results)
+        if len(resolved) < 2:
+            return results
+        best, best_span = results, _batch_span(resolved)
+        if best_span <= min(args.radius_m, BATCH_LOCALITY_SPAN_M):
+            return results
+        for keeper_query, keeper_place in list(resolved.items())[:MAX_RECONCILE_KEEPERS]:
+            trial = self._resolve_batch(args, keeper_query, keeper_place)
+            trial_places = _resolved_places(trial)
+            if len(trial_places) < len(resolved):
+                continue  # a tighter batch is not worth losing a place over
+            span = _batch_span(trial_places)
+            if span < best_span:
+                best, best_span = trial, span
+        return best
+
+    def _resolve_batch(
+        self,
+        args: BatchGeocodeArgs,
+        anchor_value: str | Place | None,
+        anchor_place: Place | None,
+    ) -> list[dict[str, Any]]:
+        anchor_matches = [anchor_place] if anchor_place is not None else []
         results: list[dict[str, Any]] = []
         for place_name in args.place_names:
             try:
+                # Whether the name has to carry the evidence depends on where the candidates came
+                # from. A neighbourhood search is already constrained to the right area, so a brand
+                # written the question's way ("S-OIL" for 에쓰오일, "올리브영" for a branch) is the
+                # place meant. A nationwide search has no such constraint, so there the name is the
+                # only evidence there is and a weak match is a different POI entirely.
+                name_is_only_evidence = True
                 if anchor_place is not None and _same_search_text(place_name, anchor_value):
                     matches = anchor_matches or [anchor_place]
                 elif anchor_place is not None:
@@ -431,20 +480,30 @@ class ToolRegistry:
                         radius_m=args.radius_m,
                         limit=15,
                     )
+                    name_is_only_evidence = not matches
                     if not matches:
+                        # Nothing within the anchor's radius: widen to a name search, but keep
+                        # ranking against the anchor so a same-named place in another city cannot
+                        # win on text alone.
                         matches = _search_place_candidates(self.provider, place_name, limit=15)
                 else:
                     matches = _search_place_candidates(self.provider, place_name, limit=15)
-                best_match = _best_place_match(place_name, matches)
-                ordered_matches = (
-                    [best_match, *(match for match in matches if match != best_match)]
-                    if best_match
-                    else []
+                best_match = _best_place_match(
+                    place_name,
+                    matches,
+                    anchor=anchor_place,
+                    require_name_evidence=name_is_only_evidence,
                 )
+                if best_match is None:
+                    raise PlaceNotFoundError(f"No place matched {place_name!r}")
+                ordered_matches = [
+                    best_match,
+                    *(match for match in matches if match != best_match),
+                ]
                 results.append(
                     {
                         "query": place_name,
-                        "place": _jsonable(best_match) if best_match else None,
+                        "place": _jsonable(best_match),
                         "candidates": _jsonable(ordered_matches[: args.limit]),
                     }
                 )
@@ -595,6 +654,59 @@ def _clamp_int(value: Any, *, minimum: int, maximum: int) -> int:
     return max(minimum, min(number, maximum))
 
 
+# Only arguments whose models require a place. `anchor` is deliberately absent: it is optional
+# everywhere it appears, so an explicit null there means "no anchor", not a failed lookup.
+PLACE_ARGUMENT_NAMES = frozenset({"center", "origin", "destination", "place"})
+
+# Each reconciliation attempt re-resolves the whole batch, so cap how many readings we try.
+MAX_RECONCILE_KEEPERS = 3
+# How far apart a batch's places may sit before we stop believing they are one neighbourhood. This
+# is not the search radius: `radius_m` is how wide we are willing to look for a name, while this is
+# how wide a single locality can plausibly be. Two POIs a question compares are a district apart at
+# most, so a wider span means one of the names matched its twin in another part of the country.
+BATCH_LOCALITY_SPAN_M = 5_000
+
+
+def _resolved_places(results: list[dict[str, Any]]) -> dict[str, Place]:
+    """Successfully geocoded rows, keyed by the query text that produced them."""
+
+    return {
+        str(row["query"]): Place.model_validate(row["place"])
+        for row in results
+        if row.get("place")
+    }
+
+
+def _batch_span(places: dict[str, Place]) -> float:
+    """Widest distance between any two places in the batch."""
+
+    values = list(places.values())
+    return max(
+        (
+            -_proximity_score(first, second)
+            for index, first in enumerate(values)
+            for second in values[index + 1 :]
+        ),
+        default=0.0,
+    )
+
+
+def _reject_unresolved_places(name: str, arguments: dict[str, Any]) -> None:
+    """Name an unresolved place for what it is, before pydantic calls it a type error.
+
+    An upstream geocode that found nothing leaves `None` in a downstream argument. Letting that
+    reach the args model turns a provider failure into a `ValidationError`, which the evaluator
+    then files as agent reasoning.
+    """
+
+    for argument in PLACE_ARGUMENT_NAMES:
+        if argument in arguments and arguments[argument] is None:
+            raise PlaceNotFoundError(
+                f"{name} received an unresolved place for {argument!r}; "
+                "the upstream geocode found no match"
+            )
+
+
 def _place_label(value: str | Place | None) -> str:
     if value is None:
         return ""
@@ -608,12 +720,26 @@ def _same_search_text(place_name: str, anchor: str | Place | None) -> bool:
     return "".join(place_name.split()).casefold() == "".join(anchor_name.split()).casefold()
 
 
-def _best_place_match(query: str, matches: list[Place]) -> Place | None:
+def _best_place_match(
+    query: str,
+    matches: list[Place],
+    *,
+    anchor: Place | None = None,
+    require_name_evidence: bool = True,
+) -> Place | None:
+    """Pick the place a question means, preferring the one nearest a known anchor.
+
+    A bare brand name ("맘스터치") matches every branch equally well on text, so without the anchor
+    term the tiebreak collapses to name similarity — which favours the *shortest* branch name, not
+    the branch the question is about. Proximity sits below the name-evidence terms, so an exact or
+    branch-specific match still wins over a merely closer one.
+    """
+
     if not matches:
         return None
     normalized_query = _search_key(query)
 
-    def score(place: Place) -> tuple[int, int, int, int, float]:
+    def score(place: Place) -> tuple[int, int, int, int, float, float]:
         normalized_name = _search_key(place.name)
         exact = int(normalized_query == normalized_name)
         containment = int(
@@ -625,10 +751,42 @@ def _best_place_match(query: str, matches: list[Place]) -> Place | None:
             _branch_compatibility(query, place.name),
             _category_compatibility(query, place),
             containment,
+            _proximity_score(anchor, place),
             similarity,
         )
 
-    return max(matches, key=score)
+    best = max(matches, key=score)
+    if require_name_evidence and not _names_the_same_place(normalized_query, best):
+        return None
+    return best
+
+
+# Below this, two names share a few characters by coincidence rather than describing one place.
+# Every genuine resolution observed in the benchmark clears it by containment alone.
+NAME_EVIDENCE_FLOOR = 0.55
+
+
+def _names_the_same_place(normalized_query: str, place: Place) -> bool:
+    """Reject a nearest-but-unrelated match.
+
+    `max` always yields a candidate, so a name Kakao simply does not have ("마천1치안센터") comes
+    back as whatever scored least badly ("웅동파출소", 100 km away, zero characters in common). That
+    silently swaps the question's POI for a different one, and every operator downstream then
+    computes correctly over the wrong place — far worse than no match at all.
+    """
+
+    normalized_name = _search_key(place.name)
+    if normalized_query in normalized_name or normalized_name in normalized_query:
+        return True
+    return SequenceMatcher(None, normalized_query, normalized_name).ratio() >= NAME_EVIDENCE_FLOOR
+
+
+def _proximity_score(anchor: Place | None, place: Place) -> float:
+    """Negated distance to the anchor, so nearer sorts higher. 0.0 when there is no anchor."""
+
+    if anchor is None:
+        return 0.0
+    return -haversine_meters(anchor.latitude, anchor.longitude, place.latitude, place.longitude)
 
 
 def _search_key(value: str) -> str:

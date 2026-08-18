@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from src.tools.spatial import SpatialOperatorRegistry
 
 
@@ -29,6 +31,49 @@ def test_filter_by_direction_returns_only_sector_matches_nearest_first() -> None
     )
     assert [place["name"] for place in matches] == ["가까운 북쪽", "먼 북쪽"]
     assert all(place["cardinal_direction_ko"] == "북쪽" for place in matches)
+
+
+def test_place_shaped_operator_inputs_are_normalized_before_computation() -> None:
+    ops = SpatialOperatorRegistry()
+    geocoded = {
+        "query": "기준",
+        "place": {"name": "기준", "latitude": 37.5, "longitude": 127.0},
+        "candidates": [],
+    }
+    target = {"place": {"name": "북쪽", "lat": 37.52, "lng": 127.0}}
+    other = {"place": {"name": "동쪽", "lat": 37.5, "lng": 127.02}}
+
+    distance = ops.invoke("haversine_distance", {"place_a": geocoded, "place_b": target})
+    matches = ops.invoke(
+        "filter_by_direction",
+        {"center": geocoded, "places": [other, target], "direction": "북쪽"},
+    )
+
+    assert 2000 < distance["distance_m"] < 2500
+    assert [place["name"] for place in matches] == ["북쪽"]
+
+
+def test_unresolved_place_input_fails_as_an_explicit_place_error() -> None:
+    ops = SpatialOperatorRegistry()
+    center = {"name": "기준", "latitude": 37.5, "longitude": 127.0}
+
+    with pytest.raises(ValueError, match="PlaceNotFoundError"):
+        ops.invoke("haversine_distance", {"place_a": center, "place_b": None})
+
+    resolved = {"name": "북", "latitude": 37.51, "longitude": 127.0}
+    nearest = ops.invoke("nearest", {"anchor": center, "candidates": [None, resolved]})
+    assert nearest["nearest"]["name"] == "북"
+    assert nearest["nearest"]["candidate_index"] == 1
+
+
+def test_match_distance_options_accepts_numeric_options_and_measured_records() -> None:
+    result = SpatialOperatorRegistry().invoke(
+        "match_distance_options",
+        {"distance": {"distance_km": 1.058}, "options": [1036, 1061, 1200]},
+    )
+
+    assert result["best_option"] == 1
+    assert result["computed_distance_m"] == 1058
 
 
 def test_route_comparison_and_sum() -> None:

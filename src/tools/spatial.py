@@ -9,6 +9,19 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 
+def haversine_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in metres. The one place this repo computes it."""
+
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+    hav = (
+        math.sin(delta_phi / 2) ** 2
+        + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2) ** 2
+    )
+    return 2 * 6_371_008.8 * math.asin(math.sqrt(hav))
+
+
 class SpatialOperatorRegistry:
     """Deterministic operators; these never spend Kakao API calls."""
 
@@ -58,21 +71,19 @@ class SpatialOperatorRegistry:
         return value
 
     @staticmethod
-    def haversine_distance(place_a: dict[str, Any], place_b: dict[str, Any]) -> dict[str, float]:
-        lat1, lon1 = float(place_a["latitude"]), float(place_a["longitude"])
-        lat2, lon2 = float(place_b["latitude"]), float(place_b["longitude"])
-        phi1, phi2 = math.radians(lat1), math.radians(lat2)
-        delta_phi = math.radians(lat2 - lat1)
-        delta_lambda = math.radians(lon2 - lon1)
-        hav = (
-            math.sin(delta_phi / 2) ** 2
-            + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2) ** 2
+    def haversine_distance(place_a: Any, place_b: Any) -> dict[str, float]:
+        place_a, place_b = _as_place(place_a, "place_a"), _as_place(place_b, "place_b")
+        distance_m = haversine_meters(
+            float(place_a["latitude"]),
+            float(place_a["longitude"]),
+            float(place_b["latitude"]),
+            float(place_b["longitude"]),
         )
-        distance_m = 2 * 6_371_008.8 * math.asin(math.sqrt(hav))
         return {"distance_m": distance_m, "distance_km": distance_m / 1000}
 
     @staticmethod
-    def bearing_to_direction(place_a: dict[str, Any], place_b: dict[str, Any]) -> dict[str, Any]:
+    def bearing_to_direction(place_a: Any, place_b: Any) -> dict[str, Any]:
+        place_a, place_b = _as_place(place_a, "place_a"), _as_place(place_b, "place_b")
         lat1 = math.radians(float(place_a["latitude"]))
         lat2 = math.radians(float(place_b["latitude"]))
         delta_lon = math.radians(float(place_b["longitude"]) - float(place_a["longitude"]))
@@ -107,8 +118,9 @@ class SpatialOperatorRegistry:
     def pairwise_distances(cls, pairs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         for index, pair in enumerate(pairs):
-            place_a, place_b = pair.get("place_a"), pair.get("place_b")
-            if not isinstance(place_a, dict) or not isinstance(place_b, dict):
+            try:
+                distance = cls.haversine_distance(pair.get("place_a"), pair.get("place_b"))
+            except ValueError:
                 results.append(
                     {
                         "pair_index": index,
@@ -118,12 +130,12 @@ class SpatialOperatorRegistry:
                     }
                 )
                 continue
-            distance = cls.haversine_distance(place_a, place_b)
             results.append({"pair_index": index, "label": pair.get("label"), **distance})
         return results
 
     @classmethod
-    def pairwise_extremes(cls, locations: list[dict[str, Any]]) -> dict[str, Any]:
+    def pairwise_extremes(cls, locations: list[Any]) -> dict[str, Any]:
+        locations = [place for _, place in _as_place_list(locations)]
         if len(locations) < 2:
             raise ValueError("pairwise_extremes requires at least two locations")
         pairs = [
@@ -141,17 +153,16 @@ class SpatialOperatorRegistry:
     @classmethod
     def filter_by_direction(
         cls,
-        center: dict[str, Any],
-        places: list[dict[str, Any]],
+        center: Any,
+        places: Any,
         direction: str,
     ) -> list[dict[str, Any]]:
         """Return candidates in a cardinal sector, nearest first."""
 
         expected = _cardinal_direction(direction)
+        center = _as_place(center, "center")
         matches: list[dict[str, Any]] = []
-        for candidate_index, place in enumerate(places):
-            if not isinstance(place, dict):
-                continue
+        for candidate_index, place in _as_place_list(places):
             bearing = cls.bearing_to_direction(center, place)
             if bearing["cardinal_direction"] != expected:
                 continue
@@ -162,11 +173,13 @@ class SpatialOperatorRegistry:
     @classmethod
     def nearest(
         cls,
-        anchor: dict[str, Any],
-        candidates: list[dict[str, Any]],
+        anchor: Any,
+        candidates: Any,
         metric: str = "haversine",
         routes: list[dict[str, Any]] | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        anchor = _as_place(anchor, "anchor")
+        resolved = _as_place_list(candidates)
         if metric == "haversine":
             ranked = [
                 {
@@ -174,8 +187,7 @@ class SpatialOperatorRegistry:
                     **candidate,
                     **cls.haversine_distance(anchor, candidate),
                 }
-                for index, candidate in enumerate(candidates)
-                if isinstance(candidate, dict)
+                for index, candidate in resolved
             ]
             ranked.sort(key=lambda candidate: float(candidate["distance_m"]))
         elif metric == "travel_time":
@@ -183,7 +195,7 @@ class SpatialOperatorRegistry:
             if not isinstance(route_values, list):
                 raise ValueError("travel_time nearest requires aligned routes")
             ranked = []
-            for index, candidate in enumerate(candidates):
+            for index, candidate in resolved:
                 route = next(
                     (
                         item
@@ -194,7 +206,7 @@ class SpatialOperatorRegistry:
                     ),
                     None,
                 )
-                if isinstance(candidate, dict) and route is not None:
+                if route is not None:
                     ranked.append(
                         {
                             "candidate_index": index,
@@ -212,14 +224,14 @@ class SpatialOperatorRegistry:
     @classmethod
     def within_radius(
         cls,
-        center: dict[str, Any],
-        candidates: list[dict[str, Any]],
+        center: Any,
+        candidates: Any,
         radius_m: float,
     ) -> list[dict[str, Any]]:
+        center = _as_place(center, "center")
         matches = [
             {"candidate_index": index, **candidate, **cls.haversine_distance(center, candidate)}
-            for index, candidate in enumerate(candidates)
-            if isinstance(candidate, dict)
+            for index, candidate in _as_place_list(candidates)
         ]
         return sorted(
             (candidate for candidate in matches if candidate["distance_m"] <= float(radius_m)),
@@ -398,22 +410,25 @@ class SpatialOperatorRegistry:
     def match_options(
         cls,
         options: list[str],
-        places: list[dict[str, Any]],
-        anchor: dict[str, Any] | None = None,
+        places: Any,
+        anchor: Any = None,
         mode: str = "nearest",
         minimum_similarity: float = 0.68,
     ) -> dict[str, Any]:
         """Ground answer options against retrieved POIs using name and spatial evidence."""
 
+        options = [str(option) for option in options]
+        anchor_place = _as_place(anchor, "anchor", required=False) if anchor else None
         ranked: list[dict[str, Any]] = []
-        for original_rank, place in enumerate(places):
-            if not isinstance(place, dict):
-                continue
+        for original_rank, place in _as_place_list(places, keep_unresolved=True):
             item = {**place, "retrieval_rank": original_rank}
-            if anchor and {"latitude", "longitude"} <= anchor.keys():
-                item.update(cls.haversine_distance(anchor, place))
+            if anchor_place is not None:
+                try:
+                    item.update(cls.haversine_distance(anchor_place, place))
+                except ValueError:
+                    pass
             ranked.append(item)
-        if anchor:
+        if anchor_place is not None:
             ranked.sort(key=lambda item: float(item.get("distance_m", float("inf"))))
         for rank, item in enumerate(ranked):
             item["rank"] = rank
@@ -465,14 +480,13 @@ class SpatialOperatorRegistry:
 
     @staticmethod
     def match_distance_options(
-        distance: dict[str, Any] | float,
-        options: list[str],
+        distance: Any,
+        options: list[Any],
     ) -> dict[str, Any]:
-        distance_m = float(
-            distance.get("distance_m", 0.0) if isinstance(distance, dict) else distance
-        )
+        distance_m = _distance_value(distance)
         comparisons: list[dict[str, Any]] = []
-        for option_index, option in enumerate(options):
+        for option_index, raw_option in enumerate(options):
+            option = str(raw_option)
             match = re.search(r"([\d,.]+)\s*(km|m)?", option, re.IGNORECASE)
             if not match:
                 continue
@@ -488,15 +502,41 @@ class SpatialOperatorRegistry:
             )
         comparisons.sort(key=lambda item: (item["absolute_error_m"], item["option_index"]))
         best = comparisons[0] if comparisons else None
+        if best is None:
+            return {
+                "computed_distance_m": distance_m,
+                "comparisons": comparisons,
+                "best_option": None,
+                "error_ratio": None,
+                "fits": False,
+                "confidence": 0.0,
+            }
+        # The nearest option is always *some* option, even when the measured distance is kilometres
+        # away from every candidate — which means the places were resolved wrong, not that the
+        # answer is the least-bad number. Say so instead of reporting a confident match.
+        spread = max(item["value_m"] for item in comparisons) or 1.0
+        error_ratio = best["absolute_error_m"] / spread
+        fits = error_ratio <= 0.25
         return {
             "computed_distance_m": distance_m,
             "comparisons": comparisons,
-            "best_option": best["option_index"] if best else None,
-            "confidence": 1.0 if best and best["absolute_error_m"] <= 1 else 0.9 if best else 0.0,
+            "best_option": best["option_index"],
+            "error_ratio": round(error_ratio, 4),
+            "fits": fits,
+            "confidence": (
+                1.0
+                if best["absolute_error_m"] <= 1
+                else 0.9
+                if fits
+                else max(0.1, 1.0 - error_ratio)
+            ),
         }
 
     @staticmethod
-    def match_type_options(place: dict[str, Any], options: list[str]) -> dict[str, Any]:
+    def match_type_options(place: Any, options: list[Any]) -> dict[str, Any]:
+        unwrapped = _unwrap_place(place)
+        place = unwrapped if isinstance(unwrapped, dict) else {}
+        options = [str(option) for option in options]
         category = str(place.get("category") or "")
         name = str(place.get("name") or "")
         scored = [
@@ -826,6 +866,103 @@ def _normalize_arguments(name: str, arguments: dict[str, Any]) -> dict[str, Any]
         }
 
     return args
+
+
+_PLACE_WRAPPER_KEYS = ("place", "location", "nearest", "matched")
+_LATITUDE_KEYS = ("latitude", "lat", "y")
+_LONGITUDE_KEYS = ("longitude", "lng", "lon", "x")
+
+
+def _coordinate(value: dict[str, Any], keys: tuple[str, ...]) -> float | None:
+    for key in keys:
+        candidate = value.get(key)
+        if isinstance(candidate, bool):
+            continue
+        if isinstance(candidate, (int, float)):
+            return float(candidate)
+        if isinstance(candidate, str):
+            try:
+                return float(candidate)
+            except ValueError:
+                continue
+    return None
+
+
+def _unwrap_place(value: Any) -> Any:
+    """Follow the wrapper shapes operators emit down to the place record inside."""
+
+    current = value
+    for _ in range(4):
+        if isinstance(current, list):
+            current = current[0] if len(current) == 1 else None
+        if not isinstance(current, dict):
+            return current
+        if _coordinate(current, _LATITUDE_KEYS) is not None:
+            return current
+        nested = next(
+            (
+                current[key]
+                for key in _PLACE_WRAPPER_KEYS
+                if isinstance(current.get(key), (dict, list))
+            ),
+            None,
+        )
+        if nested is None:
+            return current
+        current = nested
+    return current
+
+
+def _as_place(value: Any, argument: str, *, required: bool = True) -> dict[str, Any] | None:
+    """Normalize a planner-supplied place reference into a coordinate-bearing record.
+
+    Planners routinely hand an operator the object that *contains* a place -- a
+    ``batch_geocode`` entry, a ``nearest`` result, a single-branch list -- rather than the
+    place itself. Upstream Spatial-Agent resolves those references leniently inside the
+    executor, so do the same here instead of failing the whole operator on a shape mismatch.
+    """
+
+    place = _unwrap_place(value)
+    if isinstance(place, dict):
+        latitude = _coordinate(place, _LATITUDE_KEYS)
+        longitude = _coordinate(place, _LONGITUDE_KEYS)
+        if latitude is not None and longitude is not None:
+            return {**place, "latitude": latitude, "longitude": longitude}
+    if not required:
+        return None
+    raise ValueError(f"PlaceNotFoundError: {argument} has no resolved coordinates")
+
+
+def _as_place_list(
+    value: Any, *, keep_unresolved: bool = False
+) -> list[tuple[int, dict[str, Any]]]:
+    """Normalize a candidate collection, keeping each candidate's original index."""
+
+    values = value if isinstance(value, list) else [value]
+    resolved: list[tuple[int, dict[str, Any]]] = []
+    for index, item in enumerate(values):
+        place = _as_place(item, f"candidate {index}", required=False)
+        if place is not None:
+            resolved.append((index, place))
+            continue
+        unwrapped = _unwrap_place(item)
+        if keep_unresolved and isinstance(unwrapped, dict):
+            resolved.append((index, unwrapped))
+    return resolved
+
+
+def _distance_value(value: Any) -> float:
+    """Read a distance in meters from a number or any measured-distance record."""
+
+    if isinstance(value, dict):
+        for key in ("distance_m", "distance", "value", "amount", "meters"):
+            if key in value:
+                return _distance_value(value[key])
+        for key in ("distance_km", "km"):
+            if key in value:
+                return float(value[key]) * 1000
+        raise ValueError("match_distance_options requires a measured distance")
+    return float(value)
 
 
 def _name_key(value: str) -> str:

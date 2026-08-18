@@ -19,13 +19,19 @@ from src.agent.geoflow import (
     normalize_and_validate_graph,
     retrieve_templates,
 )
-from src.llm import ChatClient
+from src.llm import ChatClient, LLMUnavailableError
 from src.parsing import parse_answer, parse_json_object
 from src.tools import SpatialOperatorRegistry, ToolRegistry
 
 SUPPORTED_INTENTS = frozenset(
     {"nearby", "poi", "routing", "trip", "type", "direction", "distance", "radius"}
 )
+
+# Retrieval budget for grounded nearby searches. Nearby results come back nearest-first, so a
+# wide radius never hurts ranking, while a narrow one silently truncates the candidate set the
+# Measure step compares options against.
+RETRIEVAL_LIMIT = 45
+RETRIEVAL_RADIUS_M = 20_000
 
 ANALYSIS_PROMPT = """You are Spatial-Agent's Spatial Information Theory Analysis stage.
 Extract the spatial entities and assign one scientific core concept and one functional role.
@@ -69,11 +75,13 @@ Exact operator contracts:
 - travel_time(origin, destination, mode="driving", priority) -> field Route
 - distance_matrix(origins,destinations OR pairs, mode="driving", priority) -> field;
   pairs is [{origin,destination,label?}], and output routes preserve pair order at $node.routes
-- haversine_distance(place_a, place_b) -> amount
+- haversine_distance(place_a, place_b) -> amount; output is {distance_m, distance_km}, so
+  reference the node itself ($node) or $node.distance_m, never $node.amount
 - pairwise_distances(pairs=[{place_a,place_b,label?}]) -> field
 - pairwise_extremes(locations) -> amount
 - bearing_to_direction(place_a, place_b) -> field
-- filter_by_direction(center, places, direction) -> object, nearest first
+- filter_by_direction(center, places, direction) -> object, nearest first; places is a retrieved
+  POI list such as $nearby, not a batch_geocode node
 - nearest(anchor,candidates,metric="haversine"|"travel_time",routes?) -> object
 - within_radius(center, candidates, radius_m) -> object
 - select_min/select_max(items,key), sort_by(items,key), compare_routes(routes,metric) -> object
@@ -88,7 +96,8 @@ Exact operator contracts:
 - recover_option_places(options,candidates,anchor,radius_m) -> object; conditionally resolves
   options absent from ranked retrieval and merges their POIs into the candidate list
 - match_options(options,places,anchor?,mode) -> object; grounds options to retrieved POIs
-- match_distance_options(distance,options) -> object; maps a computed distance to numeric options
+- match_distance_options(distance,options) -> object; maps a computed distance to numeric options.
+  Pass the haversine node itself as distance and copy the option texts verbatim
 - match_type_options(place,options) -> object; maps normalized category evidence to options
 - events_from_objects(objects,event_type,timestamp_field?) -> event
 - filter_events(events,field,operator,value) -> event
@@ -125,12 +134,18 @@ original system prompt, and stay within {max_steps} nodes. Return only {"graph":
 EVALUATOR_PROMPT = """You are Spatial-Agent's grounded response generation stage. Select exactly
 one candidate using the final GeoFlow state and the complete topological execution trace. Computed
 distance, direction, category, route, and option_totals evidence has priority over prior knowledge.
+Exact candidate-text matches beat semantic matches, and semantic matches beat inference.
 Respect candidate-index to candidate-text mapping. Numbering is 0-based. Return JSON only:
-{"predicted_option":1,"confidence":0.8,"reason":"brief evidence-based reason"}
+{"predicted_answer":"exact candidate text","predicted_option":1,"confidence":0.8,
+"reason":"brief evidence-based reason"}
+predicted_answer must be copied verbatim from the candidate list, and predicted_option must be the
+0-based index of that same candidate.
 For radius/list questions, compare the resolved in-radius POI names with each option as a set;
 never choose an option merely because it contains more items or looks like a list.
 Treat deterministic best_option fields as evidence, but make the final selection in this generation
 step after checking them against the complete final state and trace.
+An operator that reports an error contributed no evidence; fall back to the surviving steps rather
+than to the failed step's intent.
 Never return an option outside the supplied candidates."""
 
 INTENT_EVALUATION_RULES = {
@@ -151,6 +166,18 @@ INTENT_EVALUATION_RULES = {
         "distance."
     ),
     "type": "Use the normalized POI category returned by place search.",
+    "poi": (
+        "Use the retrieved place attributes and computed coordinates directly. For pairwise "
+        "comparisons, compare the metric of every option pair before selecting."
+    ),
+    "routing": (
+        "Read route distance_m and duration_s from the executed routes. Shortest uses "
+        "distance_m, fastest uses duration_s, and a named via-route must be isolated first."
+    ),
+    "trip": (
+        "Evaluate each option as an ordered sequence and compare option_totals. Order matters, "
+        "so never reorder an option's stops when matching it to the aggregated totals."
+    ),
 }
 
 
@@ -298,7 +325,8 @@ class SpatialAgent(BenchmarkAgent):
                         question,
                         options,
                         intent,
-                        self.max_steps,
+                        max(self.max_steps, len(fallback_graph)),
+                        expand_retrieval=False,
                     )
             trace.append({"stage": "factorize", **factorized.as_dict()})
             trace.append(
@@ -402,13 +430,16 @@ class SpatialAgent(BenchmarkAgent):
             )
             reasoning_steps += 1
             evaluation_json = parse_json_object(evaluation.content)
-            predicted = _coerce_option(evaluation_json.get("predicted_option"), len(options))
+            predicted, selection = _select_option(evaluation_json, options)
             if predicted is None:
                 predicted = parse_answer(evaluation.content, option_count=len(options))
+                selection = "answer_marker" if predicted is not None else "unresolved"
             trace.append(
                 {
                     "stage": "evaluate",
                     "predicted_option": predicted,
+                    "predicted_answer": evaluation_json.get("predicted_answer"),
+                    "selection_method": selection,
                     "confidence": evaluation_json.get("confidence"),
                     "reason": evaluation_json.get("reason", ""),
                 }
@@ -417,6 +448,9 @@ class SpatialAgent(BenchmarkAgent):
             if predicted is not None:
                 response_text = f"^^{predicted}^^"
             trace.append({"stage": "generate", "response": response_text})
+        except LLMUnavailableError as exc:
+            failure_type = "llm_unavailable"
+            failure_message = f"{type(exc).__name__}: {exc}"
         except Exception as exc:
             failure_type = "agent_reasoning_failure"
             failure_message = f"{type(exc).__name__}: {exc}"
@@ -452,14 +486,25 @@ def _factorize_validate_plan(
     options: list[str],
     intent: str,
     max_steps: int,
+    *,
+    expand_retrieval: bool = True,
 ):
     raw_steps = plan.get("graph") if plan.get("graph") is not None else plan.get("steps")
     if not isinstance(raw_steps, list):
         raise ValueError("GeoFlow response does not contain a graph")
-    grounded = _ground_graph_literals(raw_steps, question, options, intent)
+    if len(raw_steps) > max_steps:
+        raise ValueError(
+            f"GeoFlow graph has {len(raw_steps)} operators, exceeding "
+            f"MAX_REASONING_STEPS={max_steps}"
+        )
+    grounded = _ground_graph_literals(
+        raw_steps, question, options, intent, expand_retrieval=expand_retrieval
+    )
     factorized = factorize_geoflow(analysis, {"graph": grounded})
+    # The planner budget above governs what the planner authored. Retrieval fan-out added
+    # during grounding is deterministic and gets its own allowance on top of it.
     steps, constraints = normalize_and_validate_graph(
-        factorized.as_dict(), max_steps=max_steps
+        factorized.as_dict(), max_steps=max(max_steps, len(grounded))
     )
     return factorized, steps, constraints
 
@@ -470,13 +515,25 @@ def _resolve_output_binding(output: Any, path: str) -> Any:
     reference = path[2:] if path.startswith("$.") else path.lstrip("$")
     current = output
     for part in (value for value in reference.split(".") if value):
-        if isinstance(current, list):
-            current = current[int(part)]
-        elif isinstance(current, dict):
-            current = current[part]
-        else:
-            raise ValueError(f"Cannot resolve output binding path {path!r}")
+        resolved = _descend_reference(current, part)
+        if resolved is _UNRESOLVED:
+            # Concept state materialization must never abort the run; an unusable binding
+            # path falls back to the operator output it was meant to project.
+            return current
+        current = resolved
     return current
+
+
+_UNRESOLVED = object()
+
+_REFERENCE_ALIASES = {
+    "lat": "latitude",
+    "lng": "longitude",
+    "lon": "longitude",
+    "amount": "distance_m",
+    "value": "distance_m",
+    "meters": "distance_m",
+}
 
 
 def _resolve_references(value: Any, results: dict[str, Any]) -> Any:
@@ -489,38 +546,54 @@ def _resolve_references(value: Any, results: dict[str, Any]) -> Any:
     reference = canonical_reference(value)
     if not reference.startswith("$"):
         return value
-    parts = reference[1:].split(".")
-    if parts[0] not in results:
+    root, _, remainder = reference[1:].partition(".")
+    if root not in results:
         raise ValueError(f"Unknown plan reference: {value}")
-    current = results[parts[0]]
-    for part in parts[1:]:
-        if isinstance(current, list):
-            current = current[int(part)]
-            continue
-        if not isinstance(current, dict):
-            raise ValueError(f"Cannot resolve {part!r} in plan reference: {value}")
-        if part == "geometry" and {"latitude", "longitude"} <= current.keys():
-            current = {
-                "lat": current["latitude"],
-                "lng": current["longitude"],
-                "location": current,
-            }
-            continue
-        aliases = {"lat": "latitude", "lng": "longitude", "lon": "longitude"}
-        key = part if part in current else aliases.get(part, part)
-        if key not in current:
-            raise ValueError(f"Missing field {part!r} in plan reference: {value}")
-        current = current[key]
+    current = results[root]
+    for part in (segment for segment in remainder.split(".") if segment):
+        resolved = _descend_reference(current, part)
+        if resolved is _UNRESOLVED:
+            # An over-specified path degrades to the closest resolvable object rather than
+            # failing the operator, mirroring upstream Spatial-Agent's lenient concept
+            # reference resolution. Operators normalize the remaining shape themselves.
+            return current
+        current = resolved
     return current
 
 
+def _descend_reference(current: Any, part: str) -> Any:
+    if isinstance(current, list):
+        try:
+            return current[int(part)]
+        except (ValueError, IndexError):
+            return _UNRESOLVED
+    if not isinstance(current, dict):
+        return _UNRESOLVED
+    if part == "geometry" and {"latitude", "longitude"} <= current.keys():
+        return {
+            "lat": current["latitude"],
+            "lng": current["longitude"],
+            "location": current,
+        }
+    key = part if part in current else _REFERENCE_ALIASES.get(part, part)
+    if key in current:
+        return current[key]
+    return _UNRESOLVED
+
+
 def _ground_graph_literals(
-    steps: list[dict[str, Any]], question: str, options: list[str], intent: str
+    steps: list[dict[str, Any]],
+    question: str,
+    options: list[str],
+    intent: str,
+    *,
+    expand_retrieval: bool = True,
 ) -> list[dict[str, Any]]:
     """Bind verbatim question literals after drafting, before graph validation.
 
-    GeoFlow factors such as a radius and requested direction are constants from the question,
-    not values that an LLM should invent or route through a synthetic operator output.
+    GeoFlow factors such as a radius, requested direction, and the candidate option texts are
+    constants from the question, not values that an LLM should invent or route through a
+    synthetic operator output.
     """
 
     anchor = _extract_anchor(question, intent)
@@ -530,35 +603,49 @@ def _ground_graph_literals(
         else None
     )
     radius_m = _extract_radius_m(question) if intent == "radius" else None
+    specifications = _nearby_retrieval_specs(target) if target else []
+    grounded: list[dict[str, Any]] = []
     for step in steps:
         operator = step.get("operator")
         arguments = dict(step.get("arguments") or step.get("params") or {})
-        if operator == "nearby_places" and target:
-            specification = _nearby_retrieval_specs(target)[0]
+        if operator == "nearby_places" and specifications:
             arguments.pop("query", None)
             arguments.pop("category_code", None)
-            arguments.update(specification)
-            if radius_m is not None:
-                arguments["radius_m"] = radius_m
-            step["arguments"] = arguments
+            arguments["radius_m"] = radius_m if radius_m is not None else RETRIEVAL_RADIUS_M
+            arguments["limit"] = RETRIEVAL_LIMIT
+            grounded.extend(
+                _retrieval_steps(step, arguments, specifications, expand=expand_retrieval)
+            )
             continue
         if operator == "filter_by_direction" and intent == "direction":
             direction = _extract_requested_direction(question)
             if direction:
                 arguments["direction"] = direction
-            step["arguments"] = arguments
+            grounded.append({**step, "arguments": arguments})
             continue
-        if operator == "match_options":
+        if operator in {"match_options", "match_distance_options", "match_type_options"}:
+            # The Measure step compares against the candidate texts verbatim; a planner that
+            # paraphrases or numerically re-types them breaks the comparison.
             arguments["options"] = options
-            arguments["mode"] = "radius_set" if intent == "radius" else "nearest"
-            step["arguments"] = arguments
+            if operator == "match_options":
+                arguments["mode"] = "radius_set" if intent == "radius" else "nearest"
+            grounded.append({**step, "arguments": arguments})
             continue
         if operator != "batch_geocode":
+            grounded.append(step)
             continue
         names = list(arguments.get("place_names") or [])
-        if anchor and names and names[0] != anchor:
-            names[0] = anchor
-        if anchor:
+        pair = _extract_compared_places(question) if intent == "distance" else None
+        if pair and len(names) == 2:
+            # The place names are question literals like the option texts are. A planner that
+            # "helpfully" completes 만화시장 into 가좌시장만화카페 or 마천1치안센터 into 웅동파출소
+            # sends the geocoder after a different POI in a different province, and every operator
+            # downstream computes correctly over the wrong evidence.
+            names = list(pair)
+            arguments["anchor"] = names[0]
+        elif anchor:
+            if names and names[0] != anchor:
+                names[0] = anchor
             arguments["anchor"] = anchor
         if (
             intent in {"nearby", "direction", "routing"}
@@ -567,8 +654,61 @@ def _ground_graph_literals(
         ):
             names[1:] = options
         arguments["place_names"] = names
-        step["arguments"] = arguments
-    return steps
+        grounded.append({**step, "arguments": arguments})
+    return grounded
+
+
+def _retrieval_steps(
+    step: dict[str, Any],
+    arguments: dict[str, Any],
+    specifications: list[dict[str, Any]],
+    *,
+    expand: bool,
+) -> list[dict[str, Any]]:
+    """Fan a retrieval node out over every Kakao spelling of the requested place type.
+
+    Korean place types map onto several Kakao keywords or category codes (경찰서 also appears
+    as 파출소/지구대/치안센터), so a single retrieval silently loses candidates. The branches
+    merge back under the planner's original node id, which keeps downstream references valid.
+    """
+
+    if not expand or len(specifications) == 1:
+        return [{**step, "arguments": {**arguments, **specifications[0]}}]
+    step_id = str(step.get("id") or "nearby")
+    branches = [
+        {
+            key: value
+            for key, value in step.items()
+            if key not in {"concept_ids", "output_bindings", "input_concepts"}
+        }
+        | {
+            "id": f"{step_id}__r{index + 1}",
+            "arguments": {**arguments, **specification},
+        }
+        for index, specification in enumerate(specifications)
+    ]
+    merged = {
+        **step,
+        "id": step_id,
+        "operator": "merge_places",
+        "arguments": {"items": [f"${branch['id']}" for branch in branches]},
+        "depends_on": [str(branch["id"]) for branch in branches],
+        "output_type": "object",
+    }
+    return [*branches, merged]
+
+
+_COMPARED_PLACES = re.compile(r"^(.+?)\s*(?:및|와|과)\s+(.+?)\s+사이의\s+직선거리")
+
+
+def _extract_compared_places(question: str) -> tuple[str, str] | None:
+    """The two POI names a straight-line-distance question compares, verbatim."""
+
+    match = _COMPARED_PLACES.search(question)
+    if not match:
+        return None
+    first, second = (part.strip() for part in match.groups())
+    return (first, second) if first and second else None
 
 
 def _bind_prevalidated_template(
@@ -578,10 +718,10 @@ def _bind_prevalidated_template(
     anchor: str | None,
 ) -> list[dict[str, Any]] | None:
     if intent == "distance":
-        match = re.search(r"^(.+?)\s+및\s+(.+?)\s+사이의\s+직선거리", question)
-        if not match:
+        pair = _extract_compared_places(question)
+        if not pair:
             return None
-        place_a, place_b = (part.strip() for part in match.groups())
+        place_a, place_b = pair
         return [
             _step(
                 "places",
@@ -610,7 +750,7 @@ def _bind_prevalidated_template(
     target = _extract_target_type(question, intent)
     if not target:
         return None
-    radius_m = _extract_radius_m(question) if intent == "radius" else 20_000
+    radius_m = _extract_radius_m(question) if intent == "radius" else RETRIEVAL_RADIUS_M
     retrieval_specs = _nearby_retrieval_specs(target)
     steps = [
         _step(
@@ -632,7 +772,7 @@ def _bind_prevalidated_template(
                     "center": "$anchor.0.place",
                     **spec,
                     "radius_m": radius_m,
-                    "limit": 45,
+                    "limit": RETRIEVAL_LIMIT,
                 },
                 depends_on=["anchor"],
                 role="support",
@@ -736,6 +876,8 @@ def _extract_target_type(question: str, intent: str) -> str | None:
 
 
 def _nearby_retrieval_specs(target: str) -> list[dict[str, Any]]:
+    """Map a requested Korean place type onto the Kakao searches that actually cover it."""
+
     compact = "".join(target.split())
     official = {
         "대형마트": "MT1",
@@ -762,12 +904,31 @@ def _nearby_retrieval_specs(target: str) -> list[dict[str, Any]]:
     }
     if compact in official:
         return [{"category_code": official[compact]}]
+    # Korean place types whose Kakao POI names diverge from the requested word. Each family
+    # is generic over the type, never over a question or an option string.
     expansions = {
         "패스트푸드점": [{"query": "패스트푸드"}, {"category_code": "FD6"}],
         "빵집": [{"query": "빵집"}, {"query": "베이커리"}],
         "슈퍼마켓": [{"query": "슈퍼마켓"}, {"query": "마트"}],
         "박물관": [{"query": "박물관"}, {"category_code": "CT1"}],
         "갤러리": [{"query": "갤러리"}, {"category_code": "CT1"}],
+        "경찰서": [
+            {"query": "경찰서"},
+            {"query": "파출소"},
+            {"query": "지구대"},
+            {"query": "치안센터"},
+        ],
+        "도서관": [{"query": "도서관"}, {"query": "문고"}, {"query": "도서실"}],
+        "우체국": [{"query": "우체국"}, {"query": "우편취급국"}],
+        "서점": [{"query": "서점"}, {"query": "책방"}],
+        "화장품매장": [{"query": "화장품"}],
+        "전자제품매장": [{"query": "전자제품"}, {"query": "가전"}],
+        "꽃집": [{"query": "꽃집"}, {"query": "플라워"}],
+        "세탁소": [{"query": "세탁소"}, {"query": "빨래방"}],
+        "정육점": [{"query": "정육점"}, {"query": "축산"}],
+        "문구점": [{"query": "문구"}],
+        "안경점": [{"query": "안경"}],
+        "관광안내소": [{"query": "관광안내소"}, {"query": "관광안내"}],
     }
     return expansions.get(compact, [{"query": target}])
 
@@ -809,6 +970,48 @@ def _is_shortened_name(candidate: str, expected: str) -> bool:
     candidate_key = "".join(candidate.split()).casefold()
     expected_key = "".join(expected.split()).casefold()
     return bool(candidate_key and candidate_key != expected_key and candidate_key in expected_key)
+
+
+def _select_option(payload: dict[str, Any], options: list[str]) -> tuple[int | None, str]:
+    """Reconcile the generated answer text with the generated index.
+
+    Upstream Spatial-Agent selects on the answer *text* and derives the index from it, because
+    a model that names the right candidate can still miscount its position. Exact text wins,
+    the declared index is the next authority, and a single containment match is the last
+    resort.
+    """
+
+    text = payload.get("predicted_answer")
+    exact = _match_option_text(text, options, strict=True) if isinstance(text, str) else None
+    if exact is not None:
+        return exact, "exact_answer_text"
+    index = _coerce_option(payload.get("predicted_option"), len(options))
+    if index is not None:
+        return index, "predicted_option"
+    contained = _match_option_text(text, options, strict=False) if isinstance(text, str) else None
+    if contained is not None:
+        return contained, "answer_text_containment"
+    return None, "unresolved"
+
+
+def _match_option_text(value: str, options: list[str], *, strict: bool) -> int | None:
+    key = _option_key(value)
+    if not key:
+        return None
+    matches = [
+        index
+        for index, option in enumerate(options)
+        if (option_key := _option_key(option))
+        and (
+            option_key == key
+            or (not strict and (key in option_key or option_key in key))
+        )
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _option_key(value: str) -> str:
+    return "".join(str(value).split()).casefold()
 
 
 def _coerce_option(value: Any, option_count: int) -> int | None:

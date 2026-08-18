@@ -19,8 +19,14 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = ""
     llm_base_url: str | None = None
+    llm_timeout_seconds: float = Field(default=120.0, gt=0)
+    llm_max_retries: int = Field(default=4, ge=0, le=10)
+    llm_retry_backoff_seconds: float = Field(default=2.0, gt=0)
     max_reasoning_steps: int = Field(default=8, ge=1, le=30)
     benchmark_concurrency: int = Field(default=4, ge=1, le=32)
+    # Stop a batch once this many questions in a row die on the LLM endpoint. A run that keeps
+    # going through an outage produces a 0% report that reads like a result.
+    benchmark_abort_after_llm_failures: int = Field(default=10, ge=0)
 
     kakao_rest_api_key: str = ""
     kakao_timeout_seconds: float = Field(default=15.0, gt=0)

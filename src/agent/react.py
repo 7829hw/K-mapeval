@@ -10,7 +10,7 @@ from src.agent.base import (
     find_provider_failure,
     format_question,
 )
-from src.llm import ChatClient
+from src.llm import ChatClient, LLMUnavailableError
 from src.parsing import parse_answer
 from src.tools import ToolRegistry
 
@@ -84,6 +84,9 @@ class ReactAgent(BenchmarkAgent):
                 )
                 reasoning_steps += 1
                 final_text = self.llm.chat(messages).content
+        except LLMUnavailableError as exc:
+            failure_type = "llm_unavailable"
+            failure_message = f"{type(exc).__name__}: {exc}"
         except Exception as exc:
             failure_type = "agent_reasoning_failure"
             failure_message = f"{type(exc).__name__}: {exc}"

@@ -65,6 +65,29 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   arithmetic) belongs in `src/tools/spatial.py` and must never spend an API call.
 - ReAct and Spatial-Agent share one `ToolRegistry`; never give one agent evidence, a tool, or a
   Kakao implementation the other cannot reach. Tool wrappers stay thin and delegate to the provider.
+- **Place disambiguation is anchor-relative, and both agents get it.** Korean POI names repeat
+  across branches and cities, so `_best_place_match` (`src/tools/registry.py`) scores proximity to a
+  known anchor *below* the name-evidence terms (exact / branch / category / containment) and *above*
+  string similarity — without that term a bare brand name resolves to whichever branch has the
+  shortest name, anywhere in the country. `_batch_geocode` then reconciles the batch against itself:
+  when the anchor ends up farther than `radius_m` from every other resolved name, it re-searches the
+  anchor in the peers' neighbourhood, because a nationwide keyword search for an ambiguous short
+  name never surfaces the intended place as a candidate at all. An argument in
+  `PLACE_ARGUMENT_NAMES` that arrives as `None` raises `PlaceNotFoundError` before pydantic can
+  report it as a validation error.
+- **A ranking never invents evidence.** `max` always yields a candidate, so `_best_place_match`
+  applies `NAME_EVIDENCE_FLOOR` and returns `None` when the winner shares no containment and too
+  little similarity with the query — a name Kakao does not have must fail as `PlaceNotFoundError`,
+  not resolve to whatever scored least badly (`마천1치안센터` → `웅동파출소`, 100 km away, zero
+  characters in common). The floor applies only where the name *is* the evidence: candidates from a
+  nationwide keyword search must clear it, while candidates from an anchored neighbourhood search
+  are already spatially constrained, so a brand written the question's way (`S-OIL` for 에쓰오일,
+  `OLYMPUS` for 올림푸스한국) still resolves — `require_name_evidence` carries that distinction, and
+  enforcing the floor on both paths empties `filter_by_direction` and collapses direction accuracy.
+  `match_distance_options` reports the same idea as `fits` / `error_ratio`:
+  the nearest option is always *some* option, and a kilometre-scale error means the places were
+  resolved wrong, not that the answer is the least-bad number. Do not restore a "closest wins"
+  fallback in either place.
 - No separate HTTP backend server, web UI, or extra datastore beyond the SQLite cache. Keep
   `src/agent/` and `src/tools/` as the only source subpackages and `main.py` as the only entry
   point.
@@ -125,6 +148,31 @@ materialized through each step's `output_bindings` (concept state). Both go into
 generation stage conditions on. Step failures are isolated into `{"error": ...}` rather than
 aborting the run — keep that behavior.
 
+**Execution is lenient about shape, strict about evidence.** Planners routinely reference the object
+that *contains* a place instead of the place. Mirroring upstream's concept-reference resolution:
+
+- `_resolve_references` / `_descend_reference` degrade an over-specified `$node.path` to the closest
+  resolvable object (and only raise for an unknown node id); `_resolve_output_binding` does the same
+  so concept-state materialization can never abort a run.
+- Every coordinate operator normalizes its inputs through `_as_place` / `_as_place_list` in
+  `src/tools/spatial.py`, which unwrap `{query, place, candidates}`, `{"location": …}`, `nearest`
+  results, single-element branches, and `lat`/`lng`/`x`/`y` spellings. A genuinely unresolved place
+  raises `PlaceNotFoundError`; never let it surface as a `TypeError` or `KeyError`.
+- Do not tighten these back into hard failures. A shape mismatch is a planner artifact; only missing
+  evidence is a real failure.
+
+Question literals are bound after drafting and before validation in `_ground_graph_literals`: the
+anchor name, the requested direction, the exact radius, the candidate option texts for all three
+`match_*` operators, the two compared POI names of a `distance` question
+(`_extract_compared_places`, which the template path shares), and the retrieval spec. `_nearby_retrieval_specs` fans a place type out over
+every Kakao keyword/category that covers it, and `_retrieval_steps` merges the branches back under
+the planner's original node id so downstream references stay valid. The pre-validated template path
+already emits one node per spec, so it grounds with `expand_retrieval=False`.
+
+The generation stage asks for `predicted_answer` *and* `predicted_option`; `_select_option`
+reconciles them text-first (exact candidate text → declared index → single containment match) and
+records which path fired in the trace as `selection_method`.
+
 ## Concurrency, cache, and outputs
 
 `Evaluator` runs `BENCHMARK_CONCURRENCY` (default 4) worker threads, each entering its own
@@ -133,6 +181,20 @@ and agent. Never share an agent across workers (`Evaluator` rejects a shared `ag
 `max_workers > 1`), and never introduce module-level mutable agent state. Result order is restored
 by index, not completion. `src/logging.py` builds a fresh `logging.Logger` per question for the
 same reason — a shared logger with temporary handlers would cross-write concurrent traces.
+
+The LLM endpoint is treated as a fallible dependency, not a given. `OpenAIChatClient`
+(`src/llm.py`) drives its own retries (the SDK's are disabled) with exponential backoff and jitter
+on connection/timeout errors and `RETRYABLE_STATUS_CODES`; `CONFIGURATION_STATUS_CODES`
+(401/403/404) fail immediately, and 4xx we caused (400/413/422) propagate unchanged because they are
+the agent's prompt, not the endpoint. Exhausted retries and configuration errors raise
+`LLMUnavailableError`, which both agents record as `failure_type="llm_unavailable"` — never as
+`agent_reasoning_failure`, since an outage says nothing about an architecture. `Evaluator` counts
+those, trips a circuit breaker after `BENCHMARK_ABORT_AFTER_LLM_FAILURES` consecutive ones
+(remaining questions become `run_aborted`), and stamps `statistics.run_validity.valid = false` so a
+0% report can never be read as a benchmark result. `main.py` preflights the endpoint with one cheap
+call before each agent leg, so `--agent both` cannot score its second agent 0% on an endpoint that
+died between legs. Report `metadata` carries `agent_type`, `llm_model`, and `llm_base_url` so a
+report is attributable after the fact.
 
 `SQLiteMapCache` (`src/tools/cache.py`) is keyed by operation + canonicalized arguments, stores
 normalized `Place`/`Route` payloads only — never raw responses or keys — with a TTL (`0` = never

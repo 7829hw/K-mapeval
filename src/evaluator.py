@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections import Counter
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime
@@ -14,7 +15,11 @@ from pydantic import BaseModel, ConfigDict
 
 from src.agent.base import BenchmarkAgent
 from src.dataset import BenchmarkItem
+from src.llm import LLMUnavailableError
 from src.logging import log_agent_result, query_log
+
+INFRASTRUCTURE_FAILURE = "llm_unavailable"
+ABORTED_FAILURE = "run_aborted"
 
 
 class EvaluationReport(BaseModel):
@@ -39,6 +44,9 @@ class Evaluator:
         dataset_path: str | Path | None = None,
         log_dir: str | Path = "logs",
         test_mode: str = "full",
+        agent_type: str | None = None,
+        llm_profile: dict[str, Any] | None = None,
+        abort_after_llm_failures: int = 0,
     ) -> None:
         if agent is None and agent_factory is None:
             raise ValueError("Evaluator requires agent or agent_factory")
@@ -54,11 +62,19 @@ class Evaluator:
         self.dataset_path = str(dataset_path) if dataset_path else None
         self.log_dir = Path(log_dir)
         self.test_mode = test_mode
+        self.agent_type = agent_type
+        self.llm_profile = dict(llm_profile) if llm_profile else {}
+        self.abort_after_llm_failures = abort_after_llm_failures
         self.report_path: Path | None = None
+        self._failure_lock = Lock()
+        self._consecutive_llm_failures = 0
+        self._aborted = False
 
     def run(self) -> EvaluationReport:
         total = len(self.dataset)
         worker_count = min(self.max_workers, total) if total else 1
+        self._consecutive_llm_failures = 0
+        self._aborted = False
         print("=" * 80)
         print(f"Running evaluation on {total} samples")
         print(f"Concurrent LLM sessions: {worker_count}")
@@ -69,7 +85,7 @@ class Evaluator:
             results = self._run_parallel(total, worker_count)
         print()
 
-        statistics = calculate_statistics(results)
+        statistics = calculate_statistics(results, aborted=self._aborted)
         metadata = {
             "timestamp": datetime.now(UTC).isoformat(),
             "test_mode": self.test_mode,
@@ -78,6 +94,8 @@ class Evaluator:
             "total_samples": total,
             "concurrency": worker_count,
             "dataset_source": self.dataset_path,
+            "agent_type": self.agent_type,
+            **self.llm_profile,
         }
         report = EvaluationReport(metadata=metadata, statistics=statistics, results=results)
         self.report_path = self._write_report(report)
@@ -89,16 +107,24 @@ class Evaluator:
     def _run_sequential(self, total: int) -> list[dict[str, Any]]:
         if self.agent_factory is not None:
             with self.agent_factory() as agent:
-                return [
-                    self._run_single(agent, item, index=index, total=total)
-                    for index, item in enumerate(self.dataset, 1)
-                ]
+                return self._consume(agent, enumerate(self.dataset, 1), total)
         if self.agent is None:  # guarded by __init__; keeps type narrowing explicit
             raise RuntimeError("Sequential evaluator has no agent")
-        return [
-            self._run_single(self.agent, item, index=index, total=total)
-            for index, item in enumerate(self.dataset, 1)
-        ]
+        return self._consume(self.agent, enumerate(self.dataset, 1), total)
+
+    def _consume(
+        self,
+        agent: BenchmarkAgent,
+        jobs: Any,
+        total: int,
+    ) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        for index, item in jobs:
+            if self._aborted:
+                results.append(self._skipped_row(item, index=index, total=total))
+                continue
+            results.append(self._run_single(agent, item, index=index, total=total))
+        return results
 
     def _run_parallel(self, total: int, worker_count: int) -> list[dict[str, Any]]:
         if self.agent_factory is None:  # guarded by __init__
@@ -122,11 +148,10 @@ class Evaluator:
                         if job is None:
                             return
                         index, item = job
-                        ordered_results[index - 1] = self._run_single(
-                            agent,
-                            item,
-                            index=index,
-                            total=total,
+                        ordered_results[index - 1] = (
+                            self._skipped_row(item, index=index, total=total)
+                            if self._aborted
+                            else self._run_single(agent, item, index=index, total=total)
                         )
             except BaseException as exc:
                 with error_lock:
@@ -190,6 +215,7 @@ class Evaluator:
                 answer_correct=answer_correct,
                 elapsed=elapsed,
             )
+            self._note_failure(result.failure_type)
             return {
                 "id": item.id,
                 "question": question,
@@ -203,6 +229,7 @@ class Evaluator:
                 "answer_correct": answer_correct,
                 "time": elapsed,
                 "error": error,
+                "failure_type": result.failure_type,
             }
         except Exception as exc:
             elapsed = time.time() - started
@@ -210,20 +237,82 @@ class Evaluator:
                 f"[{index}/{total}] ID {item.id!s:>3} | ERROR: {str(exc)[:80]} | {elapsed:.1f}s",
                 flush=True,
             )
-            return {
-                "id": item.id,
-                "question": question,
-                "expected_classification": item.classification,
-                "predicted_intent": None,
-                "correct_answer": correct_option,
-                "correct_answer_text": correct_text,
-                "predicted_option": None,
-                "predicted_answer": None,
-                "intent_correct": False,
-                "answer_correct": False,
-                "time": elapsed,
-                "error": str(exc),
-            }
+            failure_type = (
+                INFRASTRUCTURE_FAILURE
+                if isinstance(exc, LLMUnavailableError)
+                else "agent_reasoning_failure"
+            )
+            self._note_failure(failure_type)
+            return self._failed_row(
+                item,
+                question,
+                correct_text,
+                error=f"{type(exc).__name__}: {exc}",
+                failure_type=failure_type,
+                elapsed=elapsed,
+            )
+
+    def _skipped_row(self, item: BenchmarkItem, *, index: int, total: int) -> dict[str, Any]:
+        question, options = item.agent_input()
+        print(
+            f"[{index}/{total}] ID {item.id!s:>3} | SKIPPED: run aborted (LLM endpoint down)",
+            flush=True,
+        )
+        return self._failed_row(
+            item,
+            question,
+            options[item.answer].strip(),
+            error="Run aborted before this question: the LLM endpoint was unavailable",
+            failure_type=ABORTED_FAILURE,
+            elapsed=0.0,
+        )
+
+    @staticmethod
+    def _failed_row(
+        item: BenchmarkItem,
+        question: str,
+        correct_text: str,
+        *,
+        error: str,
+        failure_type: str,
+        elapsed: float,
+    ) -> dict[str, Any]:
+        return {
+            "id": item.id,
+            "question": question,
+            "expected_classification": item.classification,
+            "predicted_intent": None,
+            "correct_answer": item.answer,
+            "correct_answer_text": correct_text,
+            "predicted_option": None,
+            "predicted_answer": None,
+            "intent_correct": False,
+            "answer_correct": False,
+            "time": elapsed,
+            "error": error,
+            "failure_type": failure_type,
+        }
+
+    def _note_failure(self, failure_type: str | None) -> None:
+        """Trip the circuit breaker once the endpoint has failed enough questions in a row."""
+
+        if self.abort_after_llm_failures <= 0:
+            return
+        with self._failure_lock:
+            if failure_type == INFRASTRUCTURE_FAILURE:
+                self._consecutive_llm_failures += 1
+            else:
+                self._consecutive_llm_failures = 0
+                return
+            if self._aborted or self._consecutive_llm_failures < self.abort_after_llm_failures:
+                return
+            self._aborted = True
+        print(
+            f"\nAborting run: {self.abort_after_llm_failures} consecutive questions failed on the "
+            "LLM endpoint. Remaining questions are skipped; this report is not a benchmark "
+            "result.\n",
+            flush=True,
+        )
 
     @staticmethod
     def _print_result(
@@ -261,7 +350,7 @@ class Evaluator:
         return path
 
 
-def calculate_statistics(results: list[dict[str, Any]]) -> dict[str, Any]:
+def calculate_statistics(results: list[dict[str, Any]], *, aborted: bool = False) -> dict[str, Any]:
     total = len(results)
     intent_correct = sum(1 for row in results if row.get("intent_correct"))
     answer_correct = sum(1 for row in results if row.get("answer_correct"))
@@ -276,6 +365,8 @@ def calculate_statistics(results: list[dict[str, Any]]) -> dict[str, Any]:
     for stats in by_intent.values():
         stats["accuracy"] = round(stats["correct"] / stats["total"], 4) if stats["total"] else 0.0
     average_time = sum(float(row.get("time", 0.0)) for row in results) / total if total else 0.0
+    failure_types = Counter(str(row["failure_type"]) for row in results if row.get("failure_type"))
+    infrastructure = failure_types[INFRASTRUCTURE_FAILURE] + failure_types[ABORTED_FAILURE]
     return {
         "intent_classification_accuracy": {
             "correct": intent_correct,
@@ -292,6 +383,15 @@ def calculate_statistics(results: list[dict[str, Any]]) -> dict[str, Any]:
             "average_time_seconds": round(average_time, 3),
             "failed_count": len(failed),
             "failed_ids": failed,
+            "failure_types": dict(failure_types),
+        },
+        # Accuracy only means something when the questions were actually answered. An outage on the
+        # LLM endpoint scores 0% exactly like a wrong answer does, so say so here rather than
+        # letting a downed deployment be read as an architecture comparison.
+        "run_validity": {
+            "valid": infrastructure == 0,
+            "llm_unavailable_count": infrastructure,
+            "aborted": aborted,
         },
     }
 
@@ -319,4 +419,16 @@ def print_summary(statistics: dict[str, Any]) -> None:
     print(f"Average time: {performance['average_time_seconds']:.2f}s")
     if performance["failed_count"]:
         print(f"Failed samples: {performance['failed_ids']}")
+    if performance.get("failure_types"):
+        print(f"Failure types: {performance['failure_types']}")
+    validity = statistics.get("run_validity", {})
+    if not validity.get("valid", True):
+        print()
+        print("!" * 80)
+        print(
+            f"INVALID RUN: {validity['llm_unavailable_count']}/{overall['total']} questions never "
+            "reached the LLM endpoint."
+        )
+        print("Accuracy above is not a benchmark result. Fix the endpoint and re-run.")
+        print("!" * 80)
     print()

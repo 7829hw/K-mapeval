@@ -15,6 +15,7 @@ from src.agent.geoflow import (
     normalize_and_validate_graph,
 )
 from src.agent.spatial import (
+    RETRIEVAL_LIMIT,
     _bind_prevalidated_template,
     _ground_graph_literals,
     _heuristic_intent,
@@ -42,17 +43,23 @@ class FakeProvider(MapProvider):
     def api_call_count(self) -> int:
         return self._api_calls
 
+    def _named(self, query: str) -> Place:
+        """A geocoder answers with a place that carries the name it was asked for."""
+
+        return self.place.model_copy(update={"place_id": query, "name": query})
+
     def search_place(self, query: str, *, limit: int = 5) -> list[Place]:
         self._api_calls += 1
-        return [self.place]
+        return [self._named(query)]
 
     def geocode(self, address: str, *, limit: int = 5) -> list[Place]:
         self._api_calls += 1
-        return [self.place]
+        return [self._named(address)]
 
-    def nearby_search(self, center: str | Place, **_: Any) -> list[Place]:
+    def nearby_search(self, center: str | Place, **kwargs: Any) -> list[Place]:
         self._api_calls += 1
-        return [self.place]
+        query = kwargs.get("query")
+        return [self._named(query) if query else self.place]
 
     def place_details(self, place_id: str) -> Place:
         return self.place
@@ -150,7 +157,7 @@ def test_batch_geocode_preserves_input_order_in_one_geoflow_tool_call() -> None:
     execution = registry.invoke("batch_geocode", {"place_names": ["경복궁", "광화문"], "limit": 1})
     assert execution.status == "ok"
     assert [item["query"] for item in execution.output] == ["경복궁", "광화문"]
-    assert all(item["place"]["name"] == "경복궁" for item in execution.output)
+    assert [item["place"]["name"] for item in execution.output] == ["경복궁", "광화문"]
     assert registry.tool_call_count == 1
     assert registry.provider.api_call_count == 2
 
@@ -164,7 +171,7 @@ def test_batch_geocode_progressively_retries_a_business_section_suffix() -> None
         def search_place(self, query: str, *, limit: int = 5) -> list[Place]:
             self.queries.append(query)
             self._api_calls += 1
-            return [] if query == "더현대서울식품관" else [self.place]
+            return [] if query == "더현대서울식품관" else [self._named(query)]
 
     provider = VariantProvider()
     execution = ToolRegistry(provider).invoke(
@@ -199,10 +206,6 @@ def test_batch_geocode_strips_branch_suffix_after_exact_search_misses() -> None:
 
 def test_batch_geocode_prefers_bank_branch_over_same_brand_atm() -> None:
     class BankProvider(FakeProvider):
-        def search_place(self, query: str, *, limit: int = 5) -> list[Place]:
-            self._api_calls += 1
-            return [self.place]
-
         def nearby_search(self, center: str | Place, **_: Any) -> list[Place]:
             self._api_calls += 1
             return [
@@ -231,6 +234,123 @@ def test_batch_geocode_prefers_bank_branch_over_same_brand_atm() -> None:
 
     assert execution.status == "ok"
     assert execution.output[1]["place"]["place_id"] == "branch"
+
+
+def test_batch_geocode_prefers_the_branch_nearest_the_anchor_over_the_shortest_name() -> None:
+    """A bare brand name matches every branch equally, so proximity has to break the tie."""
+
+    class BrandProvider(FakeProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.place = Place(
+                place_id="anchor",
+                name="GS25 신림골드점",
+                address="서울 관악구",
+                latitude=37.4832,
+                longitude=126.9061,
+            )
+
+        def search_place(self, query: str, *, limit: int = 5) -> list[Place]:
+            self._api_calls += 1
+            return [self.place]
+
+        def nearby_search(self, center: str | Place, **_: Any) -> list[Place]:
+            self._api_calls += 1
+            return [
+                Place(
+                    place_id="near",
+                    name="맘스터치 구로디지털단지역점",
+                    address="서울",
+                    latitude=37.4835,
+                    longitude=126.9020,
+                ),
+                Place(
+                    place_id="far",
+                    name="맘스터치 신림역점",  # shorter name, so text similarity alone picks it
+                    address="서울",
+                    latitude=37.4844,
+                    longitude=126.9283,
+                ),
+            ]
+
+    execution = ToolRegistry(BrandProvider()).invoke(
+        "batch_geocode",
+        {"place_names": ["GS25 신림골드점", "맘스터치"], "anchor": "GS25 신림골드점"},
+    )
+
+    assert execution.status == "ok"
+    assert execution.output[1]["place"]["place_id"] == "near"
+
+
+def test_batch_geocode_repicks_an_anchor_that_landed_in_another_city() -> None:
+    """The anchor is the one name nothing disambiguates, so it can land far from its own batch."""
+
+    seoul_peer = Place(
+        place_id="peer",
+        name="자양빵공장",
+        address="서울 광진구",
+        latitude=37.5350,
+        longitude=127.0820,
+    )
+    seoul_anchor = Place(
+        place_id="right",
+        name="진주약국",
+        address="서울 광진구",
+        latitude=37.5355,
+        longitude=127.0825,
+    )
+
+    class AmbiguousProvider(FakeProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.anchored_queries: list[str] = []
+
+        def search_place(self, query: str, *, limit: int = 5) -> list[Place]:
+            self._api_calls += 1
+            if "진주약" in query:
+                # A nationwide keyword search fills every slot with the far-away city.
+                return [
+                    Place(
+                        place_id=f"jinju{index}",
+                        name=f"진주약국{index}",
+                        address="경남 진주시",
+                        latitude=35.18,
+                        longitude=128.10,
+                    )
+                    for index in range(3)
+                ]
+            return [seoul_peer]
+
+        def nearby_search(self, center: str | Place, **kwargs: Any) -> list[Place]:
+            self._api_calls += 1
+            query = str(kwargs.get("query") or "")
+            self.anchored_queries.append(query)
+            if "진주약" in query and isinstance(center, Place) and center.latitude > 37:
+                return [seoul_anchor]
+            if "자양" in query:
+                return [seoul_peer]
+            return []
+
+    provider = AmbiguousProvider()
+    execution = ToolRegistry(provider).invoke(
+        "batch_geocode",
+        {"place_names": ["진주약", "자양빵공장"], "anchor": "진주약", "radius_m": 20000},
+    )
+
+    assert execution.status == "ok"
+    assert execution.output[0]["place"]["place_id"] == "right"
+    assert execution.output[1]["place"]["place_id"] == "peer"
+    assert "진주약" in provider.anchored_queries
+
+
+def test_unresolved_place_arguments_fail_as_provider_errors_not_validation_errors() -> None:
+    execution = ToolRegistry(FakeProvider()).invoke(
+        "nearby_places", {"center": None, "query": "도서관", "radius_m": 200}
+    )
+
+    assert execution.status == "error"
+    assert execution.error is not None
+    assert execution.error.startswith("PlaceNotFoundError")
 
 
 def test_recover_option_places_queries_only_missing_option_evidence() -> None:
@@ -839,6 +959,110 @@ def test_radius_literals_are_factors_not_synthetic_output_references() -> None:
     assert grounded[3]["arguments"]["options"] == ["A | B", "A | B | C"]
 
 
+def test_retrieval_grounding_fans_out_over_kakao_place_type_synonyms() -> None:
+    steps = [
+        {
+            "id": "anchor",
+            "operator": "batch_geocode",
+            "arguments": {"place_names": ["기준"]},
+            "depends_on": [],
+            "role": "extent",
+        },
+        {
+            "id": "nearby",
+            "operator": "nearby_places",
+            "arguments": {"center": "$anchor.0.place", "query": "경찰서", "limit": 5},
+            "depends_on": ["anchor"],
+            "role": "support",
+        },
+        {
+            "id": "match",
+            "operator": "match_options",
+            "arguments": {"options": ["틀림"], "places": "$nearby"},
+            "depends_on": ["nearby"],
+            "role": "measure",
+        },
+    ]
+
+    grounded = _ground_graph_literals(
+        steps,
+        "기준점에서 가장 가까운 경찰서 중 어디인가요?",
+        ["동묘파출소", "안임지구대"],
+        "nearby",
+    )
+
+    retrievals = [step for step in grounded if step["operator"] == "nearby_places"]
+    merged = next(step for step in grounded if step["operator"] == "merge_places")
+    assert [step["arguments"]["query"] for step in retrievals] == [
+        "경찰서",
+        "파출소",
+        "지구대",
+        "치안센터",
+    ]
+    assert all(step["arguments"]["limit"] == RETRIEVAL_LIMIT for step in retrievals)
+    # The merge keeps the planner's node id so downstream references stay valid.
+    assert merged["id"] == "nearby"
+    assert merged["arguments"]["items"] == [f"${step['id']}" for step in retrievals]
+    assert grounded[-1]["arguments"]["options"] == ["동묘파출소", "안임지구대"]
+
+
+def test_prevalidated_template_retrieval_is_not_expanded_twice() -> None:
+    fallback = _bind_prevalidated_template(
+        "nearby",
+        "기준점에서 가장 가까운 경찰서 중 어디인가요?",
+        ["동묘파출소", "안임지구대"],
+        "기준점",
+    )
+    assert fallback is not None
+
+    grounded = _ground_graph_literals(
+        fallback,
+        "기준점에서 가장 가까운 경찰서 중 어디인가요?",
+        ["동묘파출소", "안임지구대"],
+        "nearby",
+        expand_retrieval=False,
+    )
+
+    assert [step["operator"] for step in grounded] == [
+        step["operator"] for step in fallback
+    ]
+
+
+def test_distance_measure_grounding_restores_verbatim_option_texts() -> None:
+    steps = [
+        {
+            "id": "places",
+            "operator": "batch_geocode",
+            "arguments": {"place_names": ["A", "B"]},
+            "depends_on": [],
+            "role": "extent",
+        },
+        {
+            "id": "distance",
+            "operator": "haversine_distance",
+            "arguments": {"place_a": "$places.0.place", "place_b": "$places.1.place"},
+            "depends_on": ["places"],
+            "role": "support",
+        },
+        {
+            "id": "match",
+            "operator": "match_distance_options",
+            "arguments": {"distance": "$distance", "options": [349, 358, 340, 342]},
+            "depends_on": ["distance"],
+            "role": "measure",
+        },
+    ]
+
+    grounded = _ground_graph_literals(
+        steps,
+        "A 및 B 사이의 직선거리는 몇 m인가요?",
+        ["349 m", "358 m", "340 m", "342 m"],
+        "distance",
+    )
+
+    assert grounded[-1]["arguments"]["options"] == ["349 m", "358 m", "340 m", "342 m"]
+
+
 def test_factorization_keeps_radius_and_category_as_operator_factors() -> None:
     analysis = normalize_analysis(
         {
@@ -1059,7 +1283,7 @@ def test_spatial_agent_handles_google_style_references_without_aborting() -> Non
     assert result.failure_type is None
 
 
-def test_bad_plan_reference_is_isolated_and_evaluation_still_runs() -> None:
+def test_overspecified_plan_reference_degrades_to_the_closest_resolvable_object() -> None:
     llm = QueuedLLM(
         [
             LLMResponse('{"intent":"poi"}'),
@@ -1068,7 +1292,30 @@ def test_bad_plan_reference_is_isolated_and_evaluation_still_runs() -> None:
                 '{"id":"s1","operator":"place_search",'
                 '"arguments":{"query":"경복궁","limit":1}},'
                 '{"id":"s2","operator":"haversine_distance",'
-                '"arguments":{"place_a":"$s1.0.missing",'
+                '"arguments":{"place_a":"$s1.0.place",'
+                '"place_b":"$s1.0"}}]}'
+            ),
+            LLMResponse('{"predicted_option":1,"confidence":0.3,"reason":"partial evidence"}'),
+        ]
+    )
+    result = SpatialAgent(llm, ToolRegistry(FakeProvider()), max_steps=2).answer("질문", ["A", "B"])
+    execute = next(stage for stage in result.trace if stage["stage"] == "execute")
+    assert [step["status"] for step in execute["steps"]] == ["ok", "ok"]
+    assert execute["steps"][1]["result"]["distance_m"] == 0.0
+    assert result.predicted_answer == 1
+    assert result.failure_type is None
+
+
+def test_unresolvable_plan_reference_is_isolated_and_evaluation_still_runs() -> None:
+    llm = QueuedLLM(
+        [
+            LLMResponse('{"intent":"poi"}'),
+            LLMResponse(
+                '{"steps":['
+                '{"id":"s1","operator":"place_search",'
+                '"arguments":{"query":"경복궁","limit":1}},'
+                '{"id":"s2","operator":"haversine_distance",'
+                '"arguments":{"place_a":"$s1.0.name",'
                 '"place_b":"$s1.0"}}]}'
             ),
             LLMResponse('{"predicted_option":1,"confidence":0.3,"reason":"partial evidence"}'),
@@ -1077,9 +1324,58 @@ def test_bad_plan_reference_is_isolated_and_evaluation_still_runs() -> None:
     result = SpatialAgent(llm, ToolRegistry(FakeProvider()), max_steps=2).answer("질문", ["A", "B"])
     execute = next(stage for stage in result.trace if stage["stage"] == "execute")
     assert execute["steps"][1]["status"] == "error"
-    assert "Missing field" in execute["steps"][1]["error"]
+    assert "PlaceNotFoundError" in execute["steps"][1]["error"]
     assert result.predicted_answer == 1
     assert result.failure_type is None
+
+
+def test_generation_prefers_exact_answer_text_over_a_miscounted_index() -> None:
+    llm = QueuedLLM(
+        [
+            LLMResponse('{"intent":"poi"}'),
+            LLMResponse(
+                '{"steps":[{"id":"s1","operator":"place_search",'
+                '"arguments":{"query":"경복궁","limit":1}}]}'
+            ),
+            LLMResponse(
+                '{"predicted_answer":"경복궁","predicted_option":0,'
+                '"confidence":0.9,"reason":"category evidence"}'
+            ),
+        ]
+    )
+
+    result = SpatialAgent(llm, ToolRegistry(FakeProvider()), max_steps=2).answer(
+        "질문", ["창덕궁", "경복궁"]
+    )
+
+    evaluate = next(stage for stage in result.trace if stage["stage"] == "evaluate")
+    assert result.predicted_answer == 1
+    assert evaluate["selection_method"] == "exact_answer_text"
+    assert result.response == "^^1^^"
+
+
+def test_generation_falls_back_to_the_declared_index_without_matching_text() -> None:
+    llm = QueuedLLM(
+        [
+            LLMResponse('{"intent":"poi"}'),
+            LLMResponse(
+                '{"steps":[{"id":"s1","operator":"place_search",'
+                '"arguments":{"query":"경복궁","limit":1}}]}'
+            ),
+            LLMResponse(
+                '{"predicted_answer":"알 수 없음","predicted_option":1,'
+                '"confidence":0.4,"reason":"weak evidence"}'
+            ),
+        ]
+    )
+
+    result = SpatialAgent(llm, ToolRegistry(FakeProvider()), max_steps=2).answer(
+        "질문", ["창덕궁", "경복궁"]
+    )
+
+    evaluate = next(stage for stage in result.trace if stage["stage"] == "evaluate")
+    assert result.predicted_answer == 1
+    assert evaluate["selection_method"] == "predicted_option"
 
 
 def test_spatial_router_heuristics_cover_extended_intents() -> None:

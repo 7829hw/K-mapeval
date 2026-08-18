@@ -102,13 +102,14 @@ def test_a_model_that_never_comes_back_names_itself_in_the_failure() -> None:
         client.chat([{"role": "user", "content": "q"}])
 
 
-def test_bad_credentials_fail_immediately_because_auth_is_never_transient() -> None:
-    client = build_client()
-    script = install(client, [status_error(401)])
+def test_a_rejected_request_is_waited_out_like_any_other_endpoint_answer() -> None:
+    """One response cannot tell a wrong key from a proxy that has not loaded its config yet."""
 
-    with pytest.raises(LLMUnavailableError, match="LLM_API_KEY"):
-        client.chat([{"role": "user", "content": "q"}])
-    assert script.calls == 1
+    client = build_client(llm_max_retries=1)
+    script = install(client, [status_error(401), completion("^^0^^")])
+
+    assert client.chat([{"role": "user", "content": "q"}]).content == "^^0^^"
+    assert script.calls == 2
 
 
 def test_a_request_we_malformed_is_not_retried_and_stays_the_agent_s_problem() -> None:
@@ -150,7 +151,9 @@ class DownEndpointAgent(BenchmarkAgent):
         )
 
 
-def test_a_downed_endpoint_aborts_the_batch_and_marks_the_report_invalid(tmp_path, capsys) -> None:
+def test_a_downed_endpoint_costs_only_the_questions_it_actually_failed(tmp_path, capsys) -> None:
+    """No batch-level verdict: every question is still asked, and the count is reported plainly."""
+
     items = [
         BenchmarkItem(
             id=f"q{index}",
@@ -166,24 +169,18 @@ def test_a_downed_endpoint_aborts_the_batch_and_marks_the_report_invalid(tmp_pat
         items,
         output_dir=None,
         log_dir=tmp_path / "logs",
-        abort_after_llm_failures=3,
     ).run()
 
-    failure_types = report.statistics["performance"]["failure_types"]
-    assert failure_types["llm_unavailable"] == 3
-    assert failure_types["run_aborted"] == 7
-    assert report.statistics["run_validity"] == {
-        "valid": False,
-        "llm_unavailable_count": 10,
-        "aborted": True,
-    }
-    assert report.statistics["overall_answer_accuracy"]["accuracy"] == 0.0
-    output = capsys.readouterr().out
-    assert "Aborting run" in output
-    assert "INVALID RUN" in output
+    performance = report.statistics["performance"]
+    assert performance["failure_types"] == {"llm_unavailable": 10}
+    assert performance["llm_unavailable_count"] == 10
+    assert "run_validity" not in report.statistics
+    assert len(report.results) == 10
+    assert all(row["failure_type"] == "llm_unavailable" for row in report.results)
+    assert "Never answered by the LLM endpoint: 10/10" in capsys.readouterr().out
 
 
-def test_a_healthy_run_stays_valid_and_records_the_agent_it_measured(tmp_path) -> None:
+def test_a_healthy_run_records_the_agent_it_measured(tmp_path) -> None:
     class HealthyAgent(BenchmarkAgent):
         agent_type = "healthy"
 
@@ -204,10 +201,9 @@ def test_a_healthy_run_stays_valid_and_records_the_agent_it_measured(tmp_path) -
         log_dir=tmp_path / "logs",
         agent_type="spatial_agent",
         llm_profile={"llm_model": "test-model", "llm_base_url": "http://localhost:1/v1"},
-        abort_after_llm_failures=3,
     ).run()
 
-    assert report.statistics["run_validity"]["valid"] is True
+    assert report.statistics["performance"]["llm_unavailable_count"] == 0
     assert report.metadata["agent_type"] == "spatial_agent"
     assert report.metadata["llm_model"] == "test-model"
 
@@ -259,28 +255,8 @@ def test_a_question_the_endpoint_failed_is_asked_again(tmp_path) -> None:
     assert report.results[0]["answer_correct"] is True
     assert report.results[0]["attempts"] == 2
     assert report.results[0]["failure_type"] is None
-    assert report.statistics["run_validity"]["valid"] is True
     assert report.statistics["performance"]["retried_question_count"] == 1
     assert report.statistics["performance"]["retry_recovered_ids"] == ["a"]
-
-
-def test_a_recovered_question_does_not_count_toward_the_abort_threshold(tmp_path) -> None:
-    """The circuit breaker measures the endpoint's state, not how hard we had to try."""
-
-    agent = FlakyAgent(failures=1)
-
-    report = Evaluator(
-        agent,
-        one_question(),
-        output_dir=None,
-        log_dir=tmp_path / "logs",
-        abort_after_llm_failures=1,
-        question_retries=2,
-        question_retry_backoff_seconds=0.001,
-    ).run()
-
-    assert report.statistics["run_validity"]["aborted"] is False
-    assert report.statistics["performance"]["failure_types"] == {}
 
 
 def test_retries_stop_once_the_attempts_are_spent(tmp_path) -> None:
@@ -298,7 +274,7 @@ def test_retries_stop_once_the_attempts_are_spent(tmp_path) -> None:
     assert agent.attempts == 3
     assert report.results[0]["attempts"] == 3
     assert report.results[0]["failure_type"] == "llm_unavailable"
-    assert report.statistics["run_validity"]["valid"] is False
+    assert report.statistics["performance"]["llm_unavailable_count"] == 1
     assert report.statistics["performance"]["retry_recovered_ids"] == []
 
 

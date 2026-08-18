@@ -218,33 +218,32 @@ and agent. Never share an agent across workers (`Evaluator` rejects a shared `ag
 by index, not completion. `src/logging.py` builds a fresh `logging.Logger` per question for the
 same reason — a shared logger with temporary handlers would cross-write concurrent traces.
 
-The LLM endpoint is treated as a fallible dependency, not a given. `OpenAIChatClient`
-(`src/llm.py`) drives its own retries (the SDK's are disabled) with exponential backoff and jitter
-on connection/timeout errors and `RETRYABLE_STATUS_CODES`; `CONFIGURATION_STATUS_CODES`
-(401/403/404) fail immediately, and 4xx we caused (400/413/422) propagate unchanged because they are
-the agent's prompt, not the endpoint. Exhausted retries and configuration errors raise
-`LLMUnavailableError`, which both agents record as `failure_type="llm_unavailable"` — never as
-`agent_reasoning_failure`, since an outage says nothing about an architecture. `Evaluator` counts
-those, trips a circuit breaker after `BENCHMARK_ABORT_AFTER_LLM_FAILURES` consecutive ones
-(remaining questions become `run_aborted`), and stamps `statistics.run_validity.valid = false` so a
-0% report can never be read as a benchmark result. `main.py` preflights the endpoint with one cheap
-call before each agent leg, so `--agent both` cannot score its second agent 0% on an endpoint that
-died between legs. Report `metadata` carries `agent_type`, `llm_model`, and `llm_base_url` so a
-report is attributable after the fact.
+The LLM endpoint is treated as slow, not as dead. It is a self-hosted deployment behind a reverse
+proxy: it answers 502/503 while it reloads, reports 404 for a model name it serves again a minute
+later, and takes minutes to answer a ReAct call carrying a long trace. **Do not add code that judges
+the endpoint's health and changes control flow on the verdict** — no preflight ping, no circuit
+breaker, no run-level "invalid" stamp. Every one of those turns a slow endpoint into lost questions,
+and none of them makes an answer arrive sooner. Wait instead.
 
-Resilience is layered, and each layer answers a different question. The client retries one
-*request*. `Evaluator._run_single` retries one *question* — `BENCHMARK_QUESTION_RETRIES` extra
-attempts with exponential backoff and jitter (workers must not retry in lockstep) — because an
-endpoint can stay down for the whole minute a question takes and lose a data point that says
-nothing about either architecture. The circuit breaker gives up on the *run*. Only what
-`is_transient_failure` accepts qualifies for a question-level retry: `llm_unavailable`, plus a
-`provider_failure` whose message starts with `ProviderTimeoutError` / `ProviderRateLimitError`.
-Never retry a wrong answer, an `agent_reasoning_failure`, an `answer_parse_failure`, or a
-`PlaceNotFoundError` — those are the
+Waiting happens at two scales. `OpenAIChatClient` (`src/llm.py`) drives its own retries (the SDK's
+are disabled) with exponential backoff, jitter, and a `MAX_RETRY_DELAY_SECONDS` ceiling, for every
+failure except `REQUEST_STATUS_CODES` (400/413/422) — those describe the request we sent, so
+repeating it only repeats the mistake, and they propagate unchanged as the agent's problem.
+`LLM_TIMEOUT_SECONDS` is deliberately generous for the same reason. When the attempts really do run
+out, `LLMUnavailableError` is raised and both agents record `failure_type="llm_unavailable"` — never
+`agent_reasoning_failure`, since an outage says nothing about an architecture.
+
+`Evaluator._run_single` then retries the whole *question*: `BENCHMARK_QUESTION_RETRIES` extra
+attempts with their own backoff and jitter (workers must not retry in lockstep), because an endpoint
+can stay down for the entire minute one question takes. Only what `is_transient_failure` accepts
+qualifies: `llm_unavailable`, plus a `provider_failure` whose message starts with
+`ProviderTimeoutError` / `ProviderRateLimitError`. Never retry a wrong answer, an
+`agent_reasoning_failure`, an `answer_parse_failure`, or a `PlaceNotFoundError` — those are the
 result the architecture earned, and re-rolling them measures luck. Retries are counted, not hidden:
-each row carries `attempts`, and `performance` carries `retried_question_count` and
-`retry_recovered_ids`. Because a recovered question is no longer a failure, it does not feed the
-circuit breaker — `_note_failure` sees only the final outcome.
+each row carries `attempts`, and `performance` carries `retried_question_count`,
+`retry_recovered_ids`, and `llm_unavailable_count`. That last count is a fact for the write-up to
+report next to the accuracy, not a verdict the code acts on. Report `metadata` carries `agent_type`,
+`llm_model`, and `llm_base_url` so a report is attributable after the fact.
 
 `SQLiteMapCache` (`src/tools/cache.py`) is keyed by operation + canonicalized arguments, stores
 normalized `Place`/`Route` payloads only — never raw responses or keys — with a TTL (`0` = never

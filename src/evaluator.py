@@ -20,7 +20,6 @@ from src.llm import LLMUnavailableError
 from src.logging import log_agent_result, query_log
 
 INFRASTRUCTURE_FAILURE = "llm_unavailable"
-ABORTED_FAILURE = "run_aborted"
 PROVIDER_FAILURE = "provider_failure"
 # Provider errors that say the API could not answer right now, as opposed to answering that the
 # place does not exist. Only these are worth asking again for; a PlaceNotFoundError is evidence.
@@ -67,7 +66,6 @@ class Evaluator:
         test_mode: str = "full",
         agent_type: str | None = None,
         llm_profile: dict[str, Any] | None = None,
-        abort_after_llm_failures: int = 0,
         question_retries: int = 0,
         question_retry_backoff_seconds: float = 10.0,
     ) -> None:
@@ -87,19 +85,13 @@ class Evaluator:
         self.test_mode = test_mode
         self.agent_type = agent_type
         self.llm_profile = dict(llm_profile) if llm_profile else {}
-        self.abort_after_llm_failures = abort_after_llm_failures
         self.question_retries = max(0, question_retries)
         self.question_retry_backoff_seconds = question_retry_backoff_seconds
         self.report_path: Path | None = None
-        self._failure_lock = Lock()
-        self._consecutive_llm_failures = 0
-        self._aborted = False
 
     def run(self) -> EvaluationReport:
         total = len(self.dataset)
         worker_count = min(self.max_workers, total) if total else 1
-        self._consecutive_llm_failures = 0
-        self._aborted = False
         print("=" * 80)
         print(f"Running evaluation on {total} samples")
         print(f"Concurrent LLM sessions: {worker_count}")
@@ -110,7 +102,7 @@ class Evaluator:
             results = self._run_parallel(total, worker_count)
         print()
 
-        statistics = calculate_statistics(results, aborted=self._aborted)
+        statistics = calculate_statistics(results)
         metadata = {
             "timestamp": datetime.now(UTC).isoformat(),
             "test_mode": self.test_mode,
@@ -145,9 +137,6 @@ class Evaluator:
     ) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         for index, item in jobs:
-            if self._aborted:
-                results.append(self._skipped_row(item, index=index, total=total))
-                continue
             results.append(self._run_single(agent, item, index=index, total=total))
         return results
 
@@ -173,10 +162,8 @@ class Evaluator:
                         if job is None:
                             return
                         index, item = job
-                        ordered_results[index - 1] = (
-                            self._skipped_row(item, index=index, total=total)
-                            if self._aborted
-                            else self._run_single(agent, item, index=index, total=total)
+                        ordered_results[index - 1] = self._run_single(
+                            agent, item, index=index, total=total
                         )
             except BaseException as exc:
                 with error_lock:
@@ -210,11 +197,7 @@ class Evaluator:
         attempt = 1
         while True:
             row = self._attempt_single(agent, item, index=index, total=total)
-            if (
-                attempt > self.question_retries
-                or self._aborted
-                or not is_transient_failure(row)
-            ):
+            if attempt > self.question_retries or not is_transient_failure(row):
                 break
             delay = self._retry_delay(attempt)
             print(
@@ -225,7 +208,6 @@ class Evaluator:
             time.sleep(delay)
             attempt += 1
         row["attempts"] = attempt
-        self._note_failure(row.get("failure_type"))
         return row
 
     def _retry_delay(self, attempt: int) -> float:
@@ -312,22 +294,6 @@ class Evaluator:
                 elapsed=elapsed,
             )
 
-    def _skipped_row(self, item: BenchmarkItem, *, index: int, total: int) -> dict[str, Any]:
-        question, options = item.agent_input()
-        print(
-            f"[{index}/{total}] ID {item.id!s:>3} | SKIPPED: run aborted (LLM endpoint down)",
-            flush=True,
-        )
-        return self._failed_row(
-            item,
-            question,
-            options[item.answer].strip(),
-            error="Run aborted before this question: the LLM endpoint was unavailable",
-            failure_type=ABORTED_FAILURE,
-            elapsed=0.0,
-            attempts=0,
-        )
-
     @staticmethod
     def _failed_row(
         item: BenchmarkItem,
@@ -355,27 +321,6 @@ class Evaluator:
             "failure_type": failure_type,
             "attempts": attempts,
         }
-
-    def _note_failure(self, failure_type: str | None) -> None:
-        """Trip the circuit breaker once the endpoint has failed enough questions in a row."""
-
-        if self.abort_after_llm_failures <= 0:
-            return
-        with self._failure_lock:
-            if failure_type == INFRASTRUCTURE_FAILURE:
-                self._consecutive_llm_failures += 1
-            else:
-                self._consecutive_llm_failures = 0
-                return
-            if self._aborted or self._consecutive_llm_failures < self.abort_after_llm_failures:
-                return
-            self._aborted = True
-        print(
-            f"\nAborting run: {self.abort_after_llm_failures} consecutive questions failed on the "
-            "LLM endpoint. Remaining questions are skipped; this report is not a benchmark "
-            "result.\n",
-            flush=True,
-        )
 
     @staticmethod
     def _print_result(
@@ -413,7 +358,7 @@ class Evaluator:
         return path
 
 
-def calculate_statistics(results: list[dict[str, Any]], *, aborted: bool = False) -> dict[str, Any]:
+def calculate_statistics(results: list[dict[str, Any]]) -> dict[str, Any]:
     total = len(results)
     intent_correct = sum(1 for row in results if row.get("intent_correct"))
     answer_correct = sum(1 for row in results if row.get("answer_correct"))
@@ -429,7 +374,6 @@ def calculate_statistics(results: list[dict[str, Any]], *, aborted: bool = False
         stats["accuracy"] = round(stats["correct"] / stats["total"], 4) if stats["total"] else 0.0
     average_time = sum(float(row.get("time", 0.0)) for row in results) / total if total else 0.0
     failure_types = Counter(str(row["failure_type"]) for row in results if row.get("failure_type"))
-    infrastructure = failure_types[INFRASTRUCTURE_FAILURE] + failure_types[ABORTED_FAILURE]
     retried = [row for row in results if int(row.get("attempts") or 1) > 1]
     recovered = [row["id"] for row in retried if not is_transient_failure(row)]
     return {
@@ -453,14 +397,9 @@ def calculate_statistics(results: list[dict[str, Any]], *, aborted: bool = False
             # result; the rest were unanswerable however many times we asked.
             "retried_question_count": len(retried),
             "retry_recovered_ids": recovered,
-        },
-        # Accuracy only means something when the questions were actually answered. An outage on the
-        # LLM endpoint scores 0% exactly like a wrong answer does, so say so here rather than
-        # letting a downed deployment be read as an architecture comparison.
-        "run_validity": {
-            "valid": infrastructure == 0,
-            "llm_unavailable_count": infrastructure,
-            "aborted": aborted,
+            # Questions that ran out of patience rather than out of evidence. Reported as a plain
+            # count: it belongs in the write-up next to the accuracy, not in a verdict here.
+            "llm_unavailable_count": failure_types[INFRASTRUCTURE_FAILURE],
         },
     }
 
@@ -496,14 +435,10 @@ def print_summary(statistics: dict[str, Any]) -> None:
             f"Retried after an API failure: {performance['retried_question_count']} "
             f"({len(recovered)} recovered)"
         )
-    validity = statistics.get("run_validity", {})
-    if not validity.get("valid", True):
-        print()
-        print("!" * 80)
+    unavailable = performance.get("llm_unavailable_count", 0)
+    if unavailable:
         print(
-            f"INVALID RUN: {validity['llm_unavailable_count']}/{overall['total']} questions never "
-            "reached the LLM endpoint."
+            f"Never answered by the LLM endpoint: {unavailable}/{overall['total']} "
+            "(counted as incorrect above)"
         )
-        print("Accuracy above is not a benchmark result. Fix the endpoint and re-run.")
-        print("!" * 80)
     print()

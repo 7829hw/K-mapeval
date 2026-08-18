@@ -19,14 +19,14 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = ""
     llm_base_url: str | None = None
-    llm_timeout_seconds: float = Field(default=120.0, gt=0)
-    llm_max_retries: int = Field(default=4, ge=0, le=10)
-    llm_retry_backoff_seconds: float = Field(default=2.0, gt=0)
+    # A ReAct question carries its whole growing trace into every call, and a busy self-hosted
+    # endpoint can take minutes to answer one. A short timeout does not make the answer arrive
+    # sooner; it only turns a slow answer into a lost question.
+    llm_timeout_seconds: float = Field(default=600.0, gt=0)
+    llm_max_retries: int = Field(default=8, ge=0, le=20)
+    llm_retry_backoff_seconds: float = Field(default=5.0, gt=0)
     max_reasoning_steps: int = Field(default=8, ge=1, le=30)
     benchmark_concurrency: int = Field(default=4, ge=1, le=32)
-    # Stop a batch once this many questions in a row die on the LLM endpoint. A run that keeps
-    # going through an outage produces a 0% report that reads like a result.
-    benchmark_abort_after_llm_failures: int = Field(default=10, ge=0)
     # Extra attempts for a single question the endpoint failed to serve. The client already retries
     # each request; this catches the case where the endpoint stayed down for a whole question, so
     # one blip does not cost a data point that says nothing about the architecture. 0 disables it.

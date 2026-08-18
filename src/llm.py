@@ -10,21 +10,23 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 
 from src.config import Settings
 
-# HTTP statuses where the endpoint is telling us "not now" rather than "not ever". A self-hosted
-# vLLM behind a reverse proxy answers 502/503 while it reloads a model, which is exactly the window
-# a long benchmark is most likely to hit. 404 belongs here too: while vLLM swaps models it reports
-# "the model does not exist" for a name it serves again a minute later, so a wrong LLM_MODEL and a
-# reloading one are indistinguishable from a single response — retry, then say so in the message.
-RETRYABLE_STATUS_CODES = frozenset({404, 408, 409, 425, 429, 500, 502, 503, 504})
-# Authentication and permission are never transient, so these fail immediately.
-CONFIGURATION_STATUS_CODES = frozenset({401, 403})
+# The only responses we do not wait out. These describe the request we sent — a prompt that grew
+# past the context window, a malformed tool schema — so they belong to the agent and repeating them
+# only repeats the mistake. Every other failure is the endpoint saying "not now", and the answer to
+# "not now" is to wait: a self-hosted vLLM behind a reverse proxy answers 502/503 while it reloads,
+# and reports 404 for a model name it serves again a minute later. Judging which of those is fatal
+# from a single response is guesswork that turns a slow endpoint into a lost question.
+REQUEST_STATUS_CODES = frozenset({400, 413, 422})
+# Retry delays grow exponentially but stop growing here, so a long outage keeps checking back
+# instead of scheduling the next attempt an hour out.
+MAX_RETRY_DELAY_SECONDS = 60.0
 
 
 class LLMUnavailableError(RuntimeError):
-    """The LLM endpoint could not serve a request.
+    """The LLM endpoint did not serve a request within the time we were willing to wait.
 
     Distinct from an agent-reasoning failure: nothing about the question or the agent's plan caused
-    it, so a batch full of these is an infrastructure outage and not a benchmark result.
+    it, so it says nothing about the architecture being measured.
     """
 
 
@@ -74,8 +76,8 @@ class OpenAIChatClient:
         kwargs: dict[str, Any] = {
             "api_key": settings.llm_api_key,
             "timeout": settings.llm_timeout_seconds,
-            # Retries are handled here so the backoff and the failure classification stay visible
-            # to the benchmark instead of being swallowed inside the SDK.
+            # Retries are handled here so the backoff stays visible to the benchmark instead of
+            # being swallowed inside the SDK.
             "max_retries": 0,
         }
         if settings.llm_base_url:
@@ -117,14 +119,7 @@ class OpenAIChatClient:
             except (APIConnectionError, APITimeoutError) as exc:
                 last_error = exc
             except APIStatusError as exc:
-                if exc.status_code in CONFIGURATION_STATUS_CODES:
-                    raise LLMUnavailableError(
-                        f"{type(exc).__name__}: {exc} "
-                        f"(model={self._model!r}; check LLM_MODEL, LLM_BASE_URL and LLM_API_KEY)"
-                    ) from exc
-                if exc.status_code not in RETRYABLE_STATUS_CODES:
-                    # 400/413/422 and friends are caused by what we sent — a prompt that grew too
-                    # long, a malformed tool schema. Those belong to the agent, not the endpoint.
+                if exc.status_code in REQUEST_STATUS_CODES:
                     raise
                 last_error = exc
             if attempt < self._max_retries:
@@ -138,7 +133,8 @@ class OpenAIChatClient:
     def _retry_delay(self, attempt: int) -> float:
         """Exponential backoff with jitter, so concurrent workers do not retry in lockstep."""
 
-        return self._backoff * (2**attempt) * (0.5 + random.random())
+        delay = min(self._backoff * (2**attempt), MAX_RETRY_DELAY_SECONDS)
+        return delay * (0.5 + random.random())
 
     def close(self) -> None:
         self._client.close()

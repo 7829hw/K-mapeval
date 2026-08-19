@@ -838,3 +838,169 @@ def test_stays_are_bound_to_the_itinerary_the_plan_lists() -> None:
     ]
     grounded = _ground_graph_literals(plan, question, ["오후 4시 17분"], "trip")
     assert grounded[0]["arguments"]["stay_durations_s"] == [0.0, 5400.0, 3600.0, 5400.0, 0.0]
+
+
+def test_the_itinerary_clock_runs_both_ways() -> None:
+    """"When must I leave to arrive by six" is the same itinerary read backwards.
+
+    With only a forward mode the reverse question had to be assembled by hand — sum the legs, add
+    the stays, hand a scalar to `calculate_start_time` — and the planner under-counted the chain,
+    answering from a single leg.
+    """
+
+    registry = ToolRegistry(_MatrixProvider())
+    itinerary = {
+        "locations": ["S", "A", "B"],
+        "stay_durations_s": [0, 3600, 0],
+        "timezone": "Asia/Seoul",
+    }
+    forward = registry.invoke(
+        "calculate_finish_time", {"start_time": "오전 9시 00분", **itinerary}
+    )
+    assert forward.status == "ok", forward.error
+
+    backward = registry.invoke(
+        "calculate_finish_time",
+        {"arrival_time": forward.output["finish_time"], **itinerary},
+    )
+    assert backward.status == "ok", backward.error
+    assert backward.output["start_time"] == forward.output["start_time"]
+    assert backward.output["travel_duration_s"] == forward.output["travel_duration_s"]
+
+
+def test_the_itinerary_needs_exactly_one_anchor_in_time() -> None:
+    registry = ToolRegistry(_MatrixProvider())
+    for arguments in (
+        {"locations": ["S", "A"]},
+        {"locations": ["S", "A"], "start_time": "오전 9시", "arrival_time": "오후 5시"},
+    ):
+        execution = registry.invoke("calculate_finish_time", arguments)
+        assert execution.status == "error"
+        assert "exactly one" in (execution.error or "")
+
+
+def test_a_consumed_measure_is_demoted_and_the_terminal_promoted() -> None:
+    """A Measure is what the answer is read from, so a node another node consumes is not one."""
+
+    from src.agent.geoflow import normalize_and_validate_graph
+
+    graph = {
+        "graph": [
+            {
+                "id": "ends",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["A", "B"]},
+                "role": "extent",
+            },
+            {
+                "id": "duration1",
+                "operator": "travel_time",
+                "arguments": {"origin": "$ends.0.place", "destination": "$ends.1.place"},
+                "depends_on": ["ends"],
+                "role": "measure",
+            },
+            {
+                "id": "answer",
+                "operator": "calculate_start_time",
+                "arguments": {
+                    "arrival_time": "오후 5시",
+                    "duration_s": "$duration1.duration_s",
+                    "timezone": "Asia/Seoul",
+                },
+                "depends_on": ["duration1"],
+                "role": "support",
+            },
+        ]
+    }
+    steps, _ = normalize_and_validate_graph(graph, max_steps=10)
+    roles = {step["id"]: step["role"] for step in steps}
+    assert roles == {"ends": "extent", "duration1": "support", "answer": "measure"}
+
+
+def test_a_departure_time_counts_the_stops_on_the_way() -> None:
+    """Travel is not the whole wait: time spent at a stop delays departure just as much."""
+
+    operators = SpatialOperatorRegistry()
+    bare = operators.invoke(
+        "calculate_start_time",
+        {"arrival_time": "오후 7시 00분", "duration_s": 5472, "timezone": "Asia/Seoul"},
+    )
+    with_stops = operators.invoke(
+        "calculate_start_time",
+        {
+            "arrival_time": "오후 7시 00분",
+            "duration_s": 5472,
+            "stay_durations_s": [1800, 2700],
+            "timezone": "Asia/Seoul",
+        },
+    )
+    assert with_stops["stay_duration_s"] == 4500
+    assert with_stops["total_duration_s"] == 5472 + 4500
+    assert with_stops["start_time"] < bare["start_time"]
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("A를 2시간, B를 1.5시간 둘러봅니다", [7200.0, 5400.0]),
+        ("A에서 30분, B에서 45분씩 들러야 합니다", [1800.0, 2700.0]),
+        ("A를 1시간, B에서 15분 들릅니다", [3600.0, 900.0]),
+    ],
+)
+def test_a_stop_is_stated_in_either_shape(question: str, expected: list[float]) -> None:
+    """"X를 2시간" and "X에서 30분" are the same statement; reading only the first returned
+    nothing for a question full of errands and left the departure short by all of them."""
+
+    from src.agent.spatial import _extract_trip_schedule
+
+    stays, _ = _extract_trip_schedule(question)
+    assert sorted(stays.values()) == sorted(expected)
+
+
+def test_an_empty_measure_takes_the_node_it_depends_on() -> None:
+    """A Measure with nothing to measure is a leftover; failing threw away gathered evidence."""
+
+    from src.agent.spatial import _ground_graph_literals
+
+    plan = [
+        {
+            "id": "span",
+            "operator": "haversine_distance",
+            "arguments": {"place_a": "A", "place_b": "B"},
+            "role": "extent",
+        },
+        {
+            "id": "answer",
+            "operator": "identity_measure",
+            "arguments": {},
+            "depends_on": ["span"],
+            "role": "measure",
+        },
+    ]
+    grounded = _ground_graph_literals(plan, "A와 B 사이 거리는?", ["1km"], "distance")
+    assert grounded[-1]["arguments"]["value"] == "$span"
+
+
+def test_every_required_argument_in_a_contract_is_one_the_operator_demands() -> None:
+    """A contract that requires an argument the tool treats as optional refuses working plans.
+
+    `calculate_finish_time` gained an `arrival_time` mode and the contract still required
+    `start_time`, so G4 rejected every plan that used the reverse direction the prompt had just
+    described — five questions in one run, all with the evidence already gathered.
+    """
+
+    from src.agent.geoflow import OPERATOR_CONTRACTS
+    from src.tools.registry import ToolRegistry
+
+    registry = ToolRegistry(_MatrixProvider())
+    for schema in registry.schemas():
+        name = schema["function"]["name"]
+        contract = OPERATOR_CONTRACTS.get(name)
+        if contract is None:
+            continue
+        demanded = set(schema["function"]["parameters"].get("required") or [])
+        claimed = set(contract.required_arguments)
+        assert claimed <= demanded, (
+            f"{name}: contract requires {sorted(claimed - demanded)} which the tool accepts "
+            "without"
+        )

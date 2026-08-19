@@ -135,7 +135,11 @@ Exact operator contracts:
 - open_at_time(schedule,local_time,timezone) -> event
 - timezone(latitude,longitude,timestamp?) -> event
 - timezone_convert(local_time,from_timezone,to_timezone) -> event
-- calculate_finish_time(start_time,locations,stay_durations_s?,timezone?,mode?) -> event
+- calculate_finish_time(start_time|arrival_time,locations,stay_durations_s?,timezone?,mode?,
+  priority?) -> event; routes every leg of `locations` in order and adds the stays. Give
+  start_time to ask when an itinerary ends, or arrival_time to ask the latest departure that still
+  meets it — the output carries both start_time and finish_time either way. Use this rather than
+  summing legs into calculate_start_time by hand
 - calculate_start_time(arrival_time,duration_s,timezone) -> event
 - tsp_tw(nodes,distance_matrix,time_windows?,service_times?,start_index=0,time_budget?) -> network;
   distance_matrix accepts a distance_matrix node directly ($legs), which carries the square
@@ -688,6 +692,24 @@ def _ground_graph_literals(
             continue
         if route_priority and operator in _PRIORITY_OPERATORS:
             arguments["priority"] = route_priority
+        if operator == "calculate_start_time" and intent == "trip":
+            stays, _ = _extract_trip_schedule(question)
+            # Only when the travel total is computed by another node: a reference to a route sum
+            # carries travel and nothing else, so the stays are certainly missing. A literal may
+            # already include them, and binding on top of that would count them twice.
+            duration = arguments.get("duration_s")
+            if stays and isinstance(duration, str) and duration.strip().startswith("$"):
+                arguments["stay_durations_s"] = list(stays.values())
+            grounded.append({**step, "arguments": arguments})
+            continue
+        if operator == "identity_measure" and not arguments.get("value"):
+            # A Measure with nothing to measure is a planner leftover; what it meant is the node
+            # it depends on. Failing here threw away a graph whose evidence was already gathered.
+            source = next(iter(step.get("depends_on") or []), None)
+            if source:
+                arguments["value"] = f"${source}"
+            grounded.append({**step, "arguments": arguments})
+            continue
         if operator == "calculate_finish_time" and intent == "trip":
             stays, _ = _extract_trip_schedule(question)
             locations = arguments.get("locations")
@@ -1120,12 +1142,18 @@ def _extract_trip_schedule(question: str) -> tuple[dict[str, float], float | Non
     """
 
     stays: dict[str, float] = {}
-    for match in re.finditer(r"([^,.]+?)(?:을|를)\s*([\d.]+)\s*시간", question):
+    # A stop is stated as "X를 2시간" or as "X에서 30분"; reading only the first shape returned
+    # nothing for a question full of errands and left the departure time short by all of them.
+    for match in re.finditer(
+        r"([^,.]+?)(?:을|를|에서|에)\s*(?:약\s*)?([\d.]+)\s*(시간|분)", question
+    ):
         name = match.group(1).strip()
         # The sentence that introduces the stay list ends in "…있습니다. " — keep only the name.
         name = re.split(r"[.!?]\s*", name)[-1].strip()
-        if name:
-            stays[name] = float(match.group(2)) * 3600
+        if not name:
+            continue
+        amount = float(match.group(2))
+        stays[name] = amount * 3600 if match.group(3) == "시간" else amount * 60
     budget_match = re.search(r"총\s*([\d.]+)\s*시간", question)
     budget = float(budget_match.group(1)) * 3600 if budget_match else None
     return stays, budget

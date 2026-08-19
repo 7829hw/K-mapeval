@@ -96,9 +96,9 @@ OPERATOR_CONTRACTS: dict[str, OperatorContract] = {
     "place_details": OperatorContract("object", ("place_id",)),
     "batch_place_details": OperatorContract("object", ("place_ids",)),
     "nearby_places": OperatorContract("object", ("center",)),
-    "recover_option_places": OperatorContract(
-        "object", ("options", "candidates", "anchor")
-    ),
+    # `candidates` defaults to an empty list on the tool: recovering options with nothing
+    # retrieved yet is a legitimate plan, and requiring it here refused one.
+    "recover_option_places": OperatorContract("object", ("options", "anchor")),
     "directions": OperatorContract("field", ("origin", "destination")),
     "travel_time": OperatorContract("field", ("origin", "destination")),
     "distance_matrix": OperatorContract("field"),
@@ -131,7 +131,11 @@ OPERATOR_CONTRACTS: dict[str, OperatorContract] = {
     "open_at_time": OperatorContract("event", ("schedule", "local_time", "timezone")),
     "timezone": OperatorContract("event", ("latitude", "longitude")),
     "timezone_convert": OperatorContract("event", ("local_time", "from_timezone", "to_timezone")),
-    "calculate_finish_time": OperatorContract("event", ("start_time", "locations")),
+    # Only `locations` is unconditionally required: the itinerary is anchored by *either*
+    # start_time or arrival_time, and `CalculateFinishTimeArgs` enforces exactly-one with a
+    # message G4 cannot express. Leaving start_time required here refused every plan that used
+    # the reverse mode the prompt had just told planners to use.
+    "calculate_finish_time": OperatorContract("event", ("locations",)),
     "calculate_start_time": OperatorContract(
         "event", ("arrival_time", "duration_s", "timezone")
     ),
@@ -209,7 +213,10 @@ OPERATOR_INPUT_TYPES: dict[str, dict[str, frozenset[str]]] = {
         "places": frozenset({"object"}),
         "anchor": frozenset({"object", "location"}),
     },
-    "match_distance_options": {"distance": frozenset({"amount"})},
+    # A share is a number, and a question whose options are percentages matches it the same way a
+    # distance question matches metres. Refusing it sent a correctly-composed brand-share plan to
+    # the failure column.
+    "match_distance_options": {"distance": frozenset({"amount", "proportion"})},
     "match_type_options": {"place": frozenset({"object", "location"})},
     "events_from_objects": {"objects": frozenset({"object"})},
     "filter_events": {"events": frozenset({"event"})},
@@ -1170,6 +1177,9 @@ def normalize_and_validate_graph(
         output_type = contract.output_type
         default_role = "measure" if index == len(raw_steps) - 1 else "support"
         role = str(raw.get("role") or default_role).lower()
+        # Demoted below once the edges are known: a Measure is what the answer is read from, so a
+        # node another node consumes is not one however the planner labelled it. Left as declared
+        # here because the consumers are not known until every step has been read.
         if role not in FUNCTIONAL_ROLES:
             raise ValueError(f"Unknown functional role on {step_id}: {role}")
         steps.append(
@@ -1187,6 +1197,23 @@ def normalize_and_validate_graph(
         )
 
     by_id = {step["id"]: step for step in steps}
+    consumed = {
+        dependency
+        for step in steps
+        for dependency in step["depends_on"]
+        if dependency in by_id
+    }
+    for step in steps:
+        if step["role"] == "measure" and step["id"] in consumed:
+            # G2 orders sub_condition < condition < support < measure, so a Measure feeding
+            # another node breaks the ordering. The plan is fine; the label is not.
+            step["role"] = "support"
+    if not any(step["role"] == "measure" for step in steps):
+        # A Measure is what the answer is read from, which is what nothing consumes. Promoting
+        # the terminals completes the demotion above rather than leaving a graph with no Measure.
+        for step in steps:
+            if step["id"] not in consumed and step["role"] not in CONTEXTUAL_ROLES:
+                step["role"] = "measure"
     for step in steps:
         for dependency in step["depends_on"]:
             if dependency not in by_id:

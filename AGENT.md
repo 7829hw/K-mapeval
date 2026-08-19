@@ -351,6 +351,15 @@ operator only where Kakao compatibility forces it.
 executable, so a missing step 1 or 2 fails fast; a missing step 3 only shows up as degraded
 benchmark accuracy.
 
+**A contract's required arguments must be ones the tool itself demands.** Adding an
+`arrival_time` mode to `calculate_finish_time` while its contract still required `start_time`
+made G4 refuse every plan that used the new mode — five questions in one run, each with its
+evidence already gathered, and the prompt had just told planners to compose exactly that. A
+one-of relationship between two arguments belongs in the args model, which can say so; the
+contract lists only what is unconditionally required. `tests/test_spatial_ops.py` pins
+`OPERATOR_CONTRACTS` against every tool schema, and it caught a second instance the moment it was
+written (`recover_option_places` required `candidates`, which defaults to empty).
+
 Executed steps are recorded twice: `results` keyed by step id (operator state) and `concept_state`
 materialized through each step's `output_bindings` (concept state). Both go into the trace the
 generation stage conditions on. Step failures are isolated into `{"error": ...}` rather than

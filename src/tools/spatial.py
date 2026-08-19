@@ -748,13 +748,26 @@ class SpatialOperatorRegistry:
 
     @staticmethod
     def calculate_start_time(
-        arrival_time: str, duration_s: float, timezone: str
+        arrival_time: str,
+        duration_s: float,
+        timezone: str,
+        stay_durations_s: list[float] | None = None,
     ) -> dict[str, Any]:
+        """Latest departure that still meets an arrival, counting stops made on the way.
+
+        `duration_s` is travel; anything spent *at* a stop delays departure just as much. A plan
+        that summed the legs and forgot the errands answered a whole visit late.
+        """
+
         arrival = _parse_datetime(arrival_time, timezone)
-        start = arrival - timedelta(seconds=float(duration_s))
+        stay_seconds = sum(float(value) for value in (stay_durations_s or []))
+        total = float(duration_s) + stay_seconds
+        start = arrival - timedelta(seconds=total)
         return {
             "arrival_time": arrival.isoformat(),
             "duration_s": float(duration_s),
+            "stay_duration_s": stay_seconds,
+            "total_duration_s": total,
             "start_time": start.isoformat(),
             "timezone": timezone,
         }

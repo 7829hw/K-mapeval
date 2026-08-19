@@ -258,7 +258,11 @@ class DirectionsArgs(BaseModel):
 
 class CalculateFinishTimeArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    start_time: str
+    # Exactly one of these. An itinerary is asked about in both directions — when do I get back,
+    # and when must I leave — and only running the clock forward left the reverse question to be
+    # assembled by hand from a scalar the planner had to sum itself, which it under-counted.
+    start_time: str | None = None
+    arrival_time: str | None = None
     locations: list[str | Place] = Field(min_length=1, max_length=30)
     stay_durations_s: list[float] = Field(default_factory=list, max_length=30)
     timezone: str = "Asia/Seoul"
@@ -279,6 +283,8 @@ class CalculateFinishTimeArgs(BaseModel):
     def validate_stays(self) -> CalculateFinishTimeArgs:
         if self.stay_durations_s and len(self.stay_durations_s) != len(self.locations):
             raise ValueError("stay_durations_s must be empty or match locations")
+        if bool(self.start_time) == bool(self.arrival_time):
+            raise ValueError("give exactly one of start_time or arrival_time")
         return self
 
 
@@ -728,7 +734,6 @@ class ToolRegistry:
         return places
 
     def _calculate_finish_time(self, args: CalculateFinishTimeArgs) -> dict[str, Any]:
-        start = _parse_datetime(args.start_time, args.timezone)
         stays = args.stay_durations_s or [0.0] * len(args.locations)
         route_evidence: list[dict[str, Any]] = []
         travel_seconds = 0
@@ -739,7 +744,13 @@ class ToolRegistry:
             travel_seconds += route.duration_s
             route_evidence.append(route.model_dump(mode="json"))
         stay_seconds = sum(float(value) for value in stays)
-        finish = start + timedelta(seconds=travel_seconds + stay_seconds)
+        total = timedelta(seconds=travel_seconds + stay_seconds)
+        if args.start_time:
+            start = _parse_datetime(args.start_time, args.timezone)
+            finish = start + total
+        else:
+            finish = _parse_datetime(str(args.arrival_time), args.timezone)
+            start = finish - total
         return {
             "start_time": start.isoformat(),
             "finish_time": finish.isoformat(),

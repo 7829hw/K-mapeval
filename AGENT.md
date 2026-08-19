@@ -234,7 +234,13 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   `location`, an enriched place still is that place (`Place` forbids the `distance_m` /
   `candidate_index` keys an operator staples on), and an anchor written as a name is that place
   named. Without this the artifact `_as_place` shrugs off failed as a `ValidationError` before any
-  tool ran, and the cascade emptied the rest of the graph.
+  tool ran, and the cascade emptied the rest of the graph. Three more of the same kind, each of
+  which cost whole questions: a list *inside* the list is the geocode node written where its
+  places belong (`locations: ["$places"]` → `[[rec, rec, rec, rec]]`), the mirror of the
+  one-element unwrap; `_duration_value` reads a clock's `duration_s` out of the route or tour a
+  planner passed instead of the number; and `_route_list` takes the `distance_matrix` node where
+  its `routes` list belongs. None of them supplies a measurement the run had not already made,
+  which is the line between shape and evidence.
 - **A place written as a name is the place the plan already resolved.** The local operators spend
   no API call by design, so a name is not something they can look up: `filter_by_direction` handed
   the four option texts instead of the four places the plan had just geocoded dropped every one of

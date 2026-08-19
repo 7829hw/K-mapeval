@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from datetime import datetime
 from typing import Any
 
 from src.agent.base import (
@@ -25,6 +26,7 @@ from src.agent.geoflow import (
 from src.llm import ChatClient, LLMUnavailableError
 from src.parsing import parse_answer, parse_json_object
 from src.tools import SpatialOperatorRegistry, ToolRegistry
+from src.tools.spatial import parse_clock_text
 
 SUPPORTED_INTENTS = frozenset(
     {"nearby", "poi", "routing", "trip", "type", "direction", "distance", "radius"}
@@ -491,7 +493,7 @@ class SpatialAgent(BenchmarkAgent):
             )
             reasoning_steps += 1
             evaluation_json = parse_json_object(evaluation.content)
-            predicted, selection = _select_option(evaluation_json, options)
+            predicted, selection = _select_option(evaluation_json, options, results)
             if predicted is None:
                 predicted = parse_answer(evaluation.content, option_count=len(options))
                 selection = "answer_marker" if predicted is not None else "unresolved"
@@ -718,14 +720,24 @@ def _name_key_for_match(value: str) -> str:
     return "".join(character for character in value.casefold() if character.isalnum())
 
 
+# "…를 차례로 둘러본 뒤 가예로 돌아옵니다" — the return is a leg the question states, not an
+# optional flourish, and a plan that stops at the last sight computes an arrival one drive short.
+_RETURN_PATTERNS = (
+    r"(?:으로|로)\s*돌아\s*(?:옵니다|온다|와야|가|옵)",
+    r"다시\s*\S+(?:으로|로)\s*(?:돌아|와)",
+)
+
+
+def _returns_to_start(question: str) -> bool:
+    return any(re.search(pattern, question) for pattern in _RETURN_PATTERNS)
+
+
 _TOUR_TOTAL_FIELDS = frozenset({"total_cost", ""})
 
 
 def _counts_its_own_stays(value: str, tour_totals: set[str]) -> bool:
-    """Is this a `tsp_tw` whole-tour cost with something added beside it?"""
+    """Does this reference a `tsp_tw` whole-tour cost, which already includes the stays?"""
 
-    if not _carries_written_sum(value):
-        return False
     parsed = reference_expression(canonical_reference(value))
     if parsed is None:
         return False
@@ -835,10 +847,11 @@ def _ground_graph_literals(
             duration = arguments.get("duration_s")
             if isinstance(duration, str) and duration.strip().startswith("$"):
                 if _counts_its_own_stays(duration, tour_totals):
-                    # `tsp_tw.total_cost` is the whole tour, stays included, so an added constant
-                    # beside it is the stays counted a second time — a whole visit, wider than the
-                    # gap between two options. The operator's contract says so regardless of what
-                    # the constant happens to equal, so drop the addition rather than match it.
+                    # `tsp_tw.total_cost` is the whole tour, stays included, so anything added
+                    # beside it counts every visit twice — a whole stay, wider than the gap
+                    # between two options. That is true of a written `+ 4500` and equally of the
+                    # stays bound here, so strip the one and withhold the other. The operator's
+                    # contract says so regardless of what any constant happens to equal.
                     arguments["duration_s"] = _sole_reference(duration) or duration
                     arguments.pop("stay_durations_s", None)
                 elif _carries_written_sum(duration):
@@ -879,6 +892,18 @@ def _ground_graph_literals(
                 itinerary = locations
             elif isinstance(locations, str) and len(trip_node_names) > 1:
                 itinerary = list(trip_node_names)
+            if itinerary and _returns_to_start(question):
+                # "…둘러본 뒤 X로 돌아옵니다" states a leg like any other, and the plan that drops
+                # it computes an arrival that is one drive short. The generation stage then knows
+                # the return is missing and invents an allowance for it, which lands an option
+                # away. Whether the plan already closed the loop is visible in the names.
+                first, last = _location_name(itinerary[0]), _location_name(itinerary[-1])
+                if first and _name_key_for_match(first) != _name_key_for_match(last):
+                    itinerary = [*itinerary, itinerary[0]]
+                    if isinstance(locations, list):
+                        arguments["locations"] = itinerary
+                    else:
+                        arguments["locations"] = [*trip_node_names, trip_node_names[0]]
             if stays and itinerary:
                 arguments["stay_durations_s"] = [
                     _stay_stated_for(question, _location_name(item)) for item in itinerary
@@ -1414,15 +1439,75 @@ def _is_shortened_name(candidate: str, expected: str) -> bool:
     return bool(candidate_key and candidate_key != expected_key and candidate_key in expected_key)
 
 
-def _select_option(payload: dict[str, Any], options: list[str]) -> tuple[int | None, str]:
+_CLOCK_OUTPUT_FIELDS = ("finish_time", "start_time")
+# The operators default to it and every question in these families is stated in it.
+_CLOCK_TIMEZONE = "Asia/Seoul"
+
+
+def _computed_clock_option(results: dict[str, Any] | None, options: list[str]) -> int | None:
+    """The option nearest the wall clock the graph computed, when there is exactly one."""
+
+    if not results or len(options) < 2:
+        return None
+    parsed_options = [parse_clock_text(option, _CLOCK_TIMEZONE) for option in options]
+    if any(option is None for option in parsed_options):
+        return None
+    # `calculate_finish_time` echoes the `start_time` it was given, so a result carrying both
+    # holds one answer and one input. The answer is the field the operator derived: a finish
+    # where there is one, a start otherwise. `arrival_time` is deliberately absent from the
+    # fields — it is the deadline the question states, never a computed value.
+    moments: dict[str, set[datetime]] = {field: set() for field in _CLOCK_OUTPUT_FIELDS}
+    for value in results.values():
+        if not isinstance(value, dict):
+            continue
+        for field in _CLOCK_OUTPUT_FIELDS:
+            if isinstance(value.get(field), str) and (
+                parsed := _clock_moment(str(value[field]))
+            ) is not None:
+                moments[field].add(parsed)
+    derived = next((moments[field] for field in _CLOCK_OUTPUT_FIELDS if moments[field]), set())
+    if len(derived) != 1:
+        # No computed clock, or two of them and no way to know which the question asked for.
+        return None
+    computed = next(iter(derived))
+    distances = [
+        abs((option.hour * 60 + option.minute) - (computed.hour * 60 + computed.minute))
+        for option in parsed_options
+        if option is not None
+    ]
+    return min(range(len(distances)), key=distances.__getitem__)
+
+
+def _clock_moment(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return parse_clock_text(value, _CLOCK_TIMEZONE)
+
+
+def _select_option(
+    payload: dict[str, Any],
+    options: list[str],
+    results: dict[str, Any] | None = None,
+) -> tuple[int | None, str]:
     """Reconcile the generated answer text with the generated index.
 
     Upstream Spatial-Agent selects on the answer *text* and derives the index from it, because
     a model that names the right candidate can still miscount its position. Exact text wins,
     the declared index is the next authority, and a single containment match is the last
     resort.
+
+    A clock the operators computed outranks all three. When every option is a wall-clock time and
+    the graph produced exactly one, the generation stage's job is to report that time, not to
+    revise it — and revising is what it did: a trace reading 14:40 was answered as 16:33
+    "accounting for real-world traffic, parking, and navigation variations", and one reading
+    13:36 as 15:46 for an "unrecorded return trip". Both adjustments are invented evidence, and
+    both moved the answer exactly one option.
     """
 
+    computed = _computed_clock_option(results, options)
+    if computed is not None:
+        return computed, "computed_clock"
     text = payload.get("predicted_answer")
     exact = _match_option_text(text, options, strict=True) if isinstance(text, str) else None
     if exact is not None:

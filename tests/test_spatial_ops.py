@@ -1448,3 +1448,133 @@ def test_the_itinerary_carries_its_stays_even_when_it_is_a_reference() -> None:
     ]
     grounded = _ground_graph_literals(steps, question, [], "trip")
     assert grounded[-1]["arguments"]["stay_durations_s"] == [0.0, 3600.0, 5400.0, 3600.0, 0.0]
+
+
+def test_a_computed_clock_outranks_the_answer_the_generation_stage_wrote() -> None:
+    """When the graph produced the time, reporting it is the generation stage's whole job.
+
+    Revising is what it did instead: a trace reading 14:40 came back as 16:33 "accounting for
+    real-world traffic, parking, and navigation variations", and one reading 13:36 as 15:46 for
+    an "unrecorded return trip". Both are invented evidence and both moved the answer one option.
+    """
+
+    from src.agent.spatial import _select_option
+
+    options = ["오후 5시 41분", "오후 4시 46분", "오후 3시 46분", "오후 2시 21분"]
+    # `calculate_finish_time` echoes the start it was given, so the result carries both fields;
+    # the answer is the one it derived.
+    results = {
+        "trip": {
+            "start_time": "2026-08-19T09:00:00+09:00",
+            "finish_time": "2026-08-19T13:36:04+09:00",
+        }
+    }
+    assert _select_option(
+        {"predicted_answer": "오후 3시 46분", "predicted_option": 2}, options, results
+    ) == (3, "computed_clock")
+
+    # `arrival_time` is the deadline the question states, never a computed value.
+    reverse = {
+        "start": {
+            "arrival_time": "2024-01-01T17:00:00+09:00",
+            "start_time": "2024-01-01T13:56:13+09:00",
+        }
+    }
+    reverse_options = ["오후 1시 52분", "오후 12시 17분", "오전 10시 42분", "오후 3시 27분"]
+    assert _select_option({"predicted_answer": "오후 12시 17분"}, reverse_options, reverse) == (
+        0,
+        "computed_clock",
+    )
+
+    # Without a computed clock, or with options that are not clocks, the old path decides.
+    no_clock: dict[str, object] = {"x": {"nearest": {}}}
+    assert _select_option({"predicted_answer": "오후 3시 46분"}, options, no_clock) == (
+        2,
+        "exact_answer_text",
+    )
+    assert _select_option({"predicted_answer": "2번"}, ["1번", "2번", "3번"], results) == (
+        1,
+        "exact_answer_text",
+    )
+
+
+def test_a_bare_tour_total_is_not_topped_up_with_stays_either() -> None:
+    """`$tsp.total_cost` carries the stays whether or not the planner also wrote an addition."""
+
+    from src.agent.spatial import _ground_graph_literals
+
+    question = (
+        "중계동학원가에서 오후 5시 00분에 약속이 있습니다. 가는 길에 킴스클럽 강남점에서 45분, "
+        "메가MGC커피 상계주공6단지점에서 45분씩 들러야 하고, 이동은 모두 자동차로 가장 빠른 "
+        "경로를 이용합니다. 미아역 4호선에서 늦어도 몇 시에 출발해야 하나요?"
+    )
+    names = ["미아역 4호선", "킴스클럽 강남점", "메가MGC커피 상계주공6단지점", "중계동학원가"]
+    steps = [
+        {
+            "id": "g",
+            "operator": "batch_geocode",
+            "arguments": {"place_names": names},
+            "role": "extent",
+        },
+        {
+            "id": "tsp",
+            "operator": "tsp_tw",
+            "arguments": {
+                "nodes": "$g",
+                "distance_matrix": "$m",
+                "service_times": [0, 2700, 2700, 0],
+                "start_index": 0,
+            },
+            "depends_on": ["g"],
+            "role": "support",
+        },
+        {
+            "id": "st",
+            "operator": "calculate_start_time",
+            "arguments": {
+                "arrival_time": "2024-01-01T17:00:00",
+                "duration_s": "$tsp.total_cost",
+            },
+            "depends_on": ["tsp"],
+            "role": "measure",
+        },
+    ]
+    grounded = _ground_graph_literals(steps, question, [], "trip")
+    assert grounded[1]["arguments"]["end_index"] == 3
+    assert "stay_durations_s" not in grounded[2]["arguments"]
+
+
+def test_a_stated_return_leg_is_part_of_the_itinerary() -> None:
+    """"…둘러본 뒤 X로 돌아옵니다" is a leg, and a plan that drops it arrives one drive early."""
+
+    from src.agent.spatial import _ground_graph_literals
+
+    question = (
+        "오전 9시 00분에 동산장모텔에서 자동차로 출발해 투모로우바이투게더숲을 1시간, "
+        "경복궁 연생전을 1.5시간, 한승수 유엔홀을 1시간 동안 차례로 둘러본 뒤 동산장모텔로 "
+        "돌아옵니다. 몇 시에 돌아오게 되나요?"
+    )
+    open_names = ["동산장모텔", "투모로우바이투게더숲", "경복궁 연생전", "한승수 유엔홀"]
+    steps = [
+        {
+            "id": "p",
+            "operator": "batch_geocode",
+            "arguments": {"place_names": open_names},
+            "role": "extent",
+        },
+        {
+            "id": "t",
+            "operator": "calculate_finish_time",
+            "arguments": {"start_time": "09:00", "locations": "$p"},
+            "depends_on": ["p"],
+            "role": "measure",
+        },
+    ]
+    grounded = _ground_graph_literals(steps, question, [], "trip")
+    assert grounded[-1]["arguments"]["locations"] == [*open_names, "동산장모텔"]
+    assert grounded[-1]["arguments"]["stay_durations_s"] == [0.0, 3600.0, 5400.0, 3600.0, 0.0]
+
+    # A plan that already closed the loop is left exactly as it is.
+    steps[0]["arguments"]["place_names"] = [*open_names, "동산장모텔"]
+    grounded = _ground_graph_literals(steps, question, [], "trip")
+    assert grounded[-1]["arguments"]["locations"] == "$p"

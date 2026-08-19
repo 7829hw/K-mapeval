@@ -2,7 +2,42 @@ from __future__ import annotations
 
 import pytest
 
-from src.tools.spatial import SpatialOperatorRegistry
+from src.models import Place, Route
+from src.tools.map import MapProvider
+from src.tools.registry import ToolRegistry
+from src.tools.spatial import SpatialOperatorRegistry, build_duration_matrix
+
+
+class _MatrixProvider(MapProvider):
+    """A provider that answers each pair with its own endpoints, so a matrix has distinct cells."""
+
+    _COORDS = {"S": (37.55, 126.97), "A": (37.56, 126.98), "B": (37.57, 126.99)}
+
+    @property
+    def api_call_count(self) -> int:
+        return 0
+
+    def _place(self, name: str) -> Place:
+        latitude, longitude = self._COORDS.get(name, (37.5, 127.0))
+        return Place(place_id=name, name=name, latitude=latitude, longitude=longitude)
+
+    def search_place(self, query: str, *, limit: int = 5) -> list[Place]:
+        return [self._place(query)]
+
+    def geocode(self, address: str, *, limit: int = 5) -> list[Place]:
+        return [self._place(address)]
+
+    def nearby_search(self, center, **_) -> list[Place]:  # type: ignore[no-untyped-def]
+        return []
+
+    def place_details(self, place_id: str) -> Place:
+        return self._place(place_id)
+
+    def directions(self, origin, destination, **_):  # type: ignore[no-untyped-def]
+        start = origin.name if isinstance(origin, Place) else str(origin)
+        end = destination.name if isinstance(destination, Place) else str(destination)
+        seconds = 60 * (abs(ord(start[0]) - ord(end[0])) + 1)
+        return Route(origin=start, destination=end, distance_m=seconds * 10, duration_s=seconds)
 
 
 def test_haversine_and_bearing() -> None:
@@ -161,3 +196,404 @@ def test_a_direction_filter_drops_the_centre_it_measures_from() -> None:
         "filter_by_direction", {"center": centre, "places": [centre, south], "direction": "남쪽"}
     )
     assert [place["name"] for place in matches] == ["Seoul Namsan Elementary School"]
+
+
+def test_tsp_tw_consumes_a_distance_matrix_node() -> None:
+    """The trip path only exists if these two operators compose.
+
+    `distance_matrix` returns `{"routes": [...]}` and `tsp_tw` reads a square matrix. While the
+    two did not meet, the only matrix a planner could pass was one it made up, so the paper's
+    flagship trip capability was unreachable however well the planner was prompted.
+    """
+
+    registry = ToolRegistry(_MatrixProvider())
+    matrix_node = registry.invoke(
+        "distance_matrix",
+        {"origins": ["S", "A", "B"], "destinations": ["S", "A", "B"]},
+    )
+    assert matrix_node.status == "ok", matrix_node.error
+    assert matrix_node.output["matrix_complete"] is True
+    assert matrix_node.output["nodes"] == ["S", "A", "B"]
+
+    operators = SpatialOperatorRegistry()
+    plan = operators.invoke(
+        "tsp_tw",
+        {
+            "nodes": [{"name": name} for name in matrix_node.output["nodes"]],
+            "distance_matrix": matrix_node.output,
+            "service_times": [0, 600, 600],
+            "time_budget": 100_000,
+            "start_index": 0,
+        },
+    )
+    assert plan["feasible"] is True
+    assert plan["order"][0] == 0
+    assert sorted(plan["order"]) == [0, 1, 2]
+
+
+def test_a_matrix_missing_a_leg_is_reported_rather_than_filled() -> None:
+    """An absent leg is missing evidence, not a zero-cost hop."""
+
+    built = build_duration_matrix(
+        [
+            {"origin": "S", "destination": "A", "duration_s": 60, "status": "ok"},
+            {"origin": "A", "destination": "S", "duration_s": 60, "status": "ok"},
+            {"origin": "S", "destination": "B", "status": "error", "error": "RouteNotFoundError"},
+        ]
+    )
+    assert built["complete"] is False
+    assert ["S", "B"] in built["missing_legs"]
+    operators = SpatialOperatorRegistry()
+    with pytest.raises(ValueError, match="square"):
+        operators.invoke(
+            "tsp_tw",
+            {"nodes": [{"name": n} for n in built["nodes"]], "distance_matrix": built},
+        )
+
+
+def test_distance_matrix_accepts_a_batch_geocode_node() -> None:
+    """`origins: "$places"` is the natural thing for a planner to write.
+
+    batch_geocode hands back {query, place, candidates} records, and rejecting that shape failed
+    the matrix before a single route was requested — which failed every tsp_tw downstream of it.
+    """
+
+    registry = ToolRegistry(_MatrixProvider())
+    geocoded = registry.invoke("batch_geocode", {"place_names": ["S", "A", "B"]})
+    assert geocoded.status == "ok", geocoded.error
+    matrix_node = registry.invoke(
+        "distance_matrix", {"origins": geocoded.output, "destinations": geocoded.output}
+    )
+    assert matrix_node.status == "ok", matrix_node.error
+    assert matrix_node.output["matrix_complete"] is True
+    assert len(matrix_node.output["nodes"]) == 3
+
+
+def test_operator_contract_outranks_a_planner_declared_output_type() -> None:
+    """A declared output_type is the planner's guess; the contract is the fact.
+
+    Failing the graph over the disagreement threw away plans whose every leg had been looked up.
+    """
+
+    from src.agent.geoflow import normalize_and_validate_graph
+
+    graph = {
+        "graph": [
+            {
+                "id": "places",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["A", "B"]},
+                "role": "extent",
+                "output_type": "object",
+            },
+            {
+                "id": "tsp",
+                "operator": "tsp_tw",
+                "arguments": {"nodes": "$places", "distance_matrix": [[0, 1], [1, 0]]},
+                "depends_on": ["places"],
+                "role": "measure",
+                "output_type": "object",  # wrong: tsp_tw outputs network
+            },
+        ]
+    }
+    steps, _ = normalize_and_validate_graph(graph, max_steps=10)
+    assert [step["output_type"] for step in steps] == ["object", "network"]
+
+
+@pytest.mark.parametrize(
+    ("written", "expected"),
+    [("fastest", "TIME"), ("SHORTEST", "DISTANCE"), ("recommend", "RECOMMEND"), ("TIME", "TIME")],
+)
+def test_route_priority_accepts_the_words_a_planner_reaches_for(
+    written: str, expected: str
+) -> None:
+    from src.tools.registry import DirectionsArgs
+
+    assert DirectionsArgs(origin="A", destination="B", priority=written).priority == expected
+
+
+def test_an_unrecognized_priority_is_left_to_fail() -> None:
+    """Leniency is about wording, not meaning: an unclear word must not become a silent default."""
+
+    from src.tools.registry import DirectionsArgs
+
+    assert DirectionsArgs(origin="A", destination="B", priority="scenic").priority == "scenic"
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("서울역 반경 600m 이내의 카페", 600),
+        ("서울역에서 직선거리 600m 이내에 있는 카페", 600),
+        ("서울역에서 800m 안에 있는 은행", 800),
+        ("서울역 반경 1.5km 이내", 1500),
+        ("서울역 근처 카페", 2000),
+    ],
+)
+def test_radius_is_read_from_ordinary_korean(question: str, expected: int) -> None:
+    """A radius is phrased several ways; recognizing one keyword silently used the default.
+
+    Every `직선거리 Nm 이내` row in the v2 benchmark was grounded at 2000 m instead of N.
+    """
+
+    from src.agent.spatial import _extract_radius_m
+
+    assert _extract_radius_m(question) == expected
+
+
+@pytest.mark.parametrize(
+    ("written", "expected"),
+    [
+        ("오전 10시 00분", (10, 0)),
+        ("오후 5시", (17, 0)),
+        ("오후 5시 30분", (17, 30)),
+        ("밤 11시 15분", (23, 15)),
+        ("오전 12시 30분", (0, 30)),
+        ("2026-08-19T09:00:00", (9, 0)),
+    ],
+)
+def test_temporal_operators_read_the_clock_their_questions_are_written_in(
+    written: str, expected: tuple[int, int]
+) -> None:
+    """A Korean question states a time in Korean, and a planner copies it verbatim.
+
+    Accepting only ISO 8601 made `calculate_finish_time` raise on the very wording of the
+    question it was meant to answer, and the agent then guessed the hour.
+    """
+
+    from src.tools.spatial import _parse_datetime
+
+    moment = _parse_datetime(written, "Asia/Seoul")
+    assert (moment.hour, moment.minute) == expected
+
+
+def test_finish_time_accepts_a_korean_start_time() -> None:
+    registry = ToolRegistry(_MatrixProvider())
+    execution = registry.invoke(
+        "calculate_finish_time",
+        {
+            "start_time": "오전 9시 00분",
+            "locations": ["S", "A", "B"],
+            "stay_durations_s": [0, 3600, 0],
+            "timezone": "Asia/Seoul",
+        },
+    )
+    assert execution.status == "ok", execution.error
+    assert execution.output["finish_time"].endswith("+09:00")
+
+
+def test_an_inferred_place_type_grounds_the_retrieval() -> None:
+    """A need-shaped question names no category, so the Analysis stage supplies it.
+
+    Without the inferred type the retrieval and the option recovery both lose their category,
+    and the ranking answers "nearest of anything" — which is a closer place of the wrong kind.
+    """
+
+    from src.agent.spatial import _ground_graph_literals
+
+    question = (
+        "지금 단막극장에 있습니다. 갑자기 비가 쏟아져서 우산을 사야 합니다. 가장 가까운 곳은?"
+    )
+    plan = [
+        {
+            "id": "anchor",
+            "operator": "batch_geocode",
+            "arguments": {"place_names": ["단막극장"]},
+            "role": "extent",
+        },
+        {
+            "id": "near",
+            "operator": "nearby_places",
+            "arguments": {"center": "$anchor.0.place"},
+            "depends_on": ["anchor"],
+            "role": "support",
+        },
+        {
+            "id": "recover",
+            "operator": "recover_option_places",
+            "arguments": {"options": [], "candidates": "$near", "anchor": "$anchor.0.place"},
+            "depends_on": ["near"],
+            "role": "support",
+        },
+    ]
+
+    bare = _ground_graph_literals(plan, question, ["A", "B"], "nearby")
+    assert all(
+        step["arguments"].get("category_code") is None
+        for step in bare
+        if step["operator"] in {"nearby_places", "recover_option_places"}
+    )
+
+    grounded = _ground_graph_literals(
+        plan, question, ["A", "B"], "nearby", inferred_type="편의점"
+    )
+    codes = {
+        step["arguments"].get("category_code")
+        for step in grounded
+        if step["operator"] in {"nearby_places", "recover_option_places"}
+    }
+    assert codes == {"CS2"}
+
+
+@pytest.mark.parametrize(
+    ("question", "intent", "expected"),
+    [
+        ("지금 단막극장에 있습니다. 우산을 사야 합니다.", "nearby", "단막극장"),
+        ("현재 서울역에 있습니다.", "nearby", "서울역"),
+        ("경복궁에서 가장 가까운 카페 중", "nearby", "경복궁"),
+        ("서울생활사박물관에서 직선거리 600m 이내", "radius", "서울생활사박물관"),
+    ],
+)
+def test_the_anchor_is_found_however_the_question_states_it(
+    question: str, intent: str, expected: str
+) -> None:
+    from src.agent.spatial import _extract_anchor
+
+    assert _extract_anchor(question, intent) == expected
+
+
+def test_steps_analysis_splits_its_counts_at_the_landmark() -> None:
+    """"How many left turns before reaching X" needs a bounded count, not the route total.
+
+    With totals alone the only number available was the whole drive's, so the answer came back
+    confidently over-counted rather than as a missing capability.
+    """
+
+    operators = SpatialOperatorRegistry()
+    route = {
+        "steps": [
+            {"instruction": "출발지", "road_name": ""},
+            {"instruction": "좌회전", "road_name": "A로"},
+            {"instruction": "우회전", "road_name": "B로"},
+            {"instruction": "좌회전", "road_name": "왕십리로"},
+            {"instruction": "좌회전", "road_name": "C로"},
+            {"instruction": "좌회전", "road_name": "D로"},
+        ]
+    }
+    analysis = operators.invoke("steps_analysis", {"route": route, "landmark": "왕십리로"})
+    assert analysis["left_turn_count"] == 4
+    assert analysis["landmark_index"] == 3
+    assert analysis["left_turn_count_before_landmark"] == 1
+    assert analysis["left_turn_count_after_landmark"] == 2
+    assert analysis["right_turn_count_before_landmark"] == 1
+
+
+def test_steps_analysis_without_a_landmark_reports_only_totals() -> None:
+    operators = SpatialOperatorRegistry()
+    route = {"steps": [{"instruction": "좌회전", "road_name": "A로"}]}
+    analysis = operators.invoke("steps_analysis", {"route": route})
+    assert analysis["left_turn_count"] == 1
+    assert analysis["landmark_index"] is None
+    assert "left_turn_count_before_landmark" not in analysis
+
+
+def test_nearest_respects_the_kind_of_place_that_was_asked_for() -> None:
+    """A ranking that ignores the kind returns the closest place of the wrong kind.
+
+    Bound in grounding rather than requested in the prompt: a planner that ranks the option texts
+    directly builds no retrieval to carry the category, and prose alone did not change that.
+    """
+
+    operators = SpatialOperatorRegistry()
+    anchor = {"place_id": "a", "name": "앵커", "latitude": 37.5, "longitude": 127.0}
+    candidates = [
+        {
+            "place_id": "1",
+            "name": "대학로 주차장",
+            "category": "교통,수송 > 주차장",
+            "latitude": 37.5001,
+            "longitude": 127.0,
+        },
+        {
+            "place_id": "2",
+            "name": "카페더블린",
+            "category": "음식점 > 카페",
+            "latitude": 37.5002,
+            "longitude": 127.0,
+        },
+        {
+            "place_id": "3",
+            "name": "CU 동숭아트점",
+            "category": "가정,생활 > 편의점 > CU",
+            "latitude": 37.5005,
+            "longitude": 127.0,
+        },
+    ]
+
+    bare = operators.invoke("nearest", {"anchor": anchor, "candidates": candidates})
+    assert bare["nearest"]["name"] == "대학로 주차장"
+
+    typed = operators.invoke(
+        "nearest", {"anchor": anchor, "candidates": candidates, "required_type": "편의점"}
+    )
+    assert typed["nearest"]["name"] == "CU 동숭아트점"
+
+    # A category vocabulary gap must not empty the ranking: no match means no constraint.
+    absent = operators.invoke(
+        "nearest", {"anchor": anchor, "candidates": candidates, "required_type": "지하철역"}
+    )
+    assert absent["nearest"]["name"] == "대학로 주차장"
+
+
+def test_grounding_binds_the_required_type_onto_nearest() -> None:
+    from src.agent.spatial import _ground_graph_literals
+
+    plan = [
+        {
+            "id": "options",
+            "operator": "batch_geocode",
+            "arguments": {"place_names": ["A", "B"]},
+            "role": "extent",
+        },
+        {
+            "id": "pick",
+            "operator": "nearest",
+            "arguments": {"anchor": "단막극장", "candidates": "$options"},
+            "depends_on": ["options"],
+            "role": "measure",
+        },
+    ]
+    question = "지금 단막극장에 있습니다. 우산을 사야 합니다. 가장 가까운 곳은?"
+
+    bare = _ground_graph_literals(plan, question, ["A", "B"], "nearby")
+    assert all(
+        step["arguments"].get("required_type") is None
+        for step in bare
+        if step["operator"] == "nearest"
+    )
+
+    grounded = _ground_graph_literals(
+        plan, question, ["A", "B"], "nearby", inferred_type="편의점"
+    )
+    assert [
+        step["arguments"]["required_type"] for step in grounded if step["operator"] == "nearest"
+    ] == ["편의점"]
+
+
+@pytest.mark.parametrize(
+    ("required", "category", "matches"),
+    [
+        ("지하철역", "교통,수송 > 지하철,전철 > 수도권9호선", True),
+        ("대형마트", "가정,생활 > 슈퍼마켓 > 대형슈퍼 > 노브랜드", True),
+        ("은행", "금융,보험 > 금융서비스 > 은행 > ATM", True),
+        ("편의점", "가정,생활 > 편의점 > CU", True),
+        ("편의점", "음식점 > 카페", False),
+        # 이마트24 is a convenience store; a loose "마트" term let it answer a 대형마트 question.
+        ("대형마트", "가정,생활 > 편의점 > 이마트24", False),
+        ("편의점", "가정,생활 > 편의점 > 이마트24", True),
+    ],
+)
+def test_a_requested_kind_matches_what_kakao_calls_it(
+    required: str, category: str, matches: bool
+) -> None:
+    """A question says 지하철역; Kakao files it under 지하철,전철.
+
+    Matching only the question's own noun emptied the filter, which then fell back to the whole
+    list — indistinguishable from having no constraint at all.
+    """
+
+    from src.tools.spatial import category_terms
+
+    haystack = category.casefold()
+    hit = any(term.casefold() in haystack for term in category_terms(required))
+    assert hit is matches

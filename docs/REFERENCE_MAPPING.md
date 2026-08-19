@@ -21,6 +21,7 @@
 | Spatial-Agent evaluator/generator | Spatial-Agent `evaluate` and `generate` | The LLM conditions on question, final state, and full trace. Deterministic match evidence no longer overwrites the generated selection. |
 | Google Maps client | `KakaoMapProvider` | Kakao Local handles search/geocode/reverse-geocode/nearby; Kakao Mobility handles driving and verified multi-waypoint routes with optional guides. |
 | Spatial-Agent context cache | `SQLiteMapCache` | Both agents share one normalized Kakao cache. The upstream MapEval-Textual/Google context snapshot is not bundled. |
+| MapEval-API benchmark (300 rows, live Google Maps) | `dataset/seoul_kmapeval_v2_mcq_100.jsonl` (100 rows, live Kakao) | Class mix mirrors MapEval-API's answerable half (nearby 30 / trip 24 / routing 23 / poi 23) so the multi-hop families the paper's gains come from are actually present. Gold answers are computed from Kakao Local and Kakao Mobility, the same provider the agents query. `unanswerable` is excluded — see below. |
 | SFT and DPO | Not implemented | This repository evaluates the off-the-shelf prompting path and does not claim fine-tuned Qwen results. |
 
 ## Remaining non-equivalences
@@ -33,8 +34,10 @@
 - Kakao Mobility support is driving-only.
 - The benchmark router uses the LLM analysis intent; Korean heuristics are only a fallback when the
   returned intent is missing or unsupported.
-- The bundled MCQ trip format primarily evaluates option-order comparison. `tsp_tw` is available
-  for true free-order plans but is not silently substituted for option semantics.
+- The MCQ trip format evaluates option-order comparison, as MapEval's does. `trip_optimal_order`
+  offers four orderings whose travel totals differ by at least 180 s, and `trip_feasible_count`
+  asks how many stops fit a budget; both are re-derived through `distance_matrix` + `tsp_tw` in
+  `data/verify_benchmark.py`. `tsp_tw` is still never silently substituted for option semantics.
 - Kakao Local exposes phone and Kakao URL but not rating, price level, or structured opening hours.
   These optional `Place` fields can only be used when an authoritative enriched cache supplies them;
   missing values are never invented.
@@ -182,3 +185,98 @@ Deliberate deviations from upstream, and the reason for each:
   `strip_location_qualifier` drops the appended address before any name comparison or keyword
   query, and `_search_key` folds the two institution words together. Upstream needs neither: its
   option texts are bare names over a single naming authority.
+
+## What MapEval's own answer encoding turned out to be
+
+Measured directly on `MapEval-API.jsonl` (300 rows), because it decides what can be ported:
+
+- **`answer` is 1-based.** The distribution over all 300 rows is `{1: 74, 2: 73, 3: 71, 4: 62,
+  0: 20}`, and the twenty `0`s are exactly the twenty `unanswerable` rows. `0` is a sentinel
+  meaning *no option is right*, not an index. This repository's contract is 0-based throughout
+  (`^^N^^`), so any port of a MapEval row must shift the index and drop the sentinel.
+- **`unanswerable` is therefore a refusal channel, not a class of question.** It is excluded from
+  `dataset/seoul_kmapeval_v2_mcq_100.jsonl`: mapping the sentinel onto a real option index would
+  make "always answer the first option" score 20/20 on it, and the MCQ format has nowhere to put
+  a refusal. Adding it would mean adding an answer channel to `parse_answer`, the evaluator, and
+  both agents — a separate change, not a dataset one.
+- **MapEval-API is MapEval-Textual minus `context`.** Same 300 ids, 297 identical question
+  strings, and `MapEval-Textual.jsonl`'s key set is API's plus `context`. A cache built from
+  Textual and queried by API is therefore question-for-question an answer key, which is why
+  `ContextMapProvider` computes retrievals over the whole corpus instead of replaying the stored
+  block (see above).
+- **The ReAct baseline's budget is 30 tool rounds** (`max_tool_rounds: int = 30` in
+  `mapeval-api/mapeval_api_evaluator.py`). `MAX_REASONING_STEPS=30` matches it, which matters for
+  the trip family: a four-option ordering question needs twelve route legs, so a smaller budget
+  would make a ReAct loss a budget artifact rather than an architectural result.
+
+## Why the first Kakao run inverted the paper's result
+
+The first run of `dataset/seoul_kmapeval_v2_mcq_100.jsonl` against live Kakao gave ReAct 90/100 and
+Spatial-Agent 77/100 — the paper's ordering reversed, and worst on `trip` (ReAct 23/24 against
+Spatial-Agent 15/24), the family Spatial-Agent exists for. Four causes, three of them defects in
+this port rather than findings about the architecture:
+
+1. **`distance_matrix` and `tsp_tw` could not compose** (fixed). The tool returned
+   `{"routes": [...]}`; the operator read `distance_matrix["matrix"]`. No planner could bridge
+   that, so `tsp_tw` never ran on a real matrix and the trip questions were answered by summing
+   `directions` calls instead. See the invariant in `AGENT.md`.
+2. **`DistanceMatrixArgs.origins`/`destinations` rejected `batch_geocode` output** (fixed). A
+   planner writes `origins: "$places"`; the records are `{query, place, candidates}`, and every
+   other place argument in the registry already normalized that shape. Matrices failed with a
+   64-error `ValidationError` before a route was requested.
+3. **The `Route-Optimize` template taught an unexecutable pattern** (fixed). Its example carried a
+   hardcoded literal matrix and never showed where a matrix comes from, and `GRAPH_PROMPT`
+   separately told planners to answer trip questions with route pairs and `aggregate_route_groups`.
+   Together they steered the planner away from `tsp_tw` even when the right template was retrieved.
+   The prompt now describes the matrix-to-`tsp_tw` chain and the two trip question shapes.
+4. **Intent classification had no rule separating trip from routing, or poi from anything**
+   (fixed): 12 of 24 trip rows were classified `routing`, and `poi` was never predicted at all for
+   23 poi rows. After the prompt change, trip intent went from 11/24 to 23/23 on a re-run and trip
+   answers from 15/24 to 18/23.
+
+What is *not* a defect, and matters for reading any number from this benchmark: **its questions are
+explicit and closed.** They name the anchor exactly as Kakao stores it, name the category, state
+the radius, and enumerate the orderings to compare. One `batch_geocode` plus one `distance_matrix`
+answers a trip question, so a ReAct loop has one decision to get right where Spatial-Agent has
+four (intent, graph, bindings, generation). MapEval-API's questions are implicit and open — "I am
+at X and hungry, where can I eat quickly?" — and that is where decomposition earns its overhead.
+A benchmark of fully specified questions measures pipeline reliability, not composition, and should
+not be reported as evidence for or against the paper's claim on its own.
+
+## Why harder questions widened the gap instead of closing it
+
+`dataset/seoul_kmapeval_v3_mcq_100.jsonl` was built to test the three Appendix E families v2 never
+exercised — Time-Window-Reverse, Multi-Segment-Aggregate, Object-Field-Measure — on the assumption
+that compositional questions would let the operator graph earn its overhead. The first run went the
+other way: ReAct 92/100, Spatial-Agent 67/100, against 90/77 on the shallower v2. Spatial-Agent
+also issued **177 tool calls to ReAct's 400**, which is the tell: it was not failing to reason over
+the evidence, it was failing to fetch it.
+
+The losses were not spread across the compositional families. Five of seven were fine or close
+(`poi_bearing_and_distance` 14/14 both, `poi_brand_share` 14/14 both, `trip_latest_departure` 13/14
+against 14/14). Two collapsed, and each for a single mechanical reason:
+
+- **`trip_finish_time` 8/16.** The authored graph was already correct — `batch_geocode` then
+  `calculate_finish_time` with `stay_durations_s` of the right length. It failed on
+  `ValueError: Invalid isoformat string: '오전 10시 00분'`: the planner copied the time out of the
+  Korean question, and the temporal operators accepted only ISO 8601. `parse_clock_text`
+  (`src/tools/spatial.py`) now reads 오전/오후/아침/저녁/밤 with the 12-o'clock boundaries, and
+  `_parse_datetime` falls back to it, which fixes `calculate_start_time` on the same path.
+- **`nearby_from_need` 1/14.** Every wrong answer was the nearer decoy of the wrong kind the
+  family plants deliberately, so the category constraint was never applied. `normalize_analysis`
+  returned only `{intent, concepts, measure}`, so a place type the Analysis stage inferred from a
+  need was discarded before grounding could bind it; the retrieval then ran with no category and
+  the ranking answered "nearest of anything". Analysis now carries `target_type` and
+  `_ground_graph_literals` binds it when the question text names no type.
+
+A third defect was in the dataset rather than the port: two families were labelled by their
+Appendix E family instead of the intent the agent routes on, and `classification` *is*
+`SUPPORTED_INTENTS`. A question that searches a stated radius around one anchor is `radius`
+whatever macro family it exercises; the family stays in `template_id`. `Object-Field-Measure`
+gained `radius`/`nearby` intents so a neighbourhood-scoped share question can still retrieve it.
+
+The general lesson, and the reason these are recorded as invariants in `AGENT.md`: **a
+compositional question only gives structure a chance to pay off — any one stage that cannot read
+the question throws that chance away entirely.** Three separate extractors had been written
+against a single Korean phrasing each (`반경` only, `에서 가장 가까운` only, ISO 8601 only), and
+each silently disabled a whole family while every other stage worked.

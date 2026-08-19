@@ -3,16 +3,17 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import timedelta
 from difflib import SequenceMatcher
 from typing import Any, Literal
-from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from src.models import Place
 from src.tools.map import MapProvider, PlaceNotFoundError
 from src.tools.spatial import (
+    _parse_datetime,
+    build_duration_matrix,
     distinguishing_similarity,
     haversine_meters,
     strip_location_qualifier,
@@ -67,6 +68,27 @@ KAKAO_CATEGORY_ALIASES = {
 PLACE_FIELDS = frozenset(Place.model_fields)
 # Wrappers a planner reaches a place through instead of referencing the place itself.
 PLACE_WRAPPER_KEYS = ("place", "location", "nearest", "center", "anchor")
+
+
+PRIORITY_SYNONYMS = {
+    "RECOMMEND": "RECOMMEND", "RECOMMENDED": "RECOMMEND", "DEFAULT": "RECOMMEND",
+    "BALANCED": "RECOMMEND", "OPTIMAL": "RECOMMEND", "BEST": "RECOMMEND",
+    "TIME": "TIME", "FASTEST": "TIME", "FAST": "TIME", "DURATION": "TIME", "QUICKEST": "TIME",
+    "DISTANCE": "DISTANCE", "SHORTEST": "DISTANCE", "SHORT": "DISTANCE",
+}
+
+
+def _as_priority(value: Any) -> Any:
+    """Accept the words a planner reaches for, but only where the meaning is unambiguous.
+
+    Kakao names its route priorities RECOMMEND/TIME/DISTANCE; an LLM writes "fastest" or
+    "shortest" and the whole node failed on the spelling. A word that does not clearly mean one
+    of the three is left alone so it still fails — this is leniency about wording, not meaning.
+    """
+
+    if isinstance(value, str):
+        return PRIORITY_SYNONYMS.get(value.strip().upper(), value)
+    return value
 
 
 def _as_place_argument(value: Any) -> Any:
@@ -215,6 +237,11 @@ class DirectionsArgs(BaseModel):
     )
     mode: str = Field(default="driving", description="MVP supports driving")
     priority: str = Field(default="RECOMMEND", description="RECOMMEND, TIME, or DISTANCE")
+
+    @field_validator("priority", mode="before")
+    @classmethod
+    def normalize_priority(cls, value: Any) -> Any:
+        return _as_priority(value)
     waypoints: list[str | Place] = Field(default_factory=list, max_length=30)
     include_steps: bool = False
 
@@ -237,6 +264,11 @@ class CalculateFinishTimeArgs(BaseModel):
     timezone: str = "Asia/Seoul"
     mode: str = "driving"
     priority: str = "TIME"
+
+    @field_validator("priority", mode="before")
+    @classmethod
+    def normalize_priority(cls, value: Any) -> Any:
+        return _as_priority(value)
 
     @field_validator("locations", mode="before")
     @classmethod
@@ -317,14 +349,32 @@ class RoutePair(BaseModel):
     destination: str | Place | None
     label: str | None = None
 
+    @field_validator("origin", "destination", mode="before")
+    @classmethod
+    def normalize_endpoint(cls, value: Any) -> Any:
+        return _as_place_argument(value)
+
 
 class DistanceMatrixArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
     origins: list[str | Place | None] | None = Field(default=None, max_length=15)
     destinations: list[str | Place | None] | None = Field(default=None, max_length=15)
     pairs: list[RoutePair] | None = Field(default=None, max_length=30)
+
+    @field_validator("origins", "destinations", mode="before")
+    @classmethod
+    def normalize_endpoints(cls, value: Any) -> Any:
+        # A planner naturally writes origins: "$places" and gets back batch_geocode's
+        # {query, place, candidates} records. Rejecting that shape here is what stopped every
+        # matrix — and with it every tsp_tw — on the trip questions.
+        return _as_place_list_argument(value)
     mode: str = "driving"
     priority: str = "RECOMMEND"
+
+    @field_validator("priority", mode="before")
+    @classmethod
+    def normalize_priority(cls, value: Any) -> Any:
+        return _as_priority(value)
 
     @model_validator(mode="after")
     def require_matrix_or_pairs(self) -> DistanceMatrixArgs:
@@ -648,9 +698,7 @@ class ToolRegistry:
         return places
 
     def _calculate_finish_time(self, args: CalculateFinishTimeArgs) -> dict[str, Any]:
-        zone = ZoneInfo(args.timezone)
-        start = datetime.fromisoformat(args.start_time)
-        start = start.replace(tzinfo=zone) if start.tzinfo is None else start.astimezone(zone)
+        start = _parse_datetime(args.start_time, args.timezone)
         stays = args.stay_durations_s or [0.0] * len(args.locations)
         route_evidence: list[dict[str, Any]] = []
         travel_seconds = 0
@@ -719,7 +767,17 @@ class ToolRegistry:
                         "error": f"{type(exc).__name__}: {exc}",
                     }
                 )
-        return {"routes": routes, "route_count": len(routes)}
+        # `tsp_tw` reads a square matrix, so emit one here as well: without it the trip path is
+        # only reachable by a planner inventing the numbers it is supposed to look up.
+        built = build_duration_matrix(routes)
+        return {
+            "routes": routes,
+            "route_count": len(routes),
+            "nodes": built["nodes"],
+            "matrix": built["matrix"] if built["complete"] else None,
+            "matrix_complete": built["complete"],
+            "missing_legs": built["missing_legs"],
+        }
 
     def _require_place(self, value: str | Place) -> Place:
         """Resolve a place reference a planner wrote as a name."""

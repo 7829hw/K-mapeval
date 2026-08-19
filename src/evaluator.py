@@ -270,6 +270,13 @@ class Evaluator:
                 "intent_correct": intent_correct,
                 "answer_correct": answer_correct,
                 "time": elapsed,
+                # Deltas read off the shared registry/provider around this question. Without them
+                # a report cannot say whether an answer came from the tools or from the model.
+                "tool_calls": result.tool_calls,
+                "api_calls": result.api_calls,
+                "cache_hits": result.cache_hits,
+                "cache_misses": result.cache_misses,
+                "reasoning_steps": result.reasoning_steps,
                 "error": error,
                 "failure_type": result.failure_type,
                 "attempts": 1,
@@ -317,6 +324,11 @@ class Evaluator:
             "intent_correct": False,
             "answer_correct": False,
             "time": elapsed,
+            "tool_calls": 0,
+            "api_calls": 0,
+            "cache_hits": 0,
+            "cache_misses": 0,
+            "reasoning_steps": 0,
             "error": error,
             "failure_type": failure_type,
             "attempts": attempts,
@@ -407,6 +419,12 @@ def calculate_statistics(results: list[dict[str, Any]]) -> dict[str, Any]:
             # Questions that ran out of patience rather than out of evidence. Reported as a plain
             # count: it belongs in the write-up next to the accuracy, not in a verdict here.
             "llm_unavailable_count": failure_types[INFRASTRUCTURE_FAILURE],
+            # Summed over the questions, so a run can be read as "how much did it look up".
+            "tool_calls": sum(int(row.get("tool_calls") or 0) for row in results),
+            "api_calls": sum(int(row.get("api_calls") or 0) for row in results),
+            "cache_hits": sum(int(row.get("cache_hits") or 0) for row in results),
+            "cache_misses": sum(int(row.get("cache_misses") or 0) for row in results),
+            "reasoning_steps": sum(int(row.get("reasoning_steps") or 0) for row in results),
         },
     }
 

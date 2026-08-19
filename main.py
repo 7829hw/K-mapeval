@@ -21,7 +21,14 @@ def build_parser() -> argparse.ArgumentParser:
         default="both",
         help="Agent architecture to evaluate (default: both)",
     )
-    result.add_argument("--dataset", default="dataset/seoul_mapeval_v1_mcq_100.jsonl")
+    result.add_argument(
+        "--dataset",
+        default="dataset/seoul_kmapeval_v2_mcq_100.jsonl",
+        help=(
+            "Benchmark to evaluate. The default is the Kakao-grounded reproduction benchmark; "
+            "the context-cache benchmark is dataset/seoul_mapeval_v1_mcq_100.jsonl."
+        ),
+    )
     result.add_argument(
         "--provider",
         choices=("auto", "context", "hybrid", "kakao"),

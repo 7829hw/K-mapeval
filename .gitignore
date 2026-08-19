@@ -15,6 +15,9 @@ logs/
 data/*.db
 data/*.db-shm
 data/*.db-wal
+# A 12k-record bulk extract of Kakao Local, rebuilt by data/build_pool.py. The benchmark rows
+# derived from it ship; the extract itself does not, for the same reason the cache does not.
+data/seoul_kakao_pool.json
 *.swp
 *.swo
 *~

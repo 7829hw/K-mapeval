@@ -198,9 +198,27 @@ class SpatialOperatorRegistry:
         candidates: Any,
         metric: str = "haversine",
         routes: list[dict[str, Any]] | dict[str, Any] | None = None,
+        required_type: str | None = None,
     ) -> dict[str, Any]:
         anchor = _as_place(anchor, "anchor")
         resolved = _excluding_self(anchor, _as_place_list(candidates))
+        if required_type:
+            # The kind asked for decides the answer, and a ranking that ignores it returns the
+            # closest place of the wrong kind — which is exactly what a mixed candidate list
+            # offers. Kept as a filter, not a requirement: a candidate set that matches nothing
+            # is a vocabulary gap in the category strings, not evidence that nothing qualifies.
+            terms = [term.casefold() for term in category_terms(required_type)]
+            typed = [
+                (index, candidate)
+                for index, candidate in resolved
+                if any(
+                    term
+                    in f"{candidate.get('category', '')} {candidate.get('name', '')}".casefold()
+                    for term in terms
+                )
+            ]
+            if typed:
+                resolved = typed
         if metric == "haversine":
             ranked = [
                 {
@@ -354,19 +372,40 @@ class SpatialOperatorRegistry:
             if re.search(r"회전교차로|로터리|roundabout", str(step.get("instruction", "")), re.I)
         ]
         after_landmark = None
+        landmark_index = None
         if landmark:
-            for index, step in enumerate(steps[:-1]):
+            for index, step in enumerate(steps):
                 text = f"{step.get('instruction', '')} {step.get('road_name', '')}"
                 if landmark.casefold() in text.casefold():
-                    after_landmark = steps[index + 1]
+                    landmark_index = index
+                    after_landmark = steps[index + 1] if index + 1 < len(steps) else None
                     break
-        return {
+        result = {
             "step_count": len(steps),
             "left_turn_count": len(left),
             "right_turn_count": len(right),
             "roundabout_exit_count": len(roundabouts),
             "instruction_after_landmark": after_landmark,
+            "landmark_index": landmark_index,
         }
+        if landmark_index is None:
+            return result
+
+        # A drive is often asked about in halves — "how many left turns *before* I reach X". With
+        # totals alone the only available number is the whole route's, which reads as a confident
+        # over-count rather than as a missing capability.
+        def _count(window: list[dict[str, Any]], pattern: str) -> int:
+            return sum(1 for step in window if re.search(pattern, str(step.get("instruction", ""))))
+
+        before, after = steps[:landmark_index], steps[landmark_index + 1 :]
+        for label, window in (("before", before), ("after", after)):
+            result[f"step_count_{label}_landmark"] = len(window)
+            result[f"left_turn_count_{label}_landmark"] = _count(window, "좌회전")
+            result[f"right_turn_count_{label}_landmark"] = _count(window, "우회전")
+            result[f"roundabout_exit_count_{label}_landmark"] = _count(
+                window, r"회전교차로|로터리|roundabout"
+            )
+        return result
 
     @staticmethod
     def sum_route_metrics(routes: list[dict[str, Any]]) -> dict[str, int]:
@@ -729,12 +768,8 @@ class SpatialOperatorRegistry:
         start_index: int = 0,
         time_budget: float | None = None,
     ) -> dict[str, Any]:
-        matrix = (
-            distance_matrix.get("matrix")
-            if isinstance(distance_matrix, dict)
-            else distance_matrix
-        )
-        if not isinstance(matrix, list) or len(matrix) != len(nodes):
+        matrix = _matrix_argument(distance_matrix, len(nodes))
+        if matrix is None:
             raise ValueError("tsp_tw distance_matrix must be square and match nodes")
         if len(nodes) > 9:
             raise ValueError("Deterministic tsp_tw supports at most 9 nodes")
@@ -790,6 +825,109 @@ class SpatialOperatorRegistry:
             "fallback_used": True,
             "unvisited": sorted(remaining),
         }
+
+
+# What a kind of place is called in a question is not what Kakao calls it in a category path:
+# a subway station is filed under 지하철,전철, a 대형마트 under 슈퍼마켓 > 대형슈퍼. Matching the
+# question's noun alone silently emptied the filter for those, which then fell back to the whole
+# unfiltered list — the same wrong answer as having no constraint. Terms observed in Kakao's own
+# category strings, not invented.
+CATEGORY_ALIASES: dict[str, tuple[str, ...]] = {
+    "지하철역": ("지하철", "전철"),
+    "역": ("지하철", "전철"),
+    # Never a bare "마트": Kakao files 이마트24 as 가정,생활 > 편의점 > 이마트24, so the loose
+    # term let a convenience-store brand answer a 대형마트 question. Only the words the
+    # taxonomy itself uses at the type level.
+    "대형마트": ("대형마트", "대형슈퍼", "슈퍼마켓"),
+    "마트": ("대형마트", "대형슈퍼", "슈퍼마켓"),
+    "은행": ("은행", "금융"),
+    "편의점": ("편의점",),
+    "약국": ("약국",),
+    "주유소": ("주유소", "충전소"),
+    "카페": ("카페",),
+    "병원": ("병원", "의원", "의료"),
+    "주차장": ("주차장", "교통시설"),
+    "음식점": ("음식점", "한식", "분식"),
+    "학교": ("학교",),
+    "숙박시설": ("숙박",),
+    "관광명소": ("관광", "명소"),
+    "문화시설": ("문화시설", "영화", "공연"),
+}
+
+
+def category_terms(required_type: str) -> tuple[str, ...]:
+    """The strings that identify a requested kind of place inside a Kakao category path."""
+
+    key = "".join(required_type.split()).casefold()
+    for noun, terms in CATEGORY_ALIASES.items():
+        if key == noun.casefold():
+            return terms
+    return (required_type,)
+
+
+def build_duration_matrix(routes: Any) -> dict[str, Any]:
+    """Turn a `distance_matrix` route list into the square matrix `tsp_tw` consumes.
+
+    Without this the paper's flagship trip path is unreachable: `distance_matrix` returns
+    `{"routes": [...]}` and `tsp_tw` reads `distance_matrix["matrix"]`, so the only matrix a
+    planner could supply was one it invented. Legs are keyed by the endpoint labels the routes
+    carry, and a matrix missing any off-diagonal leg is reported as incomplete rather than
+    silently filled — an absent leg is missing evidence, not a zero-cost hop.
+    """
+
+    if isinstance(routes, dict):
+        routes = routes.get("routes", routes)
+    entries = [entry for entry in (routes or []) if isinstance(entry, dict)]
+    labels: list[str] = []
+    for entry in entries:
+        for key in ("origin", "destination"):
+            label = entry.get(key)
+            if isinstance(label, str) and label and label not in labels:
+                labels.append(label)
+    size = len(labels)
+    index_of = {label: index for index, label in enumerate(labels)}
+    matrix: list[list[float | None]] = [
+        [0.0 if row == column else None for column in range(size)] for row in range(size)
+    ]
+    for entry in entries:
+        if entry.get("status") not in (None, "ok"):
+            continue
+        row = index_of.get(str(entry.get("origin")))
+        column = index_of.get(str(entry.get("destination")))
+        if row is None or column is None or row == column:
+            continue
+        duration = entry.get("duration_s")
+        if duration is None:
+            continue
+        matrix[row][column] = float(duration)
+    missing = [
+        [labels[row], labels[column]]
+        for row in range(size)
+        for column in range(size)
+        if row != column and matrix[row][column] is None
+    ]
+    return {"nodes": labels, "matrix": matrix, "missing_legs": missing, "complete": not missing}
+
+
+def _matrix_argument(value: Any, node_count: int) -> list[list[float]] | None:
+    """Accept the shapes a planner can actually produce for `tsp_tw.distance_matrix`."""
+
+    candidate: Any = value
+    if isinstance(value, dict):
+        candidate = value.get("matrix")
+        if candidate is None and "routes" in value:
+            built = build_duration_matrix(value)
+            candidate = built["matrix"] if built["complete"] else None
+    if isinstance(value, list) and value and isinstance(value[0], dict):
+        built = build_duration_matrix(value)
+        candidate = built["matrix"] if built["complete"] else None
+    if not isinstance(candidate, list) or len(candidate) != node_count:
+        return None
+    if any(not isinstance(row, list) or len(row) != node_count for row in candidate):
+        return None
+    if any(cell is None for row in candidate for cell in row):
+        return None
+    return [[float(cell) for cell in row] for row in candidate]
 
 
 def _path(value: dict[str, Any], path: str) -> Any:
@@ -1050,9 +1188,49 @@ def _name_key(value: str) -> str:
     return "".join(character for character in value if character.isalnum())
 
 
-def _parse_datetime(value: str, timezone: str) -> datetime:
-    parsed = datetime.fromisoformat(value)
+# A Korean question states a time in Korean, so a planner copies "오전 10시 00분" straight out of
+# it. Accepting only ISO 8601 meant the temporal operators could never be driven from the very
+# question they were meant to answer — the tool raised and the agent fell back to guessing.
+_KOREAN_CLOCK = re.compile(r"(오전|오후|아침|저녁|밤)?\s*(\d{1,2})\s*시(?:\s*(\d{1,2})\s*분)?")
+
+
+def parse_clock_text(
+    value: str, timezone: str, *, reference: datetime | None = None
+) -> datetime | None:
+    """Read a Korean wall-clock expression, anchored to a reference date.
+
+    Only the clock matters to these questions — the options are clock times — so an expression
+    with no date is placed on the reference day rather than rejected.
+    """
+
+    match = _KOREAN_CLOCK.search(value)
+    if not match:
+        return None
+    hour = int(match.group(2))
+    minute = int(match.group(3) or 0)
+    if not (0 <= hour <= 24 and 0 <= minute < 60):
+        return None
+    period = match.group(1)
+    if period in ("오후", "저녁", "밤") and hour < 12:
+        hour += 12
+    elif period in ("오전", "아침") and hour == 12:
+        hour = 0
+    if hour == 24:
+        hour = 0
     zone = ZoneInfo(timezone)
+    day = (reference or datetime.now(zone)).astimezone(zone)
+    return day.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+
+def _parse_datetime(value: str, timezone: str) -> datetime:
+    zone = ZoneInfo(timezone)
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        korean = parse_clock_text(value, timezone)
+        if korean is None:
+            raise
+        return korean
     return parsed.replace(tzinfo=zone) if parsed.tzinfo is None else parsed.astimezone(zone)
 
 

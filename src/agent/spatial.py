@@ -42,8 +42,22 @@ Use distance only for straight-line/geodesic distance, routing for road-network 
 when an explicit search radius is given. A question that names a cardinal direction (동/서/남/북쪽,
 북동/남동/남서/북서쪽) is direction even when it also asks for the nearest one: the direction is
 the constraint that decides the answer. A question asking which place is nearest is nearby, not
-distance; distance is for a numeric separation. Include all named places and spatial/temporal
-constraints.
+distance; distance is for a numeric separation.
+A question that names a place to start from plus two or more places to visit — with how long to
+spend at each, or a total time available, or both — is trip, and asks either for the visiting order
+or for how many places fit. Trip wins over routing whenever there is more than one stop to arrange:
+routing is one origin to one destination and the properties of that single road route (its
+duration, its distance, its turns, its guidance, or which detour through it is fastest).
+A question that compares places against each other or relates two named anchors — which pair is
+farthest apart, which candidate lies between two places, which one is close to both — is poi. It is
+not distance, which reports one numeric separation, and not radius, which searches around a single
+anchor with a stated radius.
+Also return "target_type": the kind of place that answers the question, as the ordinary Korean
+noun for it (편의점, 약국, 주유소, 카페, 은행, 병원, 주차장, 지하철역, 대형마트, 음식점, 학교 …).
+When the question only describes a need, infer the kind of place that satisfies it — "우산을 사야
+합니다" is 편의점, "두통약을 사야 합니다" is 약국, "기름을 넣어야 합니다" is 주유소, "현금을 찾아야
+합니다" is 은행. Use null when the question is not asking for a kind of place at all.
+Include all named places and spatial/temporal constraints.
 Return JSON only:
 {"intent":"direction","concepts":[{"id":"anchor","text":"서울역","concept_type":"location","role":"extent","attributes":{},"depends_on":[]},{"id":"answer","text":"direction","concept_type":"field","role":"measure","attributes":{},"depends_on":["anchor"]}],"measure":"direction"}
 Do not answer the multiple-choice question and do not invent coordinates."""
@@ -79,20 +93,30 @@ Exact operator contracts:
 - travel_time(origin, destination, mode="driving", priority) -> field Route
 - distance_matrix(origins,destinations OR pairs, mode="driving", priority) -> field;
   pairs is [{origin,destination,label?}], and output routes preserve pair order at $node.routes
-- haversine_distance(place_a, place_b) -> amount; output is {distance_m, distance_km}, so
-  reference the node itself ($node) or $node.distance_m, never $node.amount
+- haversine_distance(place_a, place_b) -> amount; straight-line distance only. Output is
+  {distance_m, distance_km}, so reference the node itself ($node) or $node.distance_m, never
+  $node.amount. A question about travelling — 주행 거리, 이동 거리, how far you drive or walk —
+  is asking for road distance and must come from directions/distance_matrix, not from this;
+  a straight line is roughly four fifths of the road that follows it, which is close enough to
+  land on a wrong option and far enough to be wrong
 - pairwise_distances(pairs=[{place_a,place_b,label?}]) -> field
 - pairwise_extremes(locations) -> amount
 - bearing_to_direction(place_a, place_b) -> field
 - filter_by_direction(center, places, direction) -> object, nearest first; places is a retrieved
   POI list such as $nearby, not a batch_geocode node
-- nearest(anchor,candidates,metric="haversine"|"travel_time",routes?) -> object
+- nearest(anchor,candidates,metric="haversine"|"travel_time",routes?,required_type?) -> object;
+  required_type keeps only candidates of that kind before ranking, and is ignored when nothing
+  matches
 - within_radius(center, candidates, radius_m) -> object
 - select_min/select_max(items,key), sort_by(items,key), compare_routes(routes,metric) -> object
 - filter_routes(routes,keyword,include=true) -> field
 - extract_distance(route), extract_duration(route) -> amount
 - filter_places(places,min_rating?,price_levels?,required_types?,open_now?) -> object
-- steps_analysis(route,landmark?) -> field
+- steps_analysis(route,landmark?) -> field; totals are left_turn_count/right_turn_count/
+  roundabout_exit_count over the whole drive. With a landmark it also reports landmark_index,
+  instruction_after_landmark, and the same counts split as *_before_landmark / *_after_landmark.
+  A question about turns "before"/"after" reaching a road must read the split counts, never the
+  total — pass the road name as landmark
 - sum_route_metrics(routes) -> amount
 - aggregate_route_groups(routes,groups) -> amount; groups contains route indexes per option and
   returns option_totals plus best_distance_option and best_duration_option.
@@ -113,7 +137,12 @@ Exact operator contracts:
 - timezone_convert(local_time,from_timezone,to_timezone) -> event
 - calculate_finish_time(start_time,locations,stay_durations_s?,timezone?,mode?) -> event
 - calculate_start_time(arrival_time,duration_s,timezone) -> event
-- tsp_tw(nodes,distance_matrix,time_windows?,service_times?,start_index=0,time_budget?) -> network
+- tsp_tw(nodes,distance_matrix,time_windows?,service_times?,start_index=0,time_budget?) -> network;
+  distance_matrix accepts a distance_matrix node directly ($legs), which carries the square
+  duration matrix in seconds; nodes must be the matching place list in the same order, with the
+  starting place at start_index. service_times are the stay durations in seconds (0 for the start)
+  and time_budget is the available time in seconds. Output is {order, total_cost, feasible}, where
+  order indexes nodes.
 - identity_measure(value) -> object; explicit Measure projection for a single source operator
 
 Use normalized fields only: latitude, longitude, distance_m, duration_s. Complete Place objects,
@@ -124,11 +153,25 @@ Use batch_geocode for named endpoints and distance_matrix for route candidates s
 within {max_steps} nodes. For nearby, direction, and radius questions, geocode only the anchor and
 retrieve the requested type with nearby_places. For nearby/direction, use recover_option_places so
 only missing option evidence is resolved, then use match_options; do not geocode options upfront.
+This holds even when the options already look like a complete list of places: four named options
+are not a candidate set, they are answer texts, and geocoding them and taking the nearest answers
+"which of these is closest" instead of the question asked.
+When the question describes a *need* rather than naming a kind of place — 우산을 사야 합니다,
+두통약을 사야 합니다, 기름을 넣어야 합니다, 현금을 찾아야 합니다, 끼니를 해결해야 합니다 — work out
+which kind of place satisfies it and retrieve that kind. The options will include closer places of
+other kinds, so a ranking that ignores the kind returns one of those. If you do rank option places
+directly, filter_places(required_types=[the Korean noun for that kind]) first.
 Supply the question's origin/reference place as batch_geocode.anchor to disambiguate same-name POIs.
-For a trip option A→B from S, include route pairs S→A and A→B, in
-option order, then aggregate groups. For nearest among explicit options, geocode every option and
-compute deterministically. A vertical bar in one option separates grouped place names; preserve its
-option index while resolving each name. For a radius question use the exact radius and requested
+For a trip question, geocode the start and every named stop once, then call distance_matrix with
+origins = destinations = that full place list so every ordered leg is looked up in one node, and
+pass that node to tsp_tw as distance_matrix with the stays as service_times and the stated total
+time as time_budget. When the options are visiting orders, still build the same matrix and compare
+the orders the options name. When the options are counts of places ("한 곳"/"두 곳"/…), the answer
+is how many stops fit the budget, so let tsp_tw decide feasibility — never guess from the number
+of places mentioned. Convert hours to seconds (1시간 = 3600).
+For nearest among explicit options, geocode every option and compute deterministically.
+A vertical bar in one option separates grouped place names; preserve its option index while
+resolving each name. For a radius question use the exact radius and requested
 category/keyword.
 Do not select an option and do not use the gold answer."""
 
@@ -503,7 +546,12 @@ def _factorize_validate_plan(
             f"MAX_REASONING_STEPS={max_steps}"
         )
     grounded = _ground_graph_literals(
-        raw_steps, question, options, intent, expand_retrieval=expand_retrieval
+        raw_steps,
+        question,
+        options,
+        intent,
+        expand_retrieval=expand_retrieval,
+        inferred_type=analysis.get("target_type"),
     )
     factorized = factorize_geoflow(analysis, {"graph": grounded})
     # The planner budget above governs what the planner authored. Retrieval fan-out added
@@ -593,6 +641,7 @@ def _ground_graph_literals(
     intent: str,
     *,
     expand_retrieval: bool = True,
+    inferred_type: str | None = None,
 ) -> list[dict[str, Any]]:
     """Bind verbatim question literals after drafting, before graph validation.
 
@@ -602,13 +651,27 @@ def _ground_graph_literals(
     """
 
     anchor = _extract_anchor(question, intent)
-    target = (
-        _extract_target_type(question, intent)
-        if intent in {"nearby", "direction", "radius"}
-        else None
-    )
+    target = None
+    if intent in {"nearby", "direction", "radius"}:
+        # The question's own words first; the Analysis stage's inference when it did not name a
+        # type. A question that describes a need never states one, and without this the
+        # retrieval loses its category and the ranking answers "nearest of anything".
+        target = _extract_target_type(question, intent) or inferred_type
     radius_m = _extract_radius_m(question) if intent == "radius" else None
     specifications = _nearby_retrieval_specs(target) if target else []
+    # tsp_tw's service_times are positional, so the stays can only be bound once the node list the
+    # plan geocoded is known — it is the place order every downstream index refers to.
+    trip_node_names: list[str] = []
+    if intent == "trip":
+        trip_node_names = next(
+            (
+                [str(name) for name in (step.get("arguments") or {}).get("place_names") or []]
+                for step in steps
+                if step.get("operator") == "batch_geocode"
+                and len((step.get("arguments") or {}).get("place_names") or []) > 2
+            ),
+            [],
+        )
     grounded: list[dict[str, Any]] = []
     for step in steps:
         operator = step.get("operator")
@@ -621,6 +684,27 @@ def _ground_graph_literals(
             grounded.extend(
                 _retrieval_steps(step, arguments, specifications, expand=expand_retrieval)
             )
+            continue
+        if operator == "tsp_tw" and intent == "trip":
+            stays, budget = _extract_trip_schedule(question)
+            if budget is not None:
+                arguments["time_budget"] = budget
+            names = trip_node_names
+            if names and stays:
+                # service_times must line up with the node list, and the start is not a visit.
+                arguments["service_times"] = [
+                    0.0 if index == 0 else _stay_for(stays, name)
+                    for index, name in enumerate(names)
+                ]
+            grounded.append({**step, "arguments": arguments})
+            continue
+        if operator == "nearest" and target:
+            # Bound here rather than asked for in the prompt: a planner that ranks the option
+            # texts directly produces a graph with no retrieval to carry the category, and told
+            # only in prose it keeps doing it. The kind asked for is a question literal like the
+            # radius and the direction, so it is bound like one.
+            arguments["required_type"] = target
+            grounded.append({**step, "arguments": arguments})
             continue
         if operator == "filter_by_direction" and intent == "direction":
             direction = _extract_requested_direction(question)
@@ -959,12 +1043,54 @@ def _nearby_retrieval_specs(target: str) -> list[dict[str, Any]]:
     return expansions.get(compact, [{"query": target}])
 
 
+def _stay_for(stays: dict[str, float], name: str) -> float:
+    """Look a node's stay up by the name the question used, tolerating a decorated node label."""
+
+    if name in stays:
+        return stays[name]
+    for stated, seconds in stays.items():
+        if stated in name or name in stated:
+            return seconds
+    return 0.0
+
+
+def _extract_trip_schedule(question: str) -> tuple[dict[str, float], float | None]:
+    """Read the stays and the total time a trip question states, in seconds.
+
+    These are question literals exactly as a radius or a direction is: the plan may choose the
+    order, but how long each visit takes and how much time there is are given, not inferred. A
+    planner that rounds 1.5시간 to an hour, or reads the budget off the wrong number, produces a
+    feasible-looking plan for a trip nobody asked about.
+    """
+
+    stays: dict[str, float] = {}
+    for match in re.finditer(r"([^,.]+?)(?:을|를)\s*([\d.]+)\s*시간", question):
+        name = match.group(1).strip()
+        # The sentence that introduces the stay list ends in "…있습니다. " — keep only the name.
+        name = re.split(r"[.!?]\s*", name)[-1].strip()
+        if name:
+            stays[name] = float(match.group(2)) * 3600
+    budget_match = re.search(r"총\s*([\d.]+)\s*시간", question)
+    budget = float(budget_match.group(1)) * 3600 if budget_match else None
+    return stays, budget
+
+
+# A radius is stated in ordinary Korean, not in one keyword. "반경 600m", "직선거리 600m 이내"
+# and a bare "600m 안에" all name the same constraint, and recognizing only the first silently
+# substituted the 2000 m default for the number the question actually asked about.
+_RADIUS_PATTERNS = (
+    r"(?:반경|직선거리|거리)\s*([\d,]+(?:\.\d+)?)\s*(km|m)\b",
+    r"([\d,]+(?:\.\d+)?)\s*(km|m)\s*(?:이내|안|이하|미만)",
+)
+
+
 def _extract_radius_m(question: str) -> int:
-    match = re.search(r"반경\s*([\d,]+(?:\.\d+)?)\s*(km|m)", question, re.IGNORECASE)
-    if not match:
-        return 2000
-    radius = float(match.group(1).replace(",", ""))
-    return round(radius * 1000 if match.group(2).lower() == "km" else radius)
+    for pattern in _RADIUS_PATTERNS:
+        match = re.search(pattern, question, re.IGNORECASE)
+        if match:
+            radius = float(match.group(1).replace(",", ""))
+            return round(radius * 1000 if match.group(2).lower() == "km" else radius)
+    return 2000
 
 
 def _extract_requested_direction(question: str) -> str | None:
@@ -978,9 +1104,23 @@ def _extract_requested_direction(question: str) -> str | None:
     )
 
 
+# "I am at X" is said several ways, and an anchor phrasing the splitter does not know reads as
+# no anchor at all — the geocoder then loses its disambiguation and `recover_option_places` its
+# centre. Tried before the intent-specific separators because it names the anchor outright.
+_ANCHOR_PATTERNS = (
+    r"지금\s+(.+?)에\s+(?:있|와\s*있|머물)",
+    r"현재\s+(.+?)에\s+(?:있|머물)",
+    r"^(.+?)에\s+있는데",
+)
+
+
 def _extract_anchor(question: str, intent: str) -> str | None:
+    for pattern in _ANCHOR_PATTERNS:
+        match = re.search(pattern, question)
+        if match and match.group(1).strip():
+            return match.group(1).strip()
     separators = {
-        "radius": (" 반경",),
+        "radius": (" 반경", "에서 직선거리"),
         "trip": ("에서 출발",),
         "routing": ("에서 자동차",),
         "nearby": ("에서 가장 가까운",),

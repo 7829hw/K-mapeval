@@ -11,16 +11,16 @@ question is whether Spatial-Agent's reported gains reproduce on Korean geography
 independent variable is agent architecture — everything below the agent (provider, tools, cache,
 normalized schemas, evaluator) must stay identical for both.
 
-The tool layer has two interchangeable evidence sources, chosen per run and never mixed:
+The tool layer has three interchangeable evidence sources, chosen per run and never mixed:
 
-- **context** (`ContextMapProvider`) — the default. One corpus built from every context the dataset
-  carries, in MapEval's context format, serving the tools instead of any API. This is the port of
-  upstream Spatial-Agent's local context cache.
+- **kakao** (`KakaoMapProvider`) — live Kakao Local / Kakao Mobility, with the SQLite cache and the
+  region prior. **This is the reproduction setting**, the analogue of the paper's live Google Maps,
+  and the one `dataset/seoul_kmapeval_v2_mcq_100.jsonl` is graded against.
+- **context** (`ContextMapProvider`) — one corpus built from every context the dataset carries, in
+  MapEval's context format, serving the tools instead of any API. This is the port of upstream
+  Spatial-Agent's local context cache, and it needs a dataset whose rows carry a `context`.
 - **hybrid** — that corpus with `KakaoMapProvider` behind it for what it does not hold. This is
   upstream's own arrangement (cache first, Google Maps on a miss) with Kakao in Google's place.
-- **kakao** (`KakaoMapProvider`) — live Kakao Local / Kakao Mobility alone, with the SQLite cache
-  and the region prior. Needed for a dataset whose rows carry no context.
-
 `K-MapEval_PRD.md` is the full spec. `docs/REFERENCE_MAPPING.md` records every deliberate deviation
 from the upstream MapEval / Spatial-Agent implementations — update it when you add another one.
 
@@ -44,11 +44,25 @@ pytest tests/test_tools_and_agents.py::test_react_executes_common_tool_then_pars
 pytest -k geoflow
 ruff check .                 # line-length 100, rules E,F,I,UP,B
 
-python main.py --agent react                  # dataset/seoul_mapeval_v1_mcq_100.jsonl, context evidence
-python main.py --agent spatial
-python main.py --agent both --ids seoul_mapqa_v0_000907 seoul_mapqa_v0_000009
-python main.py --agent both --provider hybrid  # corpus first, Kakao for what it lacks
-python main.py --agent both --provider kakao   # live Kakao alone
+# Does the architecture separate the two agents? The compositional benchmark answers that.
+python main.py --agent both --dataset dataset/seoul_kmapeval_v3_mcq_100.jsonl
+
+# The reproduction run: the Kakao-grounded benchmark against live Kakao, both architectures.
+python main.py --agent both                   # dataset/seoul_kmapeval_v2_mcq_100.jsonl, kakao evidence
+python main.py --agent react
+python main.py --agent both --ids seoul_kmapeval_v2_000 seoul_kmapeval_v2_024
+
+# The context-cache benchmark, which needs the dataset whose rows ship a context.
+python main.py --agent both --dataset dataset/seoul_mapeval_v1_mcq_100.jsonl --provider context
+python main.py --agent both --dataset dataset/seoul_mapeval_v1_mcq_100.jsonl --provider hybrid
+
+# Rebuild and re-verify the Kakao benchmark (offline tooling, costs Kakao quota).
+PYTHONPATH=data python data/build_pool.py
+PYTHONPATH=data python data/build_benchmark.py
+PYTHONPATH=data python data/verify_benchmark.py
+PYTHONPATH=data python data/build_hard_benchmark.py     # the compositional benchmark
+PYTHONPATH=data python data/verify_hard_benchmark.py
+
 python main.py --agent spatial --concurrency 4
 ```
 
@@ -171,8 +185,10 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   named. Without this the artifact `_as_place` shrugs off failed as a `ValidationError` before any
   tool ran, and the cascade emptied the rest of the graph.
 - No separate HTTP backend server, web UI, or extra datastore beyond the SQLite cache. Keep
-  `src/agent/` and `src/tools/` as the only source subpackages and `main.py` as the only entry
-  point.
+  `src/agent/` and `src/tools/` as the only source subpackages and `main.py` as the only *runtime*
+  entry point. `data/build_*.py` and `data/verify_benchmark.py` are offline dataset tooling,
+  mirroring upstream's `data/build_cache.py`: they import `src/` but nothing in `src/` may import
+  them, and no benchmark run may depend on one having been executed.
 
 ## Invariants that break silently if violated
 
@@ -197,6 +213,67 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   registry or their calls vanish from the metrics.
 - Per-question logs carry `question_id`, `classification`, `agent_type`, `predicted_answer`,
   correctness, and every tool name with normalized arguments, status, and API-call counts.
+- **An operator pair the planner is told to use must actually compose.** `distance_matrix` returns
+  `{"routes": [...]}` and `tsp_tw` reads a square matrix, and while the two did not meet the only
+  matrix a planner could pass was one it invented — so the paper's flagship trip path was
+  unreachable no matter how well the prompt described it. `build_duration_matrix`
+  (`src/tools/spatial.py`) is the seam: `distance_matrix` emits `nodes`/`matrix`/`matrix_complete`
+  alongside its routes, and `tsp_tw` accepts a matrix node, a route list, or a literal. A matrix
+  missing an off-diagonal leg is reported incomplete, never filled — an absent leg is missing
+  evidence, not a zero-cost hop. Tests in `tests/test_spatial_ops.py` pin the composition; if you
+  add another operator the prompt tells a planner to chain, pin that chain too.
+- **Every `Place`-typed tool argument is normalized, including the plural ones.**
+  `DistanceMatrixArgs.origins`/`destinations` and `RoutePair.origin`/`destination` carry
+  `_as_place_list_argument` / `_as_place_argument` like every other place argument. A planner
+  writes `origins: "$places"` and gets back `batch_geocode`'s `{query, place, candidates}` records;
+  rejecting that shape failed the matrix before one route was requested, and every `tsp_tw`
+  downstream failed with it. A missing validator on one argument is invisible until a whole family
+  of questions quietly scores zero.
+- **Trip stays and the time budget are question literals.** `_extract_trip_schedule` binds
+  `tsp_tw.service_times` and `time_budget` in `_ground_graph_literals`, positionally against the
+  node list the plan geocoded. The plan chooses the order; how long each visit takes and how much
+  time there is are given, not inferred.
+- **A question literal is written the way the question writes it.** `_extract_radius_m` knew only
+  the word 반경 and silently used its 2000 m default for `직선거리 600m 이내`; `_extract_anchor`
+  knew only `에서 가장 가까운` and returned nothing for `지금 X에 있습니다`; the temporal operators
+  accepted only ISO 8601 and raised on `오전 10시 00분`, which is exactly what a planner copies out
+  of a Korean question. Each of those made a whole family unanswerable while every other stage
+  worked. When you add an extractor, cover the phrasings a Korean question actually uses, and pin
+  them with a parametrized test.
+- **When the question does not name the kind of place, the Analysis stage infers it.**
+  `normalize_analysis` carries `target_type` and `_ground_graph_literals` binds it when
+  `_extract_target_type` finds nothing in the text — a question phrased as a need ("우산을 사야
+  합니다") never states 편의점, and without the inferred type the retrieval loses its category and
+  the ranking answers "nearest of anything", which is a *closer* place of the wrong kind.
+- **The kind of place asked for is a question literal, bound like the radius and the direction.**
+  `nearest` takes `required_type` and `_ground_graph_literals` binds it from the question or from
+  the Analysis stage's inference. Telling the planner in prose to retrieve by category moved this
+  family from 1/14 to 3/14; binding it moved the same family to 11/14. A planner that ranks the
+  option texts directly builds no retrieval node for a category to live on, so prose has nothing
+  to attach to — that is the general reason literal binding beats prompt guidance here.
+  The filter is a preference, not a requirement: when nothing matches it is dropped, because an
+  empty result is a gap in the category vocabulary rather than evidence that nothing qualifies.
+- **A requested kind is matched by what Kakao calls it, and only at the type level.**
+  `CATEGORY_ALIASES` maps 지하철역 onto 지하철,전철 and 대형마트 onto 슈퍼마켓 / 대형슈퍼, because
+  the question's noun does not appear in those paths at all. Keep the terms to words the taxonomy
+  uses for a *type*: a bare 마트 also matches `가정,생활 > 편의점 > 이마트24`, which let a
+  convenience-store brand answer a 대형마트 question. Add terms from category strings you have
+  actually observed, never from what a category ought to be called.
+- **An operator that only reports totals cannot answer a bounded question.** `steps_analysis`
+  returned whole-route turn counts, so "how many left turns *before* 왕십리로" had no number
+  available except the route's total — and the answer came back confidently over-counted rather
+  than failing. With a landmark it now also reports `landmark_index` and
+  `*_before_landmark` / `*_after_landmark` counts. Before adding a question shape, check the
+  operator can express its scope, not just its measure.
+- **A travelled distance comes from a route, a straight line from haversine, and they are not
+  interchangeable.** Road distance runs roughly a quarter longer than the straight line between
+  the same points, which is near enough to land on a plausible wrong option: every miss in the
+  multi-segment family was the 0.78x distractor, the signature of summing haversine legs for a
+  주행 거리 question. `GRAPH_PROMPT` says which operator each phrasing means.
+- **`classification` is the intent the agent routes on, not the paper family it exercises.** It is
+  `SUPPORTED_INTENTS`, so it decides template retrieval and grounding; the Appendix E family is
+  recorded in `template_id`. Labelling a radius-scoped share question `poi` because it is
+  Object-Field-Measure made the intent metric measure the label, not the router.
 - Do not create persistent dumps of raw Kakao responses; usage rights are not established for them.
 
 ## Spatial-Agent / GeoFlow
@@ -244,6 +321,13 @@ that *contains* a place instead of the place. Mirroring upstream's concept-refer
   `src/tools/spatial.py`, which unwrap `{query, place, candidates}`, `{"location": …}`, `nearest`
   results, single-element branches, and `lat`/`lng`/`x`/`y` spellings. A genuinely unresolved place
   raises `PlaceNotFoundError`; never let it surface as a `TypeError` or `KeyError`.
+- The operator's contract decides its output type. A planner's `output_type` is a guess it has no
+  authority over, so `normalize_and_validate_graph` corrects it instead of raising — a `tsp_tw`
+  node declaring `object` used to lose a plan whose every leg had already been looked up.
+- Route `priority` accepts the words a planner reaches for (`fastest` → TIME, `shortest` →
+  DISTANCE) through `_as_priority`, but only where the meaning is unambiguous. An unrecognized
+  word passes through and still fails: this is leniency about wording, never about meaning, and a
+  silent default would quietly answer a different question.
 - Do not tighten these back into hard failures. A shape mismatch is a planner artifact; only missing
   evidence is a real failure.
 
@@ -358,13 +442,114 @@ JSONL, one `BenchmarkItem` per line, unique ids, 2–4 options, `answer` a 0-bas
 `classification` from `nearby | poi | routing | trip | type | direction | distance | radius`
 (the same eight values are `SUPPORTED_INTENTS` in `src/agent/spatial.py` — extending the set means
 touching both, plus the intent heuristics and evaluation rules). Extra fields are allowed
-(`context`, `template_id`, `verification_status`, …). Building the full Korean research benchmark is
-a separate task, not something to expand into incidentally.
+(`context`, `template_id`, `gold_evidence`, …) and every one of them is evaluation-only:
+`agent_input()` returns `(question, options)` and nothing else, so `gold_evidence` — which records
+*why* an answer is the answer — can never reach an agent.
 
-`dataset/seoul_mapeval_v1_mcq_100.jsonl` is the benchmark: 100 rows sampled from
-`dataset/seoul_mapeval_v1.json` (an OSM-derived Seoul pool, 1530 complete records — the file was
-transferred truncated mid-record, so a reader must decode the complete objects and stop at the
-break). The recipe, seed `20260818`:
+Three benchmarks ship. They answer different questions and their numbers must never be pooled.
+
+### `dataset/seoul_kmapeval_v2_mcq_100.jsonl` — the reproduction benchmark
+
+The one to run when the question is whether Spatial-Agent's reported gains reproduce. Built by
+`data/build_pool.py` + `data/build_benchmark.py` from Kakao Local and Kakao Mobility, seed
+`20260818`, and graded against the same provider the agents query, so a wrong answer is the agent's
+and never a disagreement between the evidence and the grader.
+
+**The class mix mirrors MapEval-API's answerable half, because that is where the paper's gains
+live.** MapEval-API is nearby 83 / trip 67 / routing 66 / poi 64 / unanswerable 20: roughly 45% of
+it is trip and routing, families no single retrieval answers. The first Korean benchmark here had
+none of that — every row was one lookup — and both architectures saturated, which is a property of
+the questions, not a finding about the architectures. Quotas, out of 100:
+
+- `trip` 24 — `trip_optimal_order` 14 (which visiting order is fastest; requires the full driving
+  duration matrix over base + 3 sights, then a TSP), `trip_feasible_count` 10 (how many of 4 places
+  fit in a budget; requires the matrix plus stay arithmetic over every subset).
+- `routing` 23 — `routing_via_compare` 8 (which of 4 detours is fastest; four waypoint routes),
+  `routing_next_turn` 8 (what the guidance says after a named road; turn-by-turn guides),
+  `routing_turn_count` 7 (how many left turns on a two-leg drive).
+- `poi` 23 — `poi_farthest_pair` 8 (which of 4 pairs is farthest; eight lookups, four comparisons),
+  `poi_between` 8 (which candidate is on the corridor between two anchors),
+  `poi_common_nearby` 7 (which place is within the radius of *both* anchors).
+- `nearby` 12, `direction` 9, `radius` 9 — the single-hop families, kept so the benchmark still
+  reports the shapes the first one measured.
+
+`unanswerable` is deliberately absent. MapEval encodes it as `answer = 0` against 1-based option
+indices — a sentinel meaning *no option is right*, not option 0. That is a refusal channel this
+MCQ format does not have, and mapping it onto a real index would make "always answer 0" score 20/20.
+
+Construction rules, all enforced in the generator:
+
+- **Every name round-trips.** A place is only used as an anchor, gold or distractor if searching
+  its bare name through the provider lands back within 200 m of it (`Builder.resolves_to`). A name
+  the tools cannot look back up is not a question, it is a scoring accident.
+- **Every question has a decisive answer.** Ties are rejected at build time: ≥180 s between the
+  best and second-best visiting order, ≥120 s between the best and second-best detour, ≥120 m
+  between the nearest and runner-up, ≥1500 m between the farthest and second-farthest pair, and
+  exactly one candidate inside the radius for a radius question.
+- **The runner-up is a distractor.** A nearest-by-type question offers the second-nearest place, so
+  rough position cannot answer it; a direction question offers places that are *nearer* but in the
+  wrong sector, so the direction constraint is what decides.
+- **Distinct endpoints per family.** `itertools.combinations` holds its first element fixed while
+  the second sweeps, which put one origin at the head of an entire family; the generator records
+  used endpoints and skips a pair that reuses one.
+- **Options are shuffled per row**, seeded by question id, except the ordinal option sets
+  (`한 곳`…`네 곳`, `1번`…`4번`) where position carries meaning.
+- **No leaked totals.** Travel times never appear in a trip option, so the answer cannot be read
+  off the option text. (MapEval leaks one; 66 of its 67 trip rows do not.)
+
+### `dataset/seoul_kmapeval_v3_mcq_100.jsonl` — the compositional benchmark
+
+The one to run when the question is whether the *architecture* separates the two agents. v2 mixed
+MapEval's class proportions but kept its questions explicit and closed — the anchor named exactly
+as Kakao stores it, the category named, the radius stated, the orderings enumerated — so one
+`batch_geocode` plus one `distance_matrix` finished a trip question. That leaves a ReAct loop one
+decision to get right where Spatial-Agent has four, and structure cannot pay for its overhead.
+
+v3 is selected against the coverage gap. Of the ten Appendix E macro families in `TEMPLATES`, v2
+exercised six; **Time-Window-Reverse, Multi-Segment-Aggregate and Object-Field-Measure had no
+question at all**, and those are the compositional ones. (Place-Attribute-Query stays unported:
+it asks for ratings, price levels and opening hours, and Kakao Local exposes none of them.
+Inventing those values would be fabricating evidence.) Built by `data/build_hard_benchmark.py`,
+seed `20260819`, graded through the same provider the agents query:
+
+- `trip_finish_time` 16 and `trip_latest_departure` 14 — **Time-Window-Reverse**. A fixed
+  itinerary's return time, and the latest departure that still meets a deadline with errands on
+  the way. Four legs plus stays plus clock arithmetic, forwards and backwards.
+- `multisegment_total` 14 — **Multi-Segment-Aggregate**. Total driving distance over a stated
+  four-stop chain; every leg has to be looked up and summed.
+- `poi_brand_share` 14 — **Object-Field-Measure**. What share of a neighbourhood's convenience
+  stores belong to one brand: retrieve, filter, divide. Wrong options are the shares the *other*
+  brands give, so each is a real number about the same neighbourhood.
+- `routing_turns_before_road` 14 — **Route-Step-Extract, bounded**. Left turns *before* a named
+  road, so the boundary must be located before the count means anything. A bound that changes
+  nothing is rejected at build time.
+- `poi_bearing_and_distance` 14 — direction **and** straight-line distance in one answer, as a
+  2×2 of (right/opposite heading) × (right/wrong distance). One correct half is not enough.
+- `nearby_from_need` 14 — the category is **inferred, not stated**: a need ("갑자기 비가 쏟아져서
+  우산을 사야 합니다") instead of 편의점. Every option set holds a *closer* place of a different
+  kind, so retrieving the wrong category is punished rather than merely unhelpful.
+
+Construction rules beyond v2's (round-trip resolvable names, decisive margins, distinct
+endpoints):
+
+- **Gold positions are assigned, not drawn.** A per-row shuffle is uniform in expectation and
+  lumpy in practice — one family drew index 0 eight times in fourteen. Per-family accuracy is a
+  reported number, so each family's gold positions are balanced by construction.
+- **Numeric options are matched by nearest value, not by string.** Routing priority moves a
+  duration by minutes (`calculate_finish_time` defaults to TIME, a bare `directions` call to
+  RECOMMEND), so options sit tens of minutes apart and `data/verify_hard_benchmark.py` scores the
+  closest one — what a solver does. Percentage options are kept at least 6 points apart for the
+  same reason: 2/14 and 2/13 both read "약 14%".
+
+`data/verify_hard_benchmark.py` re-derives all 100 through `ToolRegistry` +
+`SpatialOperatorRegistry`; it currently reports 100/100.
+
+### `dataset/seoul_mapeval_v1_mcq_100.jsonl` — the context-cache benchmark
+
+100 rows sampled from `dataset/seoul_mapeval_v1.json` (an OSM-derived Seoul pool, 1530 complete
+records — the file was transferred truncated mid-record, so a reader must decode the complete
+objects and stop at the break). Each row ships a MapEval-format `context`, and it is the dataset to
+use with `--provider context` / `--provider hybrid`. The recipe, seed `20260818`:
 
 - One quota per source template, so no family is spent on one question shape: `nearest_by_type` 20,
   `direction_by_type` 20, `distance_between` 20, `within_radius_by_type` 15, `type` 15,
@@ -378,11 +563,17 @@ break). The recipe, seed `20260818`:
   without special-casing one.
 
 All 100 gold answers are derivable from the shipped context by deterministic computation through
-the provider — verify that before trusting a run's accuracy, since a wrong answer then means the
-agent, not the evidence.
+the provider. Its questions are single-hop by construction, so it measures evidence handling, not
+composition — do not read a tie on it as a finding about architecture.
 
-Because this repo runs the prompting-only path (no SFT/DPO, no embedding retrieval, and an
-OSM-derived Korean context rather than the paper's MapEval-Textual snapshot), reports must be
-labeled prompting-only and must not be presented as reproducing the paper's headline numbers. A
-report's `metadata.provider` records which evidence source produced it, and runs from different
-sources must never be pooled.
+### Verifying a benchmark before trusting a run
+
+`data/verify_benchmark.py` re-derives every gold answer through `ToolRegistry` +
+`SpatialOperatorRegistry` — the same tools the agents call — and reports the rows where they
+disagree. Run it after regenerating a dataset and after any change to matching, ranking, or
+retrieval: a drop in accuracy means nothing until you know the answers are still reachable.
+
+Because this repo runs the prompting-only path (no SFT/DPO and no embedding retrieval), reports
+must be labeled prompting-only and must not be presented as reproducing the paper's headline
+numbers. A report's `metadata.provider` records which evidence source produced it, and runs from
+different sources must never be pooled.

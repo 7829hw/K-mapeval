@@ -66,7 +66,13 @@ class FakeProvider(MapProvider):
 
     def directions(self, origin: str | Place, destination: str | Place, **_: Any) -> Route:
         self._api_calls += 1
-        return Route(origin="A", destination="B", distance_m=100, duration_s=20)
+        # Echo the endpoints asked for. A double that answers every pair with the same two names
+        # cannot exercise anything that keys legs by endpoint, such as the duration matrix
+        # `tsp_tw` consumes — it collapses a whole matrix into one cell.
+        start = origin.name if isinstance(origin, Place) else str(origin)
+        end = destination.name if isinstance(destination, Place) else str(destination)
+        span = 100 + 10 * (len(start) + len(end))
+        return Route(origin=start, destination=end, distance_m=span, duration_s=span // 5)
 
 
 class QueuedLLM:
@@ -401,7 +407,7 @@ def test_distance_matrix_and_multi_segment_aggregate_keep_option_mapping() -> No
         {"routes": execution.output["routes"], "groups": [[0, 1], [2, 3]]},
     )
     assert [item["option_index"] for item in aggregate["option_totals"]] == [0, 1]
-    assert aggregate["option_totals"][0]["distance_m"] == 200
+    assert aggregate["option_totals"][0]["distance_m"] == 240
 
 
 def test_distance_matrix_isolates_unresolved_pairs_and_keeps_valid_routes() -> None:
@@ -724,9 +730,9 @@ def test_calculate_finish_time_uses_each_route_and_stay() -> None:
         },
     )
     assert execution.status == "ok"
-    assert execution.output["travel_duration_s"] == 40
+    assert execution.output["travel_duration_s"] == 48
     assert execution.output["stay_duration_s"] == 60
-    assert execution.output["finish_time"].endswith("09:01:40+09:00")
+    assert execution.output["finish_time"].endswith("09:01:48+09:00")
 
 
 def test_contextual_roles_are_not_part_of_g2_precedence() -> None:
@@ -1254,7 +1260,8 @@ def test_directions_accepts_a_normalized_place_from_a_plan_reference() -> None:
         {"origin": place, "destination": place, "mode": "driving"},
     )
     assert execution.status == "ok"
-    assert execution.output["distance_m"] == 100
+    # The fake echoes the endpoints it was given, so the span follows from their names.
+    assert execution.output["distance_m"] == 160
 
 
 def test_spatial_agent_handles_google_style_references_without_aborting() -> None:

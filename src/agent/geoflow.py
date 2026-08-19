@@ -240,7 +240,10 @@ OPERATOR_INPUT_TYPES: dict[str, dict[str, frozenset[str]]] = {
 TEMPLATES = {
     "object_field_measure": {
         "name": "Object-Field-Measure",
-        "intents": {"poi", "type"},
+        # A share or a count over a neighbourhood is this family too, and a neighbourhood question
+        # routes on its radius. Without these the pattern was unreachable for the very questions
+        # that need it: "반경 600m 안의 편의점 중 이 브랜드가 몇 퍼센트인가".
+        "intents": {"poi", "type", "radius", "nearby"},
         "keywords": ("속성", "분포", "비율", "field", "proportion"),
         "pattern": "objects -> event/field restriction -> amount or proportion Measure",
         "example": {
@@ -463,7 +466,10 @@ TEMPLATES = {
         "name": "Route-Optimize",
         "intents": {"trip"},
         "keywords": ("최적 순서", "시간창", "방문 순서", "tsp"),
-        "pattern": "locations -> route network -> tsp_tw(time windows) -> Measure",
+        "pattern": (
+            "locations -> distance_matrix(all ordered pairs) -> tsp_tw(service times, budget)"
+            " -> Measure"
+        ),
         "example": {
             "graph": [
                 {
@@ -473,13 +479,28 @@ TEMPLATES = {
                     "role": "extent",
                 },
                 {
+                    "id": "legs",
+                    "operator": "distance_matrix",
+                    "arguments": {
+                        "origins": ["출발지", "방문지 1", "방문지 2"],
+                        "destinations": ["출발지", "방문지 1", "방문지 2"],
+                    },
+                    "depends_on": ["locations"],
+                    "role": "support",
+                },
+                {
                     "id": "optimized",
                     "operator": "tsp_tw",
                     "arguments": {
                         "nodes": "$locations",
-                        "distance_matrix": [[0, 10, 20], [10, 0, 5], [20, 5, 0]],
+                        # The matrix is looked up, never written down: $legs carries the square
+                        # duration matrix built from every ordered pair above.
+                        "distance_matrix": "$legs",
+                        "service_times": [0, 7200, 5400],
+                        "time_budget": 28800,
+                        "start_index": 0,
                     },
-                    "depends_on": ["locations"],
+                    "depends_on": ["locations", "legs"],
                     "role": "measure",
                 },
             ]
@@ -614,7 +635,17 @@ def normalize_analysis(
             },
         ]
     concepts = _complete_analysis_roles(concepts, question, str(payload.get("measure") or intent))
-    return {"intent": intent, "concepts": concepts, "measure": payload.get("measure", intent)}
+    # The kind of place the question is asking for, which the Analysis stage may have had to
+    # infer ("우산을 사야 합니다" -> 편의점). Grounding binds it when the question text does not
+    # name a type outright; dropping it here is what made a need-shaped question unanswerable.
+    target = payload.get("target_type") or payload.get("place_type")
+    target_type = str(target).strip() if isinstance(target, str) and target.strip() else None
+    return {
+        "intent": intent,
+        "concepts": concepts,
+        "measure": payload.get("measure", intent),
+        "target_type": target_type,
+    }
 
 
 def build_concept_graph(analysis: dict[str, Any]) -> ConceptGraph:
@@ -1132,12 +1163,11 @@ def normalize_and_validate_graph(
         )
         inferred = _reference_roots(arguments)
         dependencies = list(dict.fromkeys([*declared_dependencies, *inferred]))
-        output_type = str(raw.get("output_type") or contract.output_type).lower()
-        if output_type != contract.output_type:
-            raise ValueError(
-                f"GeoFlow node {step_id} declares {output_type}, but {operator} outputs "
-                f"{contract.output_type}"
-            )
+        # The operator's contract is authoritative about what it returns; the planner's declared
+        # output_type is a guess it has no authority over. Failing the whole graph over that
+        # disagreement cost a correct plan its answer — `tsp_tw` declared `object` and was thrown
+        # away even though every leg had been looked up. Correct it and carry on.
+        output_type = contract.output_type
         default_role = "measure" if index == len(raw_steps) - 1 else "support"
         role = str(raw.get("role") or default_role).lower()
         if role not in FUNCTIONAL_ROLES:

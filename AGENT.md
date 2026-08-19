@@ -265,6 +265,19 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   than failing. With a landmark it now also reports `landmark_index` and
   `*_before_landmark` / `*_after_landmark` counts. Before adding a question shape, check the
   operator can express its scope, not just its measure.
+- **Every grounding branch edits the same `arguments` copy, and the fall-through must append it.**
+  `_ground_graph_literals` ends with a generic branch for operators it has nothing special to do
+  with; appending the original step there threw away whatever earlier branches had bound. A
+  routing priority bound for `directions` never reached it, and the family scored 6/14 against
+  13/14 once the copy was carried through. Any new branch must keep this shape: edit `arguments`,
+  then append `{**step, "arguments": arguments}`.
+- **Stated stays are bound, not left to the planner.** `calculate_finish_time.stay_durations_s`
+  is grounded from the question like `tsp_tw.service_times`, because dropping one visit or
+  inventing one for the return leg moves a clock answer by a whole stay — further than the gap
+  between two options, which is what `trip_finish_time` was losing on. Look the stay up by the
+  name the plan already holds (`_stay_stated_for`): reading names out of the sentence instead
+  swallowed the clause before the first one, so the starting point inherited a visit it never
+  makes.
 - **G3 types a reference by the field it names, not by the node it starts at.** `tsp_tw` outputs a
   `network`, and `$tsp.total_cost` is the tour's duration: typing that reference by the node
   refused eleven correctly-composed plans in one run, all of them the chain a "what time must I

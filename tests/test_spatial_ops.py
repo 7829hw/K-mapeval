@@ -746,3 +746,95 @@ def test_an_arithmetic_expression_names_the_node_it_depends_on() -> None:
     }
     steps, _ = normalize_and_validate_graph(graph, max_steps=10)
     assert steps[-1]["depends_on"] == ["drive_time"]
+
+
+def test_grounding_edits_survive_the_generic_branch() -> None:
+    """Every branch edits a copy of the arguments; the fall-through must append that copy.
+
+    Appending the original step instead discarded whatever earlier branches had bound — the
+    routing priority never reached the `directions` call it was bound for, and the agent read a
+    different route than the question named.
+    """
+
+    from src.agent.spatial import _ground_graph_literals
+
+    question = "A에서 B까지 자동차로, 거리가 가장 짧은 경로로 운전합니다. C 구간에 진입하기 전까지?"
+    plan = [
+        {
+            "id": "ends",
+            "operator": "batch_geocode",
+            "arguments": {"place_names": ["A", "B"]},
+            "role": "extent",
+        },
+        {
+            "id": "route",
+            "operator": "directions",
+            "arguments": {
+                "origin": "$ends.0.place",
+                "destination": "$ends.1.place",
+                "include_steps": True,
+            },
+            "depends_on": ["ends"],
+            "role": "support",
+        },
+    ]
+    grounded = _ground_graph_literals(plan, question, ["1번", "2번"], "routing")
+    priorities = {
+        step["operator"]: step["arguments"].get("priority") for step in grounded
+    }
+    assert priorities["directions"] == "DISTANCE"
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("거리가 가장 짧은 경로로 운전합니다", "DISTANCE"),
+        ("가장 빠른 경로로 이동합니다", "TIME"),
+        ("자동차로 이동합니다", None),
+    ],
+)
+def test_the_question_names_the_route_it_means(question: str, expected: str | None) -> None:
+    """Kakao's RECOMMEND re-optimizes against traffic, so a route-shaped answer needs the route
+    named or it grades the hour it was asked in."""
+
+    from src.agent.spatial import _extract_route_priority
+
+    assert _extract_route_priority(question) == expected
+
+
+def test_stays_are_bound_to_the_itinerary_the_plan_lists() -> None:
+    """A dropped or invented stay moves the answer by a whole visit.
+
+    Wider than the gap between two options, so the stays are bound from the question like the
+    radius is — looked up by the names the plan already holds, because reading names out of the
+    sentence swallowed the clause in front of the first one and gave the starting point a visit.
+    """
+
+    from src.agent.spatial import _ground_graph_literals
+
+    question = (
+        "오전 10시 00분에 구름성모텔에서 자동차로 출발해 닻올림을 1.5시간, "
+        "꿈꾸는카멜레온어린이미술관을 1시간, 난우길골목형상점가를 1.5시간 동안 차례로 둘러본 뒤 "
+        "구름성모텔로 돌아옵니다. 몇 시에 돌아오게 되나요?"
+    )
+    chain = [
+        "구름성모텔",
+        "닻올림",
+        "꿈꾸는카멜레온어린이미술관",
+        "난우길골목형상점가",
+        "구름성모텔",
+    ]
+    plan = [
+        {
+            "id": "finish",
+            "operator": "calculate_finish_time",
+            "arguments": {
+                "start_time": "오전 10시 00분",
+                "locations": chain,
+                "stay_durations_s": [0, 1, 2],
+            },
+            "role": "measure",
+        }
+    ]
+    grounded = _ground_graph_literals(plan, question, ["오후 4시 17분"], "trip")
+    assert grounded[0]["arguments"]["stay_durations_s"] == [0.0, 5400.0, 3600.0, 5400.0, 0.0]

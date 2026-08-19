@@ -688,6 +688,19 @@ def _ground_graph_literals(
             continue
         if route_priority and operator in _PRIORITY_OPERATORS:
             arguments["priority"] = route_priority
+        if operator == "calculate_finish_time" and intent == "trip":
+            stays, _ = _extract_trip_schedule(question)
+            locations = arguments.get("locations")
+            if stays and isinstance(locations, list) and len(locations) > 1:
+                # One stay per location, in the order the itinerary visits them. The stays are
+                # stated in the question exactly; a plan that drops the last one or invents one
+                # for the return lands a whole visit away, which is wider than the gap between
+                # two answer options.
+                arguments["stay_durations_s"] = [
+                    _stay_stated_for(question, _location_name(item)) for item in locations
+                ]
+            grounded.append({**step, "arguments": arguments})
+            continue
         if operator == "tsp_tw" and intent == "trip":
             stays, budget = _extract_trip_schedule(question)
             if budget is not None:
@@ -742,7 +755,10 @@ def _ground_graph_literals(
             grounded.append({**step, "arguments": arguments})
             continue
         if operator != "batch_geocode":
-            grounded.append(step)
+            # `arguments` is the copy every branch above edits; appending the original step here
+            # threw those edits away, which is how a bound routing priority never reached the
+            # `directions` call it was bound for.
+            grounded.append({**step, "arguments": arguments})
             continue
         names = list(arguments.get("place_names") or [])
         pair = _extract_compared_places(question) if intent == "distance" else None
@@ -1044,6 +1060,43 @@ def _nearby_retrieval_specs(target: str) -> list[dict[str, Any]]:
         "관광안내소": [{"query": "관광안내소"}, {"query": "관광안내"}],
     }
     return expansions.get(compact, [{"query": target}])
+
+
+def _stay_stated_for(question: str, name: str) -> float:
+    """How long the question says to spend at this place, in seconds; 0 when it says nothing.
+
+    Looked up by the name the plan already holds rather than parsed out of the prose: reading
+    names out of the sentence swallowed the clause in front of the first one, so the starting
+    point inherited a visit it never makes.
+    """
+
+    key = name.strip()
+    if not key:
+        return 0.0
+    match = re.search(
+        rf"{re.escape(key)}\s*(?:을|를|에서|에)?\s*(?:약\s*)?([\d.]+)\s*(시간|분)", question
+    )
+    if not match:
+        return 0.0
+    amount = float(match.group(1))
+    return amount * 3600 if match.group(2) == "시간" else amount * 60
+
+
+def _location_name(value: Any) -> str:
+    """The name a planner used for an itinerary stop, whatever shape it wrote it in."""
+
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("name", "query", "place_name", "address"):
+            found = value.get(key)
+            if isinstance(found, str) and found:
+                return found
+            if isinstance(found, dict):
+                nested = found.get("name")
+                if isinstance(nested, str) and nested:
+                    return nested
+    return ""
 
 
 def _stay_for(stays: dict[str, float], name: str) -> float:

@@ -441,8 +441,11 @@ class SpatialAgent(BenchmarkAgent):
                         # Local operators spend no API call, so a place they are handed as a
                         # name is only a place if the plan already resolved it. The tools do
                         # their own name resolution through the provider.
-                        arguments = _bind_named_pairs(
-                            _bind_named_places(arguments, results), results
+                        arguments = _bind_step_references(
+                            _bind_named_pairs(
+                                _bind_named_places(arguments, results), results
+                            ),
+                            results,
                         )
                     if operator in tool_names:
                         execution = self.tools.invoke(operator, arguments)
@@ -750,6 +753,23 @@ def _bind_named_places(arguments: dict[str, Any], results: dict[str, Any]) -> di
         else:
             bound[key] = _named_place(value, index)
     return bound
+
+
+def _bind_step_references(arguments: dict[str, Any], results: dict[str, Any]) -> dict[str, Any]:
+    """A list of bare node ids where their results belong.
+
+    `select_max(items=["d0","d1","d2","d3"], key="distance_m")` names four steps of the plan and
+    forgets the `$`. Nothing resolved them, so the ranking had no comparable item and the
+    comparison the whole plan was built for was lost. Only when *every* entry names a step the
+    run has already executed — one that does not is a string the planner meant literally.
+    """
+
+    items = arguments.get("items")
+    if not isinstance(items, list) or not items:
+        return arguments
+    if not all(isinstance(item, str) and item in results for item in items):
+        return arguments
+    return {**arguments, "items": [results[item] for item in items]}
 
 
 def _bind_named_pairs(arguments: dict[str, Any], results: dict[str, Any]) -> dict[str, Any]:
@@ -1102,6 +1122,14 @@ def _ground_graph_literals(
             # is exactly what the trip's `batch_geocode` node lists, and the operator resolves the
             # reference to that same list. Without this the planner's own stays were left to
             # mismatch the resolved length, and the args model rejected the call outright.
+            if isinstance(locations, list) and len(locations) == 1 and isinstance(
+                locations[0], list
+            ):
+                # `locations: ["$places"]` resolves to one list holding the whole itinerary. The
+                # tool flattens it; the stays are bound here, so they have to be counted against
+                # the same list or the args model rejects the call for a length mismatch.
+                locations = list(locations[0])
+                arguments["locations"] = locations
             itinerary: list[Any] = []
             if isinstance(locations, list) and len(locations) > 1:
                 # A stop written as `$geo.1.place` is a name the geocode node already holds, and

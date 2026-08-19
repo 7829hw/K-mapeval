@@ -453,6 +453,9 @@ class SpatialOperatorRegistry:
     def aggregate_route_groups(
         routes: list[dict[str, Any]], groups: list[list[int]]
     ) -> dict[str, Any]:
+        # `$matrix` is the whole `distance_matrix` node; indexing a dict by 0 raised KeyError and
+        # lost every option total the question compares.
+        routes = _route_list(routes)
         totals: list[dict[str, Any]] = []
         for option_index, indexes in enumerate(groups):
             selected = [routes[index] for index in indexes]
@@ -1327,12 +1330,38 @@ def _as_place(value: Any, argument: str, *, required: bool = True) -> dict[str, 
     raise ValueError(f"PlaceNotFoundError: {argument} has no resolved coordinates")
 
 
+# Where an operator's output keeps its places. `match_options` reports under `retrieved_places`,
+# `nearest` under `ranked`; a planner passes the node, not the field, and the whole record then
+# read as one unresolvable candidate.
+_PLACE_COLLECTION_KEYS = (
+    "ranked",
+    "retrieved_places",
+    "places",
+    "matches",
+    "candidates",
+    "results",
+)
+
+
+def _place_collection(value: Any) -> list[Any]:
+    """The candidates in hand, whether a list was passed or the node that carries one."""
+
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict) and "latitude" not in value:
+        for key in _PLACE_COLLECTION_KEYS:
+            found = value.get(key)
+            if isinstance(found, list) and found:
+                return found
+    return [value]
+
+
 def _as_place_list(
     value: Any, *, keep_unresolved: bool = False
 ) -> list[tuple[int, dict[str, Any]]]:
     """Normalize a candidate collection, keeping each candidate's original index."""
 
-    values = value if isinstance(value, list) else [value]
+    values = _place_collection(value)
     resolved: list[tuple[int, dict[str, Any]]] = []
     for index, item in enumerate(values):
         place = _as_place(item, f"candidate {index}", required=False)

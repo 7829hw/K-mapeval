@@ -2177,3 +2177,37 @@ def test_sum_route_metrics_takes_the_matrix_node_a_planner_referenced() -> None:
         "distance_m": 300,
         "duration_s": 30,
     }
+
+
+def test_a_ranking_takes_the_node_that_carries_the_places() -> None:
+    """`match_options` reports its places under `retrieved_places`, `nearest` under `ranked`.
+
+    A planner passes the node rather than the field, and the whole record then read as one
+    unresolvable candidate — which now raises rather than ranking nothing, so the unwrap has to
+    know where an operator keeps its places.
+    """
+
+    ops = SpatialOperatorRegistry()
+    anchor = {"name": "기준", "latitude": 37.50, "longitude": 127.00}
+    matched = {
+        "mode": "name",
+        "retrieved_places": [
+            {"place_id": "1", "name": "가까운곳", "latitude": 37.501, "longitude": 127.00},
+            {"place_id": "2", "name": "먼곳", "latitude": 37.520, "longitude": 127.00},
+        ],
+        "best_option": 0,
+    }
+    assert ops.nearest(anchor=anchor, candidates=matched)["nearest"]["place_id"] == "1"
+
+
+def test_option_totals_take_the_matrix_node_a_planner_referenced() -> None:
+    ops = SpatialOperatorRegistry()
+    node = {
+        "routes": [
+            {"distance_m": 10, "duration_s": 1, "status": "ok"},
+            {"distance_m": 20, "duration_s": 2, "status": "ok"},
+        ],
+        "matrix": None,
+    }
+    totals = ops.aggregate_route_groups(routes=node, groups=[[0], [1]])
+    assert [entry["duration_s"] for entry in totals["option_totals"]] == [1, 2]

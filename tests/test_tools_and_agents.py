@@ -2299,3 +2299,49 @@ def test_a_place_serialized_back_as_json_text_is_that_place() -> None:
     # A name that merely looks like a brace is still a name.
     plain = PlaceSearchArgs.model_validate({"center": "{서울역", "query": "편의점"})
     assert plain.center == "{서울역"
+
+
+def test_a_ranking_over_bare_node_ids_resolves_them() -> None:
+    """`items: ["d0","d1"]` names two steps of the plan and forgets the `$`."""
+
+    from src.agent.spatial import _bind_step_references
+
+    results = {"d0": {"distance_m": 120.0}, "d1": {"distance_m": 900.0}}
+    bound = _bind_step_references({"items": ["d0", "d1"], "key": "distance_m"}, results)
+    assert bound["items"] == [{"distance_m": 120.0}, {"distance_m": 900.0}]
+    # A string that is not a step the run executed is a string the planner meant literally.
+    literal = _bind_step_references({"items": ["d0", "서울역"], "key": "distance_m"}, results)
+    assert literal["items"] == ["d0", "서울역"]
+
+
+def test_a_nested_itinerary_is_flattened_before_the_stays_are_counted() -> None:
+    """The tool flattens `locations: ["$places"]`; the stays are bound in grounding.
+
+    Counted against the unflattened list they came out length 1 against four places, and the args
+    model rejected the call for the mismatch — after the flattening fix had made the shape legal.
+    """
+
+    from src.agent.spatial import _ground_graph_literals
+
+    question = (
+        "오전 10시 00분에 2C게스트하우스에서 자동차로 출발해 이지영갤러리를 1시간, "
+        "낙낙별길을 1.5시간 동안 차례로 둘러본 뒤 2C게스트하우스로 돌아옵니다. "
+        "몇 시에 돌아오게 되나요?"
+    )
+    steps = [
+        {
+            "id": "finish",
+            "operator": "calculate_finish_time",
+            "arguments": {
+                "start_time": "10:00",
+                "locations": [["2C게스트하우스", "이지영갤러리", "낙낙별길", "2C게스트하우스"]],
+            },
+            "depends_on": [],
+            "output_type": "event",
+            "role": "measure",
+        }
+    ]
+    grounded = _ground_graph_literals(steps, question, ["오후 1시", "오후 2시"], "trip")
+    arguments = grounded[0]["arguments"]
+    assert len(arguments["locations"]) == 4
+    assert len(arguments["stay_durations_s"]) == 4

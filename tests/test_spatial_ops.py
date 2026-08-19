@@ -2066,3 +2066,35 @@ def test_a_concept_ring_keeps_the_measure_the_analysis_stage_named() -> None:
     steps, constraints = normalize_and_validate_graph(factorized, max_steps=8)
     assert all(constraints.values())
     assert [step["id"] for step in steps] == ["places", "banks", "south", "nearest"]
+
+
+def test_a_meal_question_is_not_answered_by_a_cafe() -> None:
+    """Kakao files a cafe as `음식점 > 카페`, so the type word names its neighbour too.
+
+    A "끼니를 해결해야 합니다" question offered a cafe 220 m away and the restaurant it means at
+    461 m. On the option-ranking path there is no retrieval category to keep them apart, so the
+    type test has to.
+    """
+
+    from src.tools.spatial import matches_required_type
+
+    cafe = {"name": "헬리어드", "category": "음식점 > 카페"}
+    bar = {"name": "한강르네상스", "category": "음식점 > 술집"}
+    assert matches_required_type(bar, "FD6") is True
+    assert matches_required_type(cafe, "FD6") is False
+    # The cafe is still a cafe when a cafe is what was asked for.
+    assert matches_required_type(cafe, "카페") is True
+    assert matches_required_type(cafe, "CE7") is True
+
+
+def test_the_type_filter_and_the_ranking_agree_on_what_a_kind_is() -> None:
+    ops = SpatialOperatorRegistry()
+    anchor = {"name": "서함숲", "latitude": 37.5700, "longitude": 126.8800}
+    cafe = {"place_id": "1", "name": "헬리어드", "category": "음식점 > 카페",
+            "latitude": 37.5702, "longitude": 126.8800}
+    restaurant = {"place_id": "2", "name": "한강르네상스", "category": "음식점 > 술집",
+                  "latitude": 37.5740, "longitude": 126.8800}
+    kept = ops.filter_places(places=[cafe, restaurant], required_types=["FD6"])
+    assert [place["place_id"] for place in kept] == ["2"]
+    ranked = ops.nearest(anchor=anchor, candidates=[cafe, restaurant], required_type="음식점")
+    assert ranked["nearest"]["place_id"] == "2"

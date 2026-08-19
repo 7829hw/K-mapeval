@@ -207,15 +207,10 @@ class SpatialOperatorRegistry:
             # closest place of the wrong kind — which is exactly what a mixed candidate list
             # offers. Kept as a filter, not a requirement: a candidate set that matches nothing
             # is a vocabulary gap in the category strings, not evidence that nothing qualifies.
-            terms = [term.casefold() for term in category_terms(required_type)]
             typed = [
                 (index, candidate)
                 for index, candidate in resolved
-                if any(
-                    term
-                    in f"{candidate.get('category', '')} {candidate.get('name', '')}".casefold()
-                    for term in terms
-                )
+                if matches_required_type(candidate, required_type)
             ]
             if typed:
                 resolved = typed
@@ -371,14 +366,6 @@ class SpatialOperatorRegistry:
         open_now: bool | None = None,
     ) -> list[dict[str, Any]]:
         price_set = {value.casefold() for value in (price_levels or [])}
-        # A requested kind arrives as a Korean noun, as a Kakao category code, or as the words
-        # Kakao files the type under; `category_terms` speaks all three. Several types are
-        # alternatives — a place of any one of them qualifies — where the old `all` demanded a
-        # category path containing every one at once, which no place has.
-        type_terms = [
-            [term.casefold() for term in category_terms(str(value))]
-            for value in (required_types or [])
-        ]
         attribute_matches: list[dict[str, Any]] = []
         for _, place in _as_place_list(places, keep_unresolved=True):
             if min_rating is not None and (
@@ -390,14 +377,12 @@ class SpatialOperatorRegistry:
             if open_now is not None and bool(place.get("is_open")) is not open_now:
                 continue
             attribute_matches.append(place)
-        if not type_terms:
+        if not required_types:
             return attribute_matches
         selected = [
             place
             for place in attribute_matches
-            if any(
-                any(term in _category_haystack(place) for term in terms) for terms in type_terms
-            )
+            if any(matches_required_type(place, required) for required in required_types or [])
         ]
         # The kind filter is a preference, exactly as it is in `nearest`: a category vocabulary
         # that does not cover this type is a gap in the lexicon, not evidence that none of these
@@ -980,6 +965,26 @@ def category_terms(required_type: str) -> tuple[str, ...]:
 
 def _category_haystack(place: dict[str, Any]) -> str:
     return f"{place.get('category', '')} {place.get('name', '')}".casefold()
+
+
+# Kakao files a cafe as `음식점 > 카페`, so the word that names the type also names its neighbour.
+# A question about a meal is not answered by a cafe 200 m nearer than the restaurant, and the
+# option-ranking path had no retrieval category to keep them apart. Only overlaps observed in real
+# category strings belong here, and only where the two kinds answer different questions.
+CATEGORY_EXCLUSIONS: dict[str, tuple[str, ...]] = {
+    "음식점": ("카페",),
+}
+
+
+def matches_required_type(place: dict[str, Any], required_type: str) -> bool:
+    """Whether a place is of the kind asked for, in Kakao's own category vocabulary."""
+
+    haystack = _category_haystack(place)
+    key = "".join(str(required_type).split()).casefold()
+    noun = CATEGORY_CODE_NOUNS.get(key.upper(), key)
+    if any(term.casefold() in haystack for term in CATEGORY_EXCLUSIONS.get(noun, ())):
+        return False
+    return any(term.casefold() in haystack for term in category_terms(str(required_type)))
 
 
 def build_duration_matrix(routes: Any) -> dict[str, Any]:

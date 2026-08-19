@@ -63,13 +63,11 @@ not distance, which reports one numeric separation, and not radius, which search
 anchor with a stated radius.
 Also return "target_type": the kind of place that answers the question, as the ordinary Korean
 noun for it (편의점, 약국, 주유소, 카페, 은행, 병원, 주차장, 지하철역, 대형마트, 음식점, 학교 …).
-When the question only describes a need, infer the kind of place that satisfies it — "우산을 사야
-합니다" is 편의점, "두통약을 사야 합니다" is 약국, "기름을 넣어야 합니다" is 주유소, "현금을 찾아야
-합니다" is 은행, "장을 봐야 합니다" is 대형마트 (a week's groceries, not a convenience
-store), "끼니를 해결해야 합니다" is 음식점 (a meal, not a cafe). Pick the kind that actually
-satisfies the need: the options will include a closer place of a neighbouring kind, and naming
-that kind answers a different question. Use null when the question is not asking for a kind of
-place at all.
+When the question only describes a need rather than naming a kind, infer the kind of place that
+satisfies it — "우산을 사야 합니다" is 편의점. Name the kind that actually satisfies the need, at
+the granularity the need implies: a neighbouring kind will usually be closer, and naming it
+answers a different question. Use null when the question is not asking for a kind of place at
+all.
 Include all named places and spatial/temporal constraints.
 Return JSON only:
 {"intent":"direction","concepts":[{"id":"anchor","text":"서울역","concept_type":"location","role":"extent","attributes":{},"depends_on":[]},{"id":"answer","text":"direction","concept_type":"field","role":"measure","attributes":{},"depends_on":["anchor"]}],"measure":"direction"}
@@ -180,9 +178,8 @@ only missing option evidence is resolved, then use match_options; do not geocode
 This holds even when the options already look like a complete list of places: four named options
 are not a candidate set, they are answer texts, and geocoding them and taking the nearest answers
 "which of these is closest" instead of the question asked.
-When the question describes a *need* rather than naming a kind of place — 우산을 사야 합니다,
-두통약을 사야 합니다, 기름을 넣어야 합니다, 현금을 찾아야 합니다, 끼니를 해결해야 합니다 — work out
-which kind of place satisfies it and retrieve that kind. The options will include closer places of
+When the question describes a *need* rather than naming a kind of place, work out which kind of
+place satisfies it and retrieve that kind. The options will include closer places of
 other kinds, so a ranking that ignores the kind returns one of those. If you do rank option places
 directly, filter_places(required_types=[the Korean noun for that kind]) first.
 Supply the question's origin/reference place as batch_geocode.anchor to disambiguate same-name POIs.
@@ -1455,22 +1452,25 @@ def _step(
 # "북쪽 방향에 있는 X 중 가장 가까운 곳" and "이내에 있는 X는". Nothing matched, so the kind of
 # place asked for — which is a literal sitting in the sentence — came only from the Analysis
 # stage's guess, and the pre-validated template fallback could not be built at all.
-_TARGET_TYPE_PATTERNS: dict[str, tuple[str, ...]] = {
-    "nearby": (
-        r"가장\s*가까운\s+(.+?)(?:은|는)\s*다음",
-        r"가장\s*가까운\s+(.+?)(?:은|는|이|가)\s*어디",
-        r"가장\s*가까운\s+(.+?)\s+중",
-    ),
+# The kind of place a question asks for sits between a lead-in that carries the intent and a
+# grammatical tail that carries nothing. Splitting the two is what keeps this extractor about
+# Korean rather than about our benchmarks' sentence templates: an earlier revision wrote one
+# regex per observed sentence ("...은 다음", "...안에 있는 X 목록"), so a question that asked the
+# same thing in another ending lost a literal that was sitting in plain sight.
+_TARGET_TYPE_TAIL = r"\s*(?:은|는|이|가|을|를)?\s*(?:다음|어디|무엇|어느|중|목록)"
+
+_TARGET_TYPE_LEADS: dict[str, tuple[str, ...]] = {
+    "nearby": (r"가장\s*가까운\s+",),
     "direction": (
-        r"(?:북쪽|남쪽|동쪽|서쪽)\s*방향에\s*있는\s+(.+?)\s+중",
-        r"(?:북쪽|남쪽|동쪽|서쪽)에\s*있는\s*가장\s*가까운\s+(.+?)\s+중",
-        r"(?:북쪽|남쪽|동쪽|서쪽)\s*(?:방향)?에\s*있는\s+(.+?)(?:은|는)\s*다음",
+        r"(?:북동|남동|남서|북서|북|남|동|서)쪽\s*(?:방향)?(?:에|으로)\s*있는\s*"
+        r"(?:가장\s*가까운\s*)?",
     ),
-    "radius": (
-        r"이내에\s*있는\s+(.+?)(?:은|는|이|가)\s*(?:다음|어디|무엇)",
-        r"이내에\s*있는\s+(.+?)\s+중",
-        r"안에\s*있는\s+(.+?)\s*목록",
-    ),
+    "radius": (r"(?:이내|안|내)에\s*있는\s+",),
+}
+
+_TARGET_TYPE_PATTERNS: dict[str, tuple[str, ...]] = {
+    intent: tuple(lead + r"(.+?)" + _TARGET_TYPE_TAIL for lead in leads)
+    for intent, leads in _TARGET_TYPE_LEADS.items()
 }
 
 

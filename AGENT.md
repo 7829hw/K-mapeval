@@ -351,7 +351,18 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   `normalize_analysis` carries `target_type` and `_ground_graph_literals` binds it when
   `_extract_target_type` finds nothing in the text — a question phrased as a need ("우산을 사야
   합니다") never states 편의점, and without the inferred type the retrieval loses its category and
-  the ranking answers "nearest of anything", which is a *closer* place of the wrong kind.
+  the ranking answers "nearest of anything", which is a *closer* place of the wrong kind. Both
+  prompts state the *rule* and one example. They used to enumerate the five needs the benchmark's
+  generator uses, two of them added after watching those rows fail, which is the prompt learning
+  the test set rather than the task. What generalizes is "name the kind that actually satisfies
+  the need, at the granularity the need implies"; if a family only works with its need spelled
+  out, that is a finding about the Analysis stage and belongs in the write-up.
+- **A question literal is separated from the grammar around it.** `_TARGET_TYPE_LEADS` carries
+  the lead-in that encodes the intent (가장 가까운 / 방향에 있는 / 이내에 있는) and
+  `_TARGET_TYPE_TAIL` the endings Korean puts after it, and the patterns are their product. One
+  regex per observed sentence is the same overfitting one layer down: the extractor then matches
+  the benchmark rather than the language, and a question asking the same thing another way loses
+  a literal that is sitting in plain sight. The test carries phrasings no dataset row uses.
 - **The kind of place asked for is a question literal, bound like the radius and the direction.**
   `nearest` takes `required_type` and `_ground_graph_literals` binds it from the question or from
   the Analysis stage's inference. Telling the planner in prose to retrieve by category moved this

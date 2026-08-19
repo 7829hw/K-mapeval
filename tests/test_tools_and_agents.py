@@ -2247,17 +2247,25 @@ def test_option_recovery_stays_in_the_sector_the_question_asks_about() -> None:
             "nearby",
             None,
         ),
+        # Phrasings no row in `dataset/` uses. The lead-in carries the intent, the ending is
+        # just Korean, and a question that ends differently still states its kind.
+        ("서울역에서 가장 가까운 약국은 어디인가요?", "nearby", "약국"),
+        ("경복궁 남동쪽 방향에 있는 카페 중 어느 곳이 가장 가깝나요?", "direction", "카페"),
+        ("홍대입구역 반경 500m 안에 있는 서점 목록을 알려주세요", "radius", "서점"),
+        ("서울역 북쪽에 있는 가장 가까운 지하철역은 어디인가요?", "direction", "지하철역"),
     ],
 )
 def test_the_kind_of_place_is_read_from_the_phrasings_the_questions_use(
     question: str, intent: str, expected: str | None
 ) -> None:
-    """Every pattern here was written against a question in `dataset/`.
+    """The lead-in carries the intent; the tail is grammar and must not be enumerated.
 
-    The previous patterns expected "북쪽에 있는 가장 가까운 X 중" and "안에 있는 X 목록"; the
-    benchmarks say "북쪽 방향에 있는 X 중 가장 가까운 곳" and "이내에 있는 X는". Nothing matched,
-    so a literal sitting in the sentence reached the retrieval only as the Analysis stage's guess
-    — and the pre-validated template fallback could not be built at all.
+    An earlier revision wrote one regex per observed sentence — "북쪽에 있는 가장 가까운 X 중",
+    "안에 있는 X 목록" — against benchmarks that say "북쪽 방향에 있는 X 중 가장 가까운 곳" and
+    "이내에 있는 X는". Nothing matched, and a literal sitting in plain sight reached the retrieval
+    only as the Analysis stage's guess. Rewriting the sentences we had seen would have made the
+    extractor a function of the test set, so the split is structural: the last four cases use
+    endings no dataset row does.
     """
 
     from src.agent.spatial import _extract_target_type

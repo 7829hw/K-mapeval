@@ -146,7 +146,18 @@ Deliberate deviations from upstream, and the reason for each:
   `batch_place_details` read normalized cached records from earlier retrieval/enrichment.
 - `reverse_geocode` uses `/v2/local/geo/coord2address.json`; waypoint routes use the official
   `POST /v1/waypoints/directions` and verify returned waypoint names and coordinates.
-- Unsupported travel modes fail explicitly.
+- Unsupported travel modes fail explicitly. Kakao Mobility routes cars only, where Google Directions
+  answers a walking query, so every "걸어가기에 가장 가까운" question was costing a planner a failed
+  call: `GRAPH_PROMPT` says that phrasing means `haversine_distance` / `nearest(metric="haversine")`
+  here. The benchmark's own golds for those families are straight-line distances, so nothing is
+  approximated by saying so.
+- **A leg from a place to itself is answered, not requested.** Google returns a zero-length route
+  for identical endpoints; Kakao Mobility refuses with "출발지와 도착지가 5 m 이내로 설정된 경우
+  경로를 탐색할 수 없음". A trip matrix asks for its own diagonal, so one run collected 750 of
+  those refusals through `distance_matrix` and 64 more through the baseline's `travel_time`, and
+  the generation stage read them as legs that had failed. `_self_route` answers the leg locally in
+  `directions`, `travel_time` and `distance_matrix` alike — the same evidence for both
+  architectures — while an absent *off-diagonal* leg is still reported as missing.
 - SQLite stores normalized `Place` and `Route` payloads, not raw Kakao responses or API keys.
 - **Region prior on name lookups (`KAKAO_SEARCH_CENTER` / `KAKAO_SEARCH_RADIUS_M`).** Neither
   upstream implementation needs one: Google Places disambiguates from a session location, and the

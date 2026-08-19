@@ -1973,3 +1973,29 @@ def test_a_coordinate_literal_is_never_mistaken_for_a_name() -> None:
         ]
     }
     assert _bind_named_places({"center": "37.5,127.0"}, results)["center"] == "37.5,127.0"
+
+
+def test_an_unresolved_geocode_row_is_dropped_rather_than_failing_the_call() -> None:
+    """`batch_geocode` answers every name, including the ones it could not resolve.
+
+    A planner passes the whole list on. One `{"query": …, "place": None}` among good places used
+    to fail the call with seven validation errors about fields an unresolved row does not have,
+    and the tool never ran — while `recover_option_places` exists precisely to look up what is
+    missing.
+    """
+
+    from src.tools.registry import RecoverOptionPlacesArgs
+
+    args = RecoverOptionPlacesArgs.model_validate(
+        {
+            "options": ["A"],
+            "candidates": [
+                {"query": "없는곳", "place": None, "candidates": []},
+                {"place_id": "1", "name": "A", "latitude": 37.5, "longitude": 127.0},
+                {"error": "ValueError: an earlier step failed"},
+            ],
+            "anchor": "X",
+            "radius_m": 1000,
+        }
+    )
+    assert [place.name for place in args.candidates] == ["A"]

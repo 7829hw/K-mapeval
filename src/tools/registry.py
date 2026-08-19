@@ -128,9 +128,27 @@ def _as_place_argument(value: Any) -> Any:
     return value
 
 
+def _is_unresolved_place(value: Any) -> bool:
+    """A geocode row that found nothing, or the marker of a step that failed.
+
+    `batch_geocode` answers every name it was given, including the ones it could not resolve, and
+    a planner passes the whole list on. One `{"query": …, "place": None}` among four good places
+    failed the call with seven validation errors about the fields an unresolved row does not have,
+    and the tool never ran. The row carries no place, so it is dropped — the places beside it are
+    still evidence, and `recover_option_places` exists precisely to look up what is missing.
+    """
+
+    if not isinstance(value, dict):
+        return False
+    if "latitude" in value and "longitude" in value:
+        return False
+    return "error" in value or "query" in value
+
+
 def _as_place_list_argument(value: Any) -> Any:
     if isinstance(value, list):
-        return [_as_place_argument(item) for item in value]
+        normalized = [_as_place_argument(item) for item in value]
+        return [item for item in normalized if not _is_unresolved_place(item)]
     if isinstance(value, dict):
         # The mirror of `_as_place_argument`'s one-element list: a lone place-shaped value where
         # a list is expected is a list of one. A planner that referenced `$geocode.0` instead of

@@ -33,7 +33,10 @@ class _MatrixProvider(MapProvider):
     def place_details(self, place_id: str) -> Place:
         return self._place(place_id)
 
+    route_calls = 0
+
     def directions(self, origin, destination, **_):  # type: ignore[no-untyped-def]
+        type(self).route_calls += 1
         start = origin.name if isinstance(origin, Place) else str(origin)
         end = destination.name if isinstance(destination, Place) else str(destination)
         seconds = 60 * (abs(ord(start[0]) - ord(end[0])) + 1)
@@ -1948,3 +1951,29 @@ def test_a_clock_that_cannot_tell_two_options_apart_is_not_evidence_for_either()
         1,
         "computed_clock",
     )
+
+
+def test_the_diagonal_of_a_matrix_costs_nothing_and_no_api_call() -> None:
+    """Kakao refuses a leg whose ends are the same place, and it should never be asked.
+
+    An `origins = destinations` matrix asked for its own diagonal, and one run spent 750 route
+    calls collecting the refusals. The generation stage then read a matrix full of errors. This
+    is the only leg that may be filled: an absent off-diagonal leg is still missing evidence.
+    """
+
+    provider = _MatrixProvider()
+    registry = ToolRegistry(provider)
+    before = provider.route_calls
+    execution = registry.invoke(
+        "distance_matrix", {"origins": ["S", "A"], "destinations": ["S", "A"]}
+    )
+    assert execution.status == "ok"
+    diagonal = [
+        route
+        for route in execution.output["routes"]
+        if route["origin"] == route["destination"]
+    ]
+    assert len(diagonal) == 2
+    assert all(route["status"] == "ok" and route["duration_s"] == 0 for route in diagonal)
+    assert execution.output["matrix_complete"] is True
+    assert provider.route_calls - before == 2

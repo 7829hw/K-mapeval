@@ -819,6 +819,27 @@ class ToolRegistry:
                     }
                 )
                 continue
+            if _same_endpoint(pair.origin, pair.destination):
+                # A place is no distance from itself, and Kakao refuses to route it: the
+                # diagonal of an origins x destinations matrix came back as 750 route errors in
+                # one run, each one an API call, and the generation stage read them as a matrix
+                # that had failed. This is the one leg that may be filled — an *absent*
+                # off-diagonal leg is still missing evidence, never a zero-cost hop.
+                label = _place_label(pair.origin)
+                routes.append(
+                    {
+                        "pair_index": index,
+                        "label": pair.label,
+                        "origin": label,
+                        "destination": _place_label(pair.destination),
+                        "distance_m": 0,
+                        "duration_s": 0,
+                        "steps": [],
+                        "waypoints": [],
+                        "status": "ok",
+                    }
+                )
+                continue
             try:
                 route = self.provider.directions(
                     pair.origin,
@@ -984,6 +1005,20 @@ def _reject_unresolved_places(name: str, arguments: dict[str, Any]) -> None:
                 f"{name} received an unresolved place for {argument!r}; "
                 "the upstream geocode found no match"
             )
+
+
+def _same_endpoint(origin: str | Place | None, destination: str | Place | None) -> bool:
+    """Whether both ends of a leg are the same place — by id, by name, or by standing on it."""
+
+    if origin is None or destination is None:
+        return False
+    if isinstance(origin, Place) and isinstance(destination, Place):
+        if origin.place_id == destination.place_id:
+            return True
+        return haversine_meters(
+            origin.latitude, origin.longitude, destination.latitude, destination.longitude
+        ) < 5.0
+    return _place_label(origin).strip().casefold() == _place_label(destination).strip().casefold()
 
 
 def _place_label(value: str | Place | None) -> str:

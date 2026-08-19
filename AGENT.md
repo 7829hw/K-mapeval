@@ -345,6 +345,11 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   one path contain them all, and — as `nearest` does — drops a kind filter that matches nothing.
   Each of those emptied the candidate list, and an empty list is what the generation stage guesses
   over: the inferred-category family answered with a cafe 16 m from the anchor.
+  `CATEGORY_EXCLUSIONS` is the same rule pointing the other way: Kakao files a cafe as
+  `음식점 > 카페`, so the word that names the type also names its neighbour, and a question about
+  a meal was answered by a cafe 220 m nearer than the restaurant it meant. `matches_required_type`
+  is the single test both `filter_places` and `nearest` apply, so a filter and the ranking after
+  it can never disagree about what a kind is.
 - **An operator that only reports totals cannot answer a bounded question.** `steps_analysis`
   returned whole-route turn counts, so "how many left turns *before* 왕십리로" had no number
   available except the route's total — and the answer came back confidently over-counted rather

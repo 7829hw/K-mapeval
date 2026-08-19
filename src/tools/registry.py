@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import timedelta
 from difflib import SequenceMatcher
@@ -420,7 +420,28 @@ class ToolExecution:
 class ToolRegistry:
     """One provider-neutral tool surface shared by ReAct and Spatial-Agent."""
 
-    def __init__(self, provider: MapProvider) -> None:
+    #: The tool surface MapEval's own ReAct baseline is given
+    #: (`mapeval-api/Tools.py`: PlaceSearch, PlaceId, PlaceDetails, NearbyPlaces, TravelTime,
+    #: Directions). Everything this registry adds beyond it — `batch_geocode`,
+    #: `batch_place_details`, `distance_matrix`, `calculate_finish_time`,
+    #: `recover_option_places` — is an *aggregation* over those primitives, and aggregation is
+    #: what GeoFlow's operator graph exists to express. Sharing them with the ReAct agent keeps
+    #: our two agents comparable to each other, and makes neither comparable to the paper's
+    #: baseline: a trip question the paper's ReAct must orchestrate over a dozen turns is two
+    #: calls here. Restrict a ReAct registry to this set to reproduce the paper's comparison.
+    MAPEVAL_BASELINE_TOOLS = frozenset(
+        {
+            "place_search",
+            "geocode",
+            "reverse_geocode",
+            "place_details",
+            "nearby_places",
+            "travel_time",
+            "directions",
+        }
+    )
+
+    def __init__(self, provider: MapProvider, *, allowed: Iterable[str] | None = None) -> None:
         self.provider = provider
         self.calls: list[ToolExecution] = []
         self._tools = {
@@ -528,6 +549,15 @@ class ToolRegistry:
                 ),
             )
         }
+
+        if allowed is not None:
+            permitted = set(allowed)
+            unknown = permitted - set(self._tools)
+            if unknown:
+                raise ValueError(f"Unknown tools restricted on ToolRegistry: {sorted(unknown)}")
+            self._tools = {
+                name: tool for name, tool in self._tools.items() if name in permitted
+            }
 
     @property
     def tool_call_count(self) -> int:

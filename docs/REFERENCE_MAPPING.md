@@ -303,3 +303,35 @@ therefore routes with DISTANCE, and the time-window families space their options
 minutes apart so a traffic estimate cannot reach the neighbouring option. The first v3 build did
 neither — it took durations from RECOMMEND and spaced options 25 minutes apart — which is why its
 `multisegment_total` golds disagreed with the tools by up to 15% on a whole chain.
+
+## The ReAct baseline was given the composition it was supposed to lack
+
+The paper's claim is that a GeoFlow operator graph beats a ReAct agent working over map API
+primitives, and it reports that gain on models as weak as GPT-3.5-Turbo. That rules out "our model
+is too small" as an explanation for the gain not reproducing here: a 35B MoE is not worse at
+tool-use loops than GPT-3.5-Turbo. The difference is on the other side of the comparison.
+
+MapEval's own baseline (`mapeval-api/Tools.py`) exposes six tools: PlaceSearch, PlaceId,
+PlaceDetails, NearbyPlaces, TravelTime, Directions. `src/tools/registry.py` exposes twelve, and
+the five extra ones are all aggregations over those primitives:
+
+| tool here | what the paper's baseline must do instead |
+|---|---|
+| `batch_geocode` | PlaceSearch once per name, across as many turns |
+| `batch_place_details` | PlaceDetails once per id |
+| `distance_matrix` | TravelTime once per ordered pair, all held in context |
+| `calculate_finish_time` | routes, stays and clock arithmetic by hand over many turns |
+| `recover_option_places` | ground each option separately |
+
+Aggregating primitives into a typed, executable plan is what GeoFlow is *for*. Putting those
+aggregations in the shared tool layer satisfies this repository's own parity rule — both agents
+reach every tool — and simultaneously hands the baseline the work the architecture was meant to
+do. The measurements line up with that reading exactly: ReAct answers `trip_finish_time` 16/16 in
+two tool calls (`batch_geocode` then `calculate_finish_time`), and the single family where
+Spatial-Agent leads (`nearby_from_need`, 11/14 against 9/14) is the only one with no tool that
+does the whole job, so ReAct has to reason.
+
+`--react-tools mapeval` restricts the baseline to `ToolRegistry.MAPEVAL_BASELINE_TOOLS`. The two
+surfaces answer different questions — "does the graph add anything on top of strong aggregation
+tools" versus "does the graph beat primitives", the latter being the paper's — and
+`metadata.react_tools` records which one a run used.

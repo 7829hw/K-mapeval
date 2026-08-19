@@ -40,6 +40,19 @@ def build_parser() -> argparse.ArgumentParser:
             "when every row carries one)"
         ),
     )
+    result.add_argument(
+        "--react-tools",
+        choices=("full", "mapeval"),
+        default="full",
+        help=(
+            "Tool surface for the ReAct baseline. 'full' shares this repository's registry with "
+            "Spatial-Agent, so the two differ only in architecture. 'mapeval' restricts ReAct to "
+            "the primitives MapEval's own baseline has, which is the comparison the paper reports: "
+            "batch geocoding, distance matrices and multi-stop finish times are aggregations that "
+            "GeoFlow's graph is meant to compose, and handing them to ReAct answers a different "
+            "question. Recorded in the report metadata either way."
+        ),
+    )
     result.add_argument("--output-dir", default="reports")
     result.add_argument("--ids", nargs="*", help="Optional question IDs")
     result.add_argument(
@@ -77,15 +90,31 @@ def build_provider(
 
 @contextmanager
 def create_agent_session(
-    agent_type: str, settings: Settings, provider_kind: str, contexts: list[str]
+    agent_type: str,
+    settings: Settings,
+    provider_kind: str,
+    contexts: list[str],
+    react_tools: str = "full",
 ) -> Iterator[ReactAgent | SpatialAgent]:
-    """Create resources owned by exactly one benchmark worker thread."""
+    """Create resources owned by exactly one benchmark worker thread.
+
+    `react_tools="mapeval"` restricts the ReAct agent to the primitives MapEval's own baseline is
+    given. The extra tools this registry offers — batch geocoding, a distance matrix, a multi-stop
+    finish time — are aggregations over those primitives, which is precisely what GeoFlow's
+    operator graph exists to express. Sharing them keeps our two agents comparable to each other;
+    withholding them makes ours comparable to the paper's. Report which was used.
+    """
 
     provider = build_provider(provider_kind, settings, contexts)
     llm: OpenAIChatClient | None = None
     try:
         llm = OpenAIChatClient(settings)
-        tools = ToolRegistry(provider)
+        allowed = (
+            ToolRegistry.MAPEVAL_BASELINE_TOOLS
+            if agent_type == "react" and react_tools == "mapeval"
+            else None
+        )
+        tools = ToolRegistry(provider, allowed=allowed)
         agent = (
             ReactAgent(llm, tools, max_steps=settings.max_reasoning_steps)
             if agent_type == "react"
@@ -137,7 +166,7 @@ def run(agent_type: str, args: argparse.Namespace) -> dict:
         None,
         dataset,
         agent_factory=lambda: create_agent_session(
-            agent_type, settings, provider_kind, contexts
+            agent_type, settings, provider_kind, contexts, args.react_tools
         ),
         max_workers=concurrency,
         output_dir=Path(args.output_dir),
@@ -148,6 +177,9 @@ def run(agent_type: str, args: argparse.Namespace) -> dict:
             "llm_model": settings.llm_model,
             "llm_base_url": settings.llm_base_url,
             "provider": provider_kind,
+            # Which tool surface the ReAct baseline had. A run is only comparable to the paper
+            # when this says "mapeval", and only comparable across our own agents when "full".
+            "react_tools": args.react_tools,
         },
         question_retries=settings.benchmark_question_retries,
         question_retry_backoff_seconds=settings.benchmark_question_retry_backoff_seconds,

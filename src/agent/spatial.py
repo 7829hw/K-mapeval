@@ -134,9 +134,11 @@ Exact operator contracts:
 - aggregate_route_groups(routes,groups) -> amount; groups contains route indexes per option and
   returns option_totals plus best_distance_option and best_duration_option.
 - merge_places(items) -> object; merges and de-duplicates multiple retrieval branches
-- recover_option_places(options,candidates,anchor,radius_m,category_code?) -> object;
+- recover_option_places(options,candidates,anchor,radius_m,category_code?,direction?) -> object;
   conditionally resolves options absent from ranked retrieval and merges their POIs into the
-  candidate list. Pass the same category_code the retrieval used.
+  candidate list. Pass the same category_code the retrieval used, and the same direction any
+  filter_by_direction used — recovery adds places the filter never saw, so without it the ranking
+  that follows answers without the question's direction.
 - match_options(options,places,anchor?,mode) -> object; grounds options to retrieved POIs
 - match_distance_options(distance,options) -> object; maps a computed distance to numeric options.
   Pass the haversine node itself as distance and copy the option texts verbatim
@@ -1172,6 +1174,16 @@ def _ground_graph_literals(
             )
             if category and len(specifications) == 1:
                 arguments["category_code"] = category
+            if intent == "direction":
+                # Recovery runs after the candidates were filtered and adds the option texts the
+                # retrieval missed — regardless of where they are, until it is told. A recovered
+                # mart 271 m *south* of the anchor out-ranked the northern one the filter had
+                # correctly found at 961 m, and the direction the question asks about was gone
+                # from the answer. The sector is the recovered option's constraint like the
+                # radius already is.
+                requested = _extract_requested_direction(question)
+                if requested:
+                    arguments["direction"] = requested
             grounded.append({**step, "arguments": arguments})
             continue
         if operator in {"match_options", "match_distance_options", "match_type_options"}:

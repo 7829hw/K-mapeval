@@ -2149,3 +2149,42 @@ def test_a_place_is_not_within_its_own_radius() -> None:
     other = {"place_id": "2", "name": "이마트", "latitude": 37.6560, "longitude": 127.0130}
     inside = ops.within_radius(center=center, candidates=[dict(center), other], radius_m=600)
     assert [place["place_id"] for place in inside] == ["2"]
+
+
+def test_option_recovery_stays_in_the_sector_the_question_asks_about() -> None:
+    """Recovery adds places the direction filter never saw.
+
+    A "which mart north of here" question ranked a recovered mart 271 m *south* of the anchor
+    above the northern one the filter had correctly found at 961 m: the recovered option carried
+    no constraint at all, and the direction disappeared from the answer.
+    """
+
+    class _Provider(FakeProvider):
+        def nearby_search(self, center: Any, **kwargs: Any) -> list[Place]:
+            self._api_calls += 1
+            query = str(kwargs.get("query") or "")
+            offsets = {"북쪽마트": 0.01, "남쪽마트": -0.01}
+            if query not in offsets:
+                return []
+            return [
+                Place(
+                    place_id=query,
+                    name=query,
+                    latitude=self.place.latitude + offsets[query],
+                    longitude=self.place.longitude,
+                    category="가정,생활 > 대형마트",
+                )
+            ]
+
+    registry = ToolRegistry(_Provider())
+    arguments = {
+        "options": ["북쪽마트", "남쪽마트"],
+        "candidates": [],
+        "anchor": FakeProvider().place.model_dump(),
+        "radius_m": 5000,
+    }
+    unconstrained = registry.invoke("recover_option_places", arguments)
+    assert {place["name"] for place in unconstrained.output} == {"북쪽마트", "남쪽마트"}
+
+    constrained = registry.invoke("recover_option_places", {**arguments, "direction": "북쪽"})
+    assert [place["name"] for place in constrained.output] == ["북쪽마트"]

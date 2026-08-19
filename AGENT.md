@@ -156,14 +156,18 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   anchored search has already placed each option, and "tightest span" lets scattered option brands
   out-vote a correct anchor and drag the batch to another district. A wrongly distant option is
   harmless — `nearest` never picks it — but a moved anchor invalidates every operator after it.
-- **Option recovery answers the question's category, stays inside its radius, and never returns
-  the anchor.** `recover_option_places` takes the `category_code` the retrieval used (bound by
+- **Option recovery answers the question's category, stays inside its radius and its sector, and
+  never returns the anchor.** `recover_option_places` takes the `category_code` the retrieval used (bound by
   `_ground_graph_literals` from `_nearby_retrieval_specs`) and skips the nationwide fallback when
   it is set, so an option is satisfied by the kind of place being asked for rather than any
   namesake — `목동` in a station question otherwise matched 교보문고 목동점, the anchor itself. The
   uncategorised fallback that remains is a nationwide search, so `_within_anchor_radius` keeps only
   what is actually within the radius asked about: `꽃담공방` came back from 순천, 129 km away, and
-  entered the candidate set as if it were a neighbour.
+  entered the candidate set as if it were a neighbour. `direction` is the same
+  constraint one step further: recovery runs *after* `filter_by_direction` and adds places that
+  filter never saw, so a recovered mart 271 m south of the anchor out-ranked the northern one the
+  filter had correctly found at 961 m, and the direction the question asks about was simply gone
+  from the answer. Whatever bounds the candidates has to bound the recovery.
 - **A name matches one place, and a place answers one option.** `_assign_unique_matches`
   (`src/tools/spatial.py`) pairs option texts with retrieved POIs so neither side is used twice —
   scoring each option independently let one 서울공릉초등학교 clear the floor for both

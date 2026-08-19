@@ -12,6 +12,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from src.models import Place, Route
 from src.tools.map import MapProvider, PlaceNotFoundError
 from src.tools.spatial import (
+    SpatialOperatorRegistry,
+    _cardinal_direction,
     _parse_datetime,
     build_duration_matrix,
     distinguishing_similarity,
@@ -375,6 +377,13 @@ class RecoverOptionPlacesArgs(BaseModel):
         ),
     )
     radius_m: int = Field(default=20_000, ge=1, le=20_000)
+    direction: str | None = Field(
+        default=None,
+        description=(
+            "Cardinal direction the question asks about. Set it when the candidates were "
+            "direction-filtered, so a recovered option is only accepted in the same sector."
+        ),
+    )
 
     @field_validator("radius_m", mode="before")
     @classmethod
@@ -939,11 +948,35 @@ class ToolRegistry:
                 and _place_represents_option(option, match)
                 and match.place_id not in seen_place_ids
                 and _within_anchor_radius(anchor, match, args.radius_m)
+                and _within_anchor_sector(anchor, match, args.direction)
             ):
                 places.append(match)
                 seen_place_ids.add(match.place_id)
         return places
 
+
+
+def _within_anchor_sector(anchor: Place, place: Place, direction: str | None) -> bool:
+    """Whether a recovered place lies in the sector the question asks about.
+
+    Recovery runs after the candidates have been filtered, and it adds the option texts the
+    retrieval did not surface. Without the constraint it adds them regardless of where they are:
+    a "which mart north of here" question ranked a recovered mart 271 m *south* of the anchor
+    above the northern one the filter had correctly found at 961 m. Its own constraint is what
+    the recovered option has to satisfy, exactly as the radius already is.
+    """
+
+    if not direction:
+        return True
+    try:
+        expected = _cardinal_direction(direction)
+    except ValueError:
+        return True
+    bearing = SpatialOperatorRegistry.bearing_to_direction(
+        {"latitude": anchor.latitude, "longitude": anchor.longitude},
+        {"latitude": place.latitude, "longitude": place.longitude},
+    )
+    return bool(bearing["cardinal_direction"] == expected)
 
 
 def _within_anchor_radius(anchor: Place, place: Place, radius_m: int) -> bool:

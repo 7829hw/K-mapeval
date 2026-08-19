@@ -2188,3 +2188,61 @@ def test_option_recovery_stays_in_the_sector_the_question_asks_about() -> None:
 
     constrained = registry.invoke("recover_option_places", {**arguments, "direction": "북쪽"})
     assert [place["name"] for place in constrained.output] == ["북쪽마트"]
+
+
+@pytest.mark.parametrize(
+    ("question", "intent", "expected"),
+    [
+        ("아트힐 연희에서 가장 가까운 대형마트는 다음 중 어디인가요?", "nearby", "대형마트"),
+        (
+            "단비갤러리에서 서쪽 방향에 있는 은행 중 가장 가까운 곳은 다음 중 어디인가요?",
+            "direction",
+            "은행",
+        ),
+        (
+            "서울생활사박물관 별관동에서 직선거리 600m 이내에 있는 대형마트는 다음 중 어디인가요?",
+            "radius",
+            "대형마트",
+        ),
+        (
+            "컬러풀뮤지엄과 뤄니갤러리 양쪽 모두에서 직선거리 1500m 이내에 있는 병원은 "
+            "다음 중 어디인가요?",
+            "radius",
+            "병원",
+        ),
+        # The inferred-category family never states a kind, and "곳" is not one.
+        (
+            "지금 단막극장에 있습니다. 우산을 사야 합니다. 다음 중 걸어가기에 가장 가까운 곳은 "
+            "어디인가요?",
+            "nearby",
+            None,
+        ),
+    ],
+)
+def test_the_kind_of_place_is_read_from_the_phrasings_the_questions_use(
+    question: str, intent: str, expected: str | None
+) -> None:
+    """Every pattern here was written against a question in `dataset/`.
+
+    The previous patterns expected "북쪽에 있는 가장 가까운 X 중" and "안에 있는 X 목록"; the
+    benchmarks say "북쪽 방향에 있는 X 중 가장 가까운 곳" and "이내에 있는 X는". Nothing matched,
+    so a literal sitting in the sentence reached the retrieval only as the Analysis stage's guess
+    — and the pre-validated template fallback could not be built at all.
+    """
+
+    from src.agent.spatial import _extract_target_type
+
+    assert _extract_target_type(question, intent) == expected
+
+
+def test_a_direction_question_has_a_template_to_fall_back_on() -> None:
+    from src.agent.spatial import _bind_prevalidated_template, _extract_anchor
+
+    question = "로데오모텔에서 남쪽 방향에 있는 은행 중 가장 가까운 곳은 다음 중 어디인가요?"
+    graph = _bind_prevalidated_template(
+        "direction", question, ["A", "B", "C", "D"], _extract_anchor(question, "direction")
+    )
+    assert graph is not None
+    # The constraint comes after the enrichment, which is the order recovery needs.
+    operators = [step["operator"] for step in graph]
+    assert operators.index("recover_option_places") < operators.index("filter_by_direction")

@@ -1443,14 +1443,44 @@ def _step(
     }
 
 
+# The phrasings the benchmarks actually use, per intent, most specific first. Each was written
+# against a question in `dataset/`, not from what the phrasing ought to be: the older patterns
+# expected "북쪽에 있는 가장 가까운 X 중" and "안에 있는 X 목록", and the datasets say
+# "북쪽 방향에 있는 X 중 가장 가까운 곳" and "이내에 있는 X는". Nothing matched, so the kind of
+# place asked for — which is a literal sitting in the sentence — came only from the Analysis
+# stage's guess, and the pre-validated template fallback could not be built at all.
+_TARGET_TYPE_PATTERNS: dict[str, tuple[str, ...]] = {
+    "nearby": (
+        r"가장\s*가까운\s+(.+?)(?:은|는)\s*다음",
+        r"가장\s*가까운\s+(.+?)(?:은|는|이|가)\s*어디",
+        r"가장\s*가까운\s+(.+?)\s+중",
+    ),
+    "direction": (
+        r"(?:북쪽|남쪽|동쪽|서쪽)\s*방향에\s*있는\s+(.+?)\s+중",
+        r"(?:북쪽|남쪽|동쪽|서쪽)에\s*있는\s*가장\s*가까운\s+(.+?)\s+중",
+        r"(?:북쪽|남쪽|동쪽|서쪽)\s*(?:방향)?에\s*있는\s+(.+?)(?:은|는)\s*다음",
+    ),
+    "radius": (
+        r"이내에\s*있는\s+(.+?)(?:은|는|이|가)\s*(?:다음|어디|무엇)",
+        r"이내에\s*있는\s+(.+?)\s+중",
+        r"안에\s*있는\s+(.+?)\s*목록",
+    ),
+}
+
+
+# What a question says when it is *not* naming a kind of place. "다음 중 걸어가기에 가장 가까운
+# 곳" is the inferred-category family, whose whole point is that the kind is never stated; reading
+# 곳 as the type would retrieve "places" and hand the ranking every kind there is.
+_PLACEHOLDER_TYPES = frozenset({"곳", "장소", "것", "데", "지점", "위치"})
+
+
 def _extract_target_type(question: str, intent: str) -> str | None:
-    patterns = {
-        "nearby": r"가장\s+가까운\s+(.+?)\s+중",
-        "direction": r"(?:북쪽|남쪽|동쪽|서쪽)에\s+있는\s+가장\s+가까운\s+(.+?)\s+중",
-        "radius": r"안에\s+있는\s+(.+?)\s+목록",
-    }
-    match = re.search(patterns[intent], question)
-    return match.group(1).strip() if match else None
+    for pattern in _TARGET_TYPE_PATTERNS.get(intent, ()):
+        match = re.search(pattern, question)
+        found = match.group(1).strip() if match else ""
+        if found and "".join(found.split()) not in _PLACEHOLDER_TYPES:
+            return found
+    return None
 
 
 def _nearby_retrieval_specs(target: str) -> list[dict[str, Any]]:

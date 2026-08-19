@@ -801,12 +801,13 @@ class SpatialOperatorRegistry:
         """
 
         arrival = _parse_datetime(arrival_time, timezone)
-        stay_seconds = sum(float(value) for value in (stay_durations_s or []))
-        total = float(duration_s) + stay_seconds
+        stay_seconds = sum(_duration_value(value) for value in (stay_durations_s or []))
+        travel_seconds = _duration_value(duration_s)
+        total = travel_seconds + stay_seconds
         start = arrival - timedelta(seconds=total)
         return {
             "arrival_time": arrival.isoformat(),
-            "duration_s": float(duration_s),
+            "duration_s": travel_seconds,
             "stay_duration_s": stay_seconds,
             "total_duration_s": total,
             "start_time": start.isoformat(),
@@ -1347,6 +1348,26 @@ def _as_place_list(
             f"({len(values)} unresolved)"
         )
     return resolved
+
+
+def _duration_value(value: Any) -> float:
+    """Read a duration in seconds from a number or from whatever carries one.
+
+    A planner hands `calculate_start_time` the route it just measured rather than the route's
+    duration, and `float({...})` raised a TypeError that took the whole clock with it. The keys
+    are the ones the operators themselves emit — a tour's `total_cost`, a route's `duration_s` —
+    so this reads a measurement the run already made, never one it did not.
+    """
+
+    if isinstance(value, dict):
+        for key in ("duration_s", "total_duration_s", "total_cost", "travel_duration_s",
+                    "duration", "seconds", "value", "amount"):
+            if key in value:
+                return _duration_value(value[key])
+        raise ValueError("PlaceNotFoundError: no duration in the value supplied")
+    if isinstance(value, list) and len(value) == 1:
+        return _duration_value(value[0])
+    return float(value)
 
 
 def _distance_value(value: Any) -> float:

@@ -2129,3 +2129,28 @@ def test_a_distance_option_is_read_past_its_own_separator() -> None:
         distance={"distance_m": 1058}, options=["1036 m", "1061 m", "1.2 km"]
     )
     assert plain["best_option"] == 1
+
+
+def test_a_clock_reads_the_duration_out_of_whatever_carries_it() -> None:
+    """A planner hands the operator the route it measured, not the route's duration."""
+
+    ops = SpatialOperatorRegistry()
+    from_number = ops.calculate_start_time(
+        arrival_time="오후 6시 00분", duration_s=3600, timezone="Asia/Seoul"
+    )
+    from_route = ops.calculate_start_time(
+        arrival_time="오후 6시 00분",
+        duration_s={"origin": "A", "destination": "B", "distance_m": 12000, "duration_s": 3600},
+        timezone="Asia/Seoul",
+    )
+    assert from_route["start_time"] == from_number["start_time"]
+    from_tour = ops.calculate_start_time(
+        arrival_time="오후 6시 00분",
+        duration_s={"order": [0, 1], "total_cost": 3600.0, "feasible": True},
+        timezone="Asia/Seoul",
+    )
+    assert from_tour["start_time"] == from_number["start_time"]
+    with pytest.raises(ValueError, match="no duration"):
+        ops.calculate_start_time(
+            arrival_time="오후 6시 00분", duration_s={"name": "A"}, timezone="Asia/Seoul"
+        )

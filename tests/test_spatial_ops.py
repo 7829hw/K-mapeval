@@ -1467,6 +1467,7 @@ def test_a_computed_clock_outranks_the_answer_the_generation_stage_wrote() -> No
         "trip": {
             "start_time": "2026-08-19T09:00:00+09:00",
             "finish_time": "2026-08-19T13:36:04+09:00",
+            "derived_clock": "finish_time",
         }
     }
     assert _select_option(
@@ -1478,6 +1479,7 @@ def test_a_computed_clock_outranks_the_answer_the_generation_stage_wrote() -> No
         "start": {
             "arrival_time": "2024-01-01T17:00:00+09:00",
             "start_time": "2024-01-01T13:56:13+09:00",
+            "derived_clock": "start_time",
         }
     }
     reverse_options = ["오후 1시 52분", "오후 12시 17분", "오전 10시 42분", "오후 3시 27분"]
@@ -1578,3 +1580,122 @@ def test_a_stated_return_leg_is_part_of_the_itinerary() -> None:
     steps[0]["arguments"]["place_names"] = [*open_names, "동산장모텔"]
     grounded = _ground_graph_literals(steps, question, [], "trip")
     assert grounded[-1]["arguments"]["locations"] == "$p"
+
+
+def test_the_derived_clock_is_the_one_the_operator_computed() -> None:
+    """A clock operator reports both ends and computes one of them.
+
+    Run forwards the start is the question's and the finish is the answer; run backwards it is
+    the other way round, and nothing in the field names says which. Preferring `finish_time`
+    answered "when must I leave" with the deadline the question had just handed over — six
+    questions in one run, every prediction later than its gold.
+    """
+
+    from src.agent.spatial import _select_option
+
+    reverse_options = ["오후 3시 32분", "오후 5시 52분", "오후 2시 07분", "오후 7시 17분"]
+    reverse = {
+        "s": {
+            "start_time": "2026-08-19T15:58:14+09:00",
+            "finish_time": "2026-08-19T18:00:00+09:00",
+            "derived_clock": "start_time",
+        }
+    }
+    assert _select_option({"predicted_answer": "오후 5시 52분"}, reverse_options, reverse) == (
+        0,
+        "computed_clock",
+    )
+
+    forward_options = ["오후 5시 41분", "오후 4시 46분", "오후 3시 46분", "오후 2시 21분"]
+    forward = {
+        "s": {
+            "start_time": "2026-08-19T09:00:00+09:00",
+            "finish_time": "2026-08-19T13:36:04+09:00",
+            "derived_clock": "finish_time",
+        }
+    }
+    assert _select_option({"predicted_answer": "오후 3시 46분"}, forward_options, forward) == (
+        3,
+        "computed_clock",
+    )
+
+    # A result that does not say what it derived is not a computed clock.
+    silent: dict[str, object] = {"s": {"finish_time": "2026-08-19T13:36:04+09:00"}}
+    assert _select_option({"predicted_answer": "오후 3시 46분"}, forward_options, silent) == (
+        2,
+        "exact_answer_text",
+    )
+
+
+def test_a_clock_operator_says_which_end_it_derived() -> None:
+    from src.tools.registry import ToolRegistry
+
+    registry = ToolRegistry(_MatrixProvider())
+    forward = registry.invoke(
+        "calculate_finish_time", {"start_time": "10:00", "locations": ["A", "B"]}
+    )
+    assert forward.output["derived_clock"] == "finish_time"
+    backward = registry.invoke(
+        "calculate_finish_time", {"arrival_time": "18:00", "locations": ["A", "B"]}
+    )
+    assert backward.output["derived_clock"] == "start_time"
+
+    operators = SpatialOperatorRegistry()
+    reverse = operators.invoke(
+        "calculate_start_time",
+        {"arrival_time": "18:00", "duration_s": 3600, "timezone": "Asia/Seoul"},
+    )
+    assert reverse["derived_clock"] == "start_time"
+
+
+def test_a_round_trip_starts_and_ends_where_the_question_says() -> None:
+    """Only the order of the stops between the endpoints is the plan's business.
+
+    A plan that drops the return arrives one drive early; one that drops the departure loses its
+    first leg *and* shifts every stay onto the wrong stop. Neither fails, and both answer an
+    option away — the second bound every stay to zero, because a stop written as `$geo.1.place`
+    is not a name any stay can be looked up by.
+    """
+
+    from src.agent.spatial import _ground_graph_literals
+
+    question = (
+        "오전 10시 00분에 키이토에서 자동차로 출발해 수락산나들길을 1.5시간, "
+        "서대문형무소역사관을 1.5시간, 갤러리이서를 1시간 동안 차례로 둘러본 뒤 키이토로 "
+        "돌아옵니다. 몇 시에 돌아오게 되나요?"
+    )
+    names = ["키이토", "수락산나들길", "서대문형무소역사관", "갤러리이서"]
+    steps = [
+        {
+            "id": "geo",
+            "operator": "batch_geocode",
+            "arguments": {"place_names": names},
+            "role": "extent",
+        },
+        {
+            "id": "it",
+            "operator": "calculate_finish_time",
+            "arguments": {
+                "start_time": "10:00",
+                # The base written last, and every stop written as a reference.
+                "locations": ["$geo.1.place", "$geo.2.place", "$geo.3.place", "$geo.0.place"],
+                "stay_durations_s": [5400, 5400, 3600, 0],
+            },
+            "depends_on": ["geo"],
+            "role": "measure",
+        },
+    ]
+    grounded = _ground_graph_literals(steps, question, [], "trip")
+    assert grounded[-1]["arguments"]["locations"] == [
+        "키이토",
+        "수락산나들길",
+        "서대문형무소역사관",
+        "갤러리이서",
+        "키이토",
+    ]
+    assert grounded[-1]["arguments"]["stay_durations_s"] == [0.0, 5400.0, 5400.0, 3600.0, 0.0]
+
+    # An itinerary that already runs base-first and closes is left exactly as it is.
+    steps[1]["arguments"]["locations"] = [*names, "키이토"]
+    grounded = _ground_graph_literals(steps, question, [], "trip")
+    assert grounded[-1]["arguments"]["locations"] == [*names, "키이토"]

@@ -766,6 +766,11 @@ class ToolRegistry:
         return {
             "start_time": start.isoformat(),
             "finish_time": finish.isoformat(),
+            # Both clocks are reported and only one of them was computed: run forwards and the
+            # start is the question's, run backwards and the finish is. Nothing in the field
+            # names says which, so say it here rather than let a reader guess — guessing by name
+            # answered a "when must I leave" question with the deadline it was handed.
+            "derived_clock": "finish_time" if args.start_time else "start_time",
             "travel_duration_s": travel_seconds,
             "stay_duration_s": stay_seconds,
             "routes": route_evidence,

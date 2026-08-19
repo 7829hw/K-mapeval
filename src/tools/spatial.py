@@ -792,6 +792,7 @@ class SpatialOperatorRegistry:
             "stay_duration_s": stay_seconds,
             "total_duration_s": total,
             "start_time": start.isoformat(),
+            "derived_clock": "start_time",
             "timezone": timezone,
         }
 

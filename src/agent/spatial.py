@@ -728,6 +728,53 @@ _RETURN_PATTERNS = (
 )
 
 
+def _closed_itinerary(
+    itinerary: list[Any], question: str, trip_node_names: list[str]
+) -> list[Any] | None:
+    """The round trip the question states: out from the base, through the stops, back to it."""
+
+    base = _trip_origin(question, [_location_name(stop) for stop in itinerary])
+    if base is None:
+        base = _trip_origin(question, trip_node_names)
+    if base is None:
+        # Without a stated departure place there is nothing to close the loop on; leave the
+        # plan's own itinerary alone rather than guess which end is the base.
+        return None
+    key = _name_key_for_match(base)
+    middle = [stop for stop in itinerary if _name_key_for_match(_location_name(stop)) != key]
+    closed = [base, *middle, base]
+    return closed if closed != itinerary else None
+
+
+def _trip_origin(question: str, names: list[str]) -> str | None:
+    """Which of the plan's own names the question departs from.
+
+    Matched against the names in hand rather than read out of the sentence: a free-form parse of
+    "오전 10시 00분에 키이토에서 자동차로 출발해" has to decide for itself where the clock ends
+    and the place begins, and the plan already knows what the places are called.
+    """
+
+    for name in names:
+        if name and re.search(
+            rf"{re.escape(name)}\s*(?:에서|에)\s*(?:자동차로\s*)?출발", question
+        ):
+            return name
+    return None
+
+
+def _named_stop(value: Any, trip_node_names: list[str]) -> Any:
+    """An itinerary entry as the question names it, resolving a reference into the node list."""
+
+    if not isinstance(value, str) or not value.strip().startswith("$"):
+        return value
+    reference = canonical_reference(value)
+    parts = [part for part in reference.lstrip("$").split(".") if part]
+    index = next((int(part) for part in parts[1:] if part.isdigit()), None)
+    if index is not None and 0 <= index < len(trip_node_names):
+        return trip_node_names[index]
+    return value
+
+
 def _returns_to_start(question: str) -> bool:
     return any(re.search(pattern, question) for pattern in _RETURN_PATTERNS)
 
@@ -889,21 +936,22 @@ def _ground_graph_literals(
             # mismatch the resolved length, and the args model rejected the call outright.
             itinerary: list[Any] = []
             if isinstance(locations, list) and len(locations) > 1:
-                itinerary = locations
+                # A stop written as `$geo.1.place` is a name the geocode node already holds, and
+                # looking a stay up by the reference text finds nothing — which bound every stay
+                # to zero and lost four hours off a finish time without failing anything.
+                itinerary = [_named_stop(item, trip_node_names) for item in locations]
             elif isinstance(locations, str) and len(trip_node_names) > 1:
                 itinerary = list(trip_node_names)
             if itinerary and _returns_to_start(question):
-                # "…둘러본 뒤 X로 돌아옵니다" states a leg like any other, and the plan that drops
-                # it computes an arrival that is one drive short. The generation stage then knows
-                # the return is missing and invents an allowance for it, which lands an option
-                # away. Whether the plan already closed the loop is visible in the names.
-                first, last = _location_name(itinerary[0]), _location_name(itinerary[-1])
-                if first and _name_key_for_match(first) != _name_key_for_match(last):
-                    itinerary = [*itinerary, itinerary[0]]
-                    if isinstance(locations, list):
-                        arguments["locations"] = itinerary
-                    else:
-                        arguments["locations"] = [*trip_node_names, trip_node_names[0]]
+                # "X에서 출발해 …를 둘러본 뒤 X로 돌아옵니다" states both endpoints; only the order
+                # of the stops between them is the plan's business. A plan that drops the return
+                # arrives one drive early, and one that drops the departure loses its first leg
+                # *and* shifts every stay onto the wrong stop — neither fails, both answer an
+                # option away.
+                closed = _closed_itinerary(itinerary, question, trip_node_names)
+                if closed is not None:
+                    itinerary = closed
+                    arguments["locations"] = closed
             if stays and itinerary:
                 arguments["stay_durations_s"] = [
                     _stay_stated_for(question, _location_name(item)) for item in itinerary
@@ -1439,7 +1487,6 @@ def _is_shortened_name(candidate: str, expected: str) -> bool:
     return bool(candidate_key and candidate_key != expected_key and candidate_key in expected_key)
 
 
-_CLOCK_OUTPUT_FIELDS = ("finish_time", "start_time")
 # The operators default to it and every question in these families is stated in it.
 _CLOCK_TIMEZONE = "Asia/Seoul"
 
@@ -1452,20 +1499,18 @@ def _computed_clock_option(results: dict[str, Any] | None, options: list[str]) -
     parsed_options = [parse_clock_text(option, _CLOCK_TIMEZONE) for option in options]
     if any(option is None for option in parsed_options):
         return None
-    # `calculate_finish_time` echoes the `start_time` it was given, so a result carrying both
-    # holds one answer and one input. The answer is the field the operator derived: a finish
-    # where there is one, a start otherwise. `arrival_time` is deliberately absent from the
-    # fields — it is the deadline the question states, never a computed value.
-    moments: dict[str, set[datetime]] = {field: set() for field in _CLOCK_OUTPUT_FIELDS}
-    for value in results.values():
-        if not isinstance(value, dict):
-            continue
-        for field in _CLOCK_OUTPUT_FIELDS:
-            if isinstance(value.get(field), str) and (
-                parsed := _clock_moment(str(value[field]))
-            ) is not None:
-                moments[field].add(parsed)
-    derived = next((moments[field] for field in _CLOCK_OUTPUT_FIELDS if moments[field]), set())
+    # A clock operator reports both ends and computes one of them: run forwards and the start is
+    # the question's, run backwards and the finish is. Which is which is not visible in the field
+    # names — preferring `finish_time` answered "when must I leave" with the deadline the question
+    # had just handed over — so the operator names the field it derived and only that one counts.
+    derived = {
+        parsed
+        for value in results.values()
+        if isinstance(value, dict)
+        and isinstance(value.get("derived_clock"), str)
+        and isinstance(value.get(str(value["derived_clock"])), str)
+        and (parsed := _clock_moment(str(value[str(value["derived_clock"])]))) is not None
+    }
     if len(derived) != 1:
         # No computed clock, or two of them and no way to know which the question asked for.
         return None

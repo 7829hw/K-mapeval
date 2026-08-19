@@ -387,6 +387,15 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   the same points, which is near enough to land on a plausible wrong option: every miss in the
   multi-segment family was the 0.78x distractor, the signature of summing haversine legs for a
   주행 거리 question. `GRAPH_PROMPT` says which operator each phrasing means.
+- **A question with two anchors is not a neighbourhood retrieval.** `poi_between` and
+  `poi_common_nearby` were the two families where ReAct beat Spatial-Agent on the reproduction
+  benchmark, and the traces say why: the planner retrieved around *one* anchor and matched the
+  options against what came back, which cannot see the other anchor at all. Both shapes compose
+  out of operators that already exist — the corridor question is a detour sum over
+  `haversine_distance` (or a route through the option as a waypoint), and "within R of both" is
+  `within_radius` chained over its own output — so `GRAPH_PROMPT` maps the phrasings onto them.
+  When a family loses to the baseline, check first whether the planner is composing the wrong
+  operators before concluding the evidence is unreachable.
 - **`classification` is the intent the agent routes on, not the paper family it exercises.** It is
   `SUPPORTED_INTENTS`, so it decides template retrieval and grounding; the Appendix E family is
   recorded in `template_id`. Labelling a radius-scoped share question `poi` because it is

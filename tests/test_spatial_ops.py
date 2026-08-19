@@ -2098,3 +2098,14 @@ def test_the_type_filter_and_the_ranking_agree_on_what_a_kind_is() -> None:
     assert [place["place_id"] for place in kept] == ["2"]
     ranked = ops.nearest(anchor=anchor, candidates=[cafe, restaurant], required_type="음식점")
     assert ranked["nearest"]["place_id"] == "2"
+
+
+def test_a_null_measurement_is_skipped_rather_than_crashing_the_ranking() -> None:
+    """A key that is present and null is not a comparable value."""
+
+    ops = SpatialOperatorRegistry()
+    items = [{"label": "a", "distance_m": None}, {"label": "b", "distance_m": 900.0}]
+    assert ops.select_min(items, "distance_m")["label"] == "b"
+    assert [item["label"] for item in ops.sort_by(items, "distance_m")] == ["b"]
+    with pytest.raises(ValueError, match="comparable key"):
+        ops.select_min([{"label": "a", "distance_m": None}], "distance_m")

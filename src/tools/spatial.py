@@ -301,14 +301,14 @@ class SpatialOperatorRegistry:
 
     @staticmethod
     def select_min(items: list[dict[str, Any]], key: str) -> dict[str, Any]:
-        comparable = [item for item in items if _has_path(item, key)]
+        comparable = [item for item in items if _has_comparable(item, key)]
         if not comparable:
             raise ValueError(f"No item contains comparable key: {key}")
         return min(comparable, key=lambda item: float(_path(item, key)))
 
     @staticmethod
     def select_max(items: list[dict[str, Any]], key: str) -> dict[str, Any]:
-        comparable = [item for item in items if _has_path(item, key)]
+        comparable = [item for item in items if _has_comparable(item, key)]
         if not comparable:
             raise ValueError(f"No item contains comparable key: {key}")
         return max(comparable, key=lambda item: float(_path(item, key)))
@@ -318,7 +318,7 @@ class SpatialOperatorRegistry:
         items: list[dict[str, Any]], key: str, descending: bool = False
     ) -> list[dict[str, Any]]:
         return sorted(
-            (item for item in items if _has_path(item, key)),
+            (item for item in items if _has_comparable(item, key)),
             key=lambda item: float(_path(item, key)),
             reverse=descending,
         )
@@ -1114,6 +1114,26 @@ def _has_path(value: dict[str, Any], path: str) -> bool:
     try:
         _path(value, path)
     except (IndexError, KeyError, TypeError, ValueError):
+        return False
+    return True
+
+
+def _has_comparable(value: dict[str, Any], path: str) -> bool:
+    """Whether the item carries that key *as a number*, which is what ranking it needs.
+
+    A key that is present and null is not a comparable value: `select_min` raised
+    `TypeError: float() argument must be ... not 'NoneType'` and took the whole plan's answer with
+    it, where skipping the item leaves the comparison to the items that do carry a measurement.
+    """
+
+    if not _has_path(value, path):
+        return False
+    found = _path(value, path)
+    if isinstance(found, bool) or found is None:
+        return False
+    try:
+        float(found)
+    except (TypeError, ValueError):
         return False
     return True
 

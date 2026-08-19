@@ -1977,3 +1977,14 @@ def test_the_diagonal_of_a_matrix_costs_nothing_and_no_api_call() -> None:
     assert all(route["status"] == "ok" and route["duration_s"] == 0 for route in diagonal)
     assert execution.output["matrix_complete"] is True
     assert provider.route_calls - before == 2
+
+
+def test_two_anchors_are_not_an_anchor() -> None:
+    """"A와 B 양쪽 모두에서 …" reads to the splitter as one long place name."""
+
+    from src.agent.spatial import _extract_anchor
+
+    both = "가좌동 마을극장과 증산역 6호선 양쪽 모두에서 직선거리 1500m 이내에 있는 대형마트는?"
+    assert _extract_anchor(both, "radius") is None
+    one = "호스텔온기에서 직선거리 800m 이내에 있는 대형마트는 다음 중 어디인가요?"
+    assert _extract_anchor(one, "radius") == "호스텔온기"

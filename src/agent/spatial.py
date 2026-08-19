@@ -1569,11 +1569,16 @@ _ANCHOR_PATTERNS = (
 )
 
 
+# "A와 B 양쪽 모두에서 …" reads to the splitters as one long place name. It is two, and there is
+# no single anchor to bind — the question asks for the intersection of two neighbourhoods.
+_TWO_ANCHOR_MARKERS = ("양쪽", "둘 다", "모두에서")
+
+
 def _extract_anchor(question: str, intent: str) -> str | None:
     for pattern in _ANCHOR_PATTERNS:
         match = re.search(pattern, question)
         if match and match.group(1).strip():
-            return match.group(1).strip()
+            return _single_anchor(match.group(1).strip())
     separators = {
         "radius": (" 반경", "에서 직선거리"),
         "trip": ("에서 출발",),
@@ -1583,8 +1588,21 @@ def _extract_anchor(question: str, intent: str) -> str | None:
     }
     for separator in separators.get(intent, ()):
         if separator in question:
-            return question.split(separator, 1)[0].strip()
+            return _single_anchor(question.split(separator, 1)[0].strip())
     return None
+
+
+def _single_anchor(candidate: str) -> str | None:
+    """The anchor, unless the text in hand names two of them.
+
+    `'가좌동 마을극장과 증산역 6호선 양쪽 모두'` was bound as one place name and searched as one:
+    no place matched, and the retrieval it anchored never happened. Two anchors are not an anchor,
+    and the plan's own two-place composition answers the question.
+    """
+
+    if any(marker in candidate for marker in _TWO_ANCHOR_MARKERS):
+        return None
+    return candidate or None
 
 
 def _is_shortened_name(candidate: str, expected: str) -> bool:

@@ -43,6 +43,12 @@ def haversine_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> floa
     return 2 * 6_371_008.8 * math.asin(math.sqrt(hav))
 
 
+# A distance written in an option: a number that starts with a digit, and the unit that follows
+# it. `_BARE_NUMBER` is the fallback for an option that states a plain metre count.
+_MEASURED_DISTANCE = r"(\d[\d,]*(?:\.\d+)?)\s*(?P<unit>km|m)\b"
+_BARE_NUMBER = r"(\d[\d,]*(?:\.\d+)?)"
+
+
 class SpatialOperatorRegistry:
     """Deterministic operators; these never spend Kakao API calls."""
 
@@ -576,11 +582,17 @@ class SpatialOperatorRegistry:
         comparisons: list[dict[str, Any]] = []
         for option_index, raw_option in enumerate(options):
             option = str(raw_option)
-            match = re.search(r"([\d,.]+)\s*(km|m)?", option, re.IGNORECASE)
+            # The number has to start with a digit, and the measurement with a unit wins. The old
+            # `[\d,.]+` matched the comma in "남쪽, 약 6.6km" and then called float("") — every
+            # option of a direction-and-distance question failed on its own separator.
+            match = re.search(_MEASURED_DISTANCE, option, re.IGNORECASE) or re.search(
+                _BARE_NUMBER, option
+            )
             if not match:
                 continue
             value = float(match.group(1).replace(",", ""))
-            option_m = value * 1000 if (match.group(2) or "m").lower() == "km" else value
+            unit = (match.groupdict().get("unit") or "m").lower()
+            option_m = value * 1000 if unit == "km" else value
             comparisons.append(
                 {
                     "option_index": option_index,

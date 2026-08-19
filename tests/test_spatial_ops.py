@@ -2109,3 +2109,23 @@ def test_a_null_measurement_is_skipped_rather_than_crashing_the_ranking() -> Non
     assert [item["label"] for item in ops.sort_by(items, "distance_m")] == ["b"]
     with pytest.raises(ValueError, match="comparable key"):
         ops.select_min([{"label": "a", "distance_m": None}], "distance_m")
+
+
+def test_a_distance_option_is_read_past_its_own_separator() -> None:
+    """"남쪽, 약 6.6km" begins with a comma, and the old pattern matched that comma.
+
+    `[\\d,.]+` accepted the separator as the number and then called `float("")`, so every option
+    of a direction-and-distance question failed to parse — the whole family's measurement step
+    reported an error while the coordinates behind it were correct.
+    """
+
+    ops = SpatialOperatorRegistry()
+    options = ["남쪽, 약 6.6km", "남쪽, 약 10.6km", "북쪽, 약 10.6km", "북쪽, 약 6.6km"]
+    matched = ops.match_distance_options(distance={"distance_m": 6650}, options=options)
+    assert matched["best_option"] == 0
+    assert matched["fits"] is True
+    # A plain metre count still reads as metres.
+    plain = ops.match_distance_options(
+        distance={"distance_m": 1058}, options=["1036 m", "1061 m", "1.2 km"]
+    )
+    assert plain["best_option"] == 1

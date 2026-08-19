@@ -1205,6 +1205,13 @@ def _name_key(value: str) -> str:
 # it. Accepting only ISO 8601 meant the temporal operators could never be driven from the very
 # question they were meant to answer — the tool raised and the agent fell back to guessing.
 _KOREAN_CLOCK = re.compile(r"(오전|오후|아침|저녁|밤)?\s*(\d{1,2})\s*시(?:\s*(\d{1,2})\s*분)?")
+# A planner normalizes the question's "오전 10시 00분" into the machine form before writing it
+# into an argument, and `datetime.fromisoformat` takes neither `10:00` nor `17:00:00` as a
+# datetime. Rejecting the wall clock a planner actually emits failed the clock step outright,
+# and the generation stage then answered a time-window question from prose arithmetic.
+_NUMERIC_CLOCK = re.compile(
+    r"^\s*(오전|오후|아침|저녁|밤)?\s*(\d{1,2}):(\d{2})(?::\d{2})?\s*$"
+)
 
 
 def parse_clock_text(
@@ -1216,7 +1223,7 @@ def parse_clock_text(
     with no date is placed on the reference day rather than rejected.
     """
 
-    match = _KOREAN_CLOCK.search(value)
+    match = _KOREAN_CLOCK.search(value) or _NUMERIC_CLOCK.search(value)
     if not match:
         return None
     hour = int(match.group(2))

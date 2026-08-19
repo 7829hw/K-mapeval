@@ -17,7 +17,9 @@ from src.agent.geoflow import (
     factorize_geoflow,
     normalize_analysis,
     normalize_and_validate_graph,
+    reference_roots,
     retrieve_templates,
+    split_reference_arithmetic,
 )
 from src.llm import ChatClient, LLMUnavailableError
 from src.parsing import parse_answer, parse_json_object
@@ -600,7 +602,7 @@ def _resolve_references(value: Any, results: dict[str, Any]) -> Any:
         return [_resolve_references(item, results) for item in value]
     if not isinstance(value, str):
         return value
-    reference = canonical_reference(value)
+    reference, offset = split_reference_arithmetic(canonical_reference(value))
     if not reference.startswith("$"):
         return value
     root, _, remainder = reference[1:].partition(".")
@@ -615,6 +617,11 @@ def _resolve_references(value: Any, results: dict[str, Any]) -> Any:
             # reference resolution. Operators normalize the remaining shape themselves.
             return current
         current = resolved
+    if offset and isinstance(current, int | float) and not isinstance(current, bool):
+        # The offset is a constant the question states; applying it is leniency about where a
+        # planner wrote the sum, never about what the sum is. A reference that resolves to
+        # anything but a number carries no arithmetic, so it is returned untouched.
+        return current + offset
     return current
 
 
@@ -636,6 +643,31 @@ def _descend_reference(current: Any, part: str) -> Any:
     if key in current:
         return current[key]
     return _UNRESOLVED
+
+
+_INDEXED_REFERENCE = re.compile(r"^(\$[A-Za-z_][\w-]*)\.\d+(?:\.\w+)*$")
+
+
+def _whole_list_reference(value: Any) -> Any:
+    """An itinerary is the whole geocoded list, so an index into it is a planner slip.
+
+    `calculate_finish_time` has no legs to time when it is handed one stop, and a plan that
+    wrote `$places.0` where it meant `$places` failed as a validation error before the clock
+    ran. The node it indexed into is the itinerary it geocoded, so drop the index.
+    """
+
+    if not isinstance(value, str):
+        return value
+    match = _INDEXED_REFERENCE.match(canonical_reference(value))
+    return match.group(1) if match else value
+
+
+def _step_sources(step: dict[str, Any]) -> set[str]:
+    """Every node id a step reads from, whether declared as a dependency or only referenced."""
+
+    sources = {str(name) for name in step.get("depends_on") or []}
+    sources.update(reference_roots(step.get("arguments") or step.get("params") or {}))
+    return sources
 
 
 def _ground_graph_literals(
@@ -677,6 +709,17 @@ def _ground_graph_literals(
             ),
             [],
         )
+    # `steps_analysis` has nothing to count when the route it reads was fetched without its
+    # turn-by-turn guidance, and `directions` omits them by default. The operator then reported
+    # zero turns for every question and the generation stage answered from prose instead, which
+    # is a confident wrong number rather than a failure. A route a step analysis consumes is a
+    # route whose steps are needed, so bind it here rather than hope the prompt lands.
+    stepwise_sources = {
+        source
+        for step in steps
+        if step.get("operator") == "steps_analysis"
+        for source in _step_sources(step)
+    }
     grounded: list[dict[str, Any]] = []
     for step in steps:
         operator = step.get("operator")
@@ -710,9 +753,16 @@ def _ground_graph_literals(
                 arguments["value"] = f"${source}"
             grounded.append({**step, "arguments": arguments})
             continue
+        if operator == "directions" and step.get("id") in stepwise_sources:
+            arguments["include_steps"] = True
+            if route_priority and operator in _PRIORITY_OPERATORS:
+                arguments["priority"] = route_priority
+            grounded.append({**step, "arguments": arguments})
+            continue
         if operator == "calculate_finish_time" and intent == "trip":
             stays, _ = _extract_trip_schedule(question)
-            locations = arguments.get("locations")
+            locations = _whole_list_reference(arguments.get("locations"))
+            arguments["locations"] = locations
             if stays and isinstance(locations, list) and len(locations) > 1:
                 # One stay per location, in the order the itinerary visits them. The stays are
                 # stated in the question exactly; a plan that drops the last one or invents one

@@ -1083,3 +1083,162 @@ def test_picking_an_extreme_works_on_whatever_the_collection_holds() -> None:
 
     for name in ("select_min", "select_max", "sort_by"):
         assert OPERATOR_INPUT_TYPES[name]["items"] == frozenset(CORE_CONCEPTS)
+
+
+@pytest.mark.parametrize(
+    ("written", "expected"),
+    [
+        ("09:00", (9, 0)),
+        ("10:00", (10, 0)),
+        ("17:00:00", (17, 0)),
+        ("오후 5:30", (17, 30)),
+        ("오전 10시 00분", (10, 0)),
+    ],
+)
+def test_a_planner_writes_the_clock_in_the_machine_form(
+    written: str, expected: tuple[int, int]
+) -> None:
+    """The question says "오전 10시 00분"; the planner normalizes it before writing the argument.
+
+    `datetime.fromisoformat` takes neither `10:00` nor `17:00:00` as a datetime, so the clock
+    step failed outright and the generation stage answered a time-window question from prose
+    arithmetic instead — a confident wrong option rather than a failure.
+    """
+
+    from src.tools.spatial import _parse_datetime
+
+    parsed = _parse_datetime(written, "Asia/Seoul")
+    assert (parsed.hour, parsed.minute) == expected
+
+
+def test_a_lone_place_stands_where_a_list_of_places_is_expected() -> None:
+    """The mirror of "a one-element list is the place the planner forgot to index into"."""
+
+    from src.tools.registry import CalculateFinishTimeArgs
+
+    record = {
+        "query": "키이토",
+        "place": {
+            "place_id": "1",
+            "name": "키이토",
+            "address": "서울 노원구",
+            "latitude": 37.6,
+            "longitude": 127.1,
+            "category": "음식점",
+            "phone": "",
+            "place_url": "u",
+            "rating": None,
+            "price_level": None,
+            "opening_hours": None,
+            "timezone": None,
+            "is_open": None,
+        },
+        "candidates": [],
+    }
+    args = CalculateFinishTimeArgs(start_time="10:00", locations=record)
+    assert [place.name for place in args.locations] == ["키이토"]
+
+
+def test_a_reference_carrying_arithmetic_still_names_its_node() -> None:
+    """`$travel_s + 2700` is a reference plus the stay the question states, not a broken id.
+
+    Read undecorated it handed the validator a node id that does not exist, and the `KeyError`
+    escaped the per-step isolation and lost the whole question before any tool ran.
+    """
+
+    from src.agent.geoflow import normalize_and_validate_graph, split_reference_arithmetic
+
+    assert split_reference_arithmetic("$travel_s + 2700") == ("$travel_s", 2700.0)
+    assert split_reference_arithmetic("$legs.duration_s - 600") == ("$legs.duration_s", -600.0)
+    assert split_reference_arithmetic("$plain.path") == ("$plain.path", 0.0)
+
+    graph = {
+        "graph": [
+            {
+                "id": "ends",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["A", "B"]},
+                "role": "extent",
+            },
+            {
+                "id": "travel_s",
+                "operator": "travel_time",
+                "arguments": {"origin": "$ends.0.place", "destination": "$ends.1.place"},
+                "depends_on": ["ends"],
+                "role": "support",
+            },
+            {
+                "id": "total_s",
+                "operator": "identity_measure",
+                "arguments": {"value": "$travel_s.duration_s + 2700"},
+                "depends_on": ["travel_s"],
+                "role": "measure",
+            },
+        ]
+    }
+    steps, _ = normalize_and_validate_graph(graph, max_steps=10)
+    assert [step["id"] for step in steps][-1] == "total_s"
+
+
+def test_an_offset_reference_resolves_to_the_number_plus_the_offset() -> None:
+    from src.agent.spatial import _resolve_references
+
+    results = {"travel_s": {"duration_s": 1800.0}, "who": {"name": "A"}}
+    assert _resolve_references({"value": "$travel_s.duration_s + 2700"}, results) == {
+        "value": 4500.0
+    }
+    # A reference that resolves to anything but a number carries no arithmetic.
+    assert _resolve_references({"value": "$who.name"}, results) == {"value": "A"}
+
+
+def test_a_route_a_step_analysis_reads_is_fetched_with_its_steps() -> None:
+    """`directions` omits turn-by-turn guidance by default, and `steps_analysis` needs it.
+
+    Without it the operator reported zero turns on every route and the generation stage answered
+    from prose, which is a confident wrong count rather than a failure.
+    """
+
+    from src.agent.spatial import _ground_graph_literals
+
+    steps = [
+        {
+            "id": "route",
+            "operator": "directions",
+            "arguments": {"origin": "$ends.0.place", "destination": "$ends.1.place"},
+            "depends_on": ["ends"],
+            "role": "support",
+        },
+        {
+            "id": "turns",
+            "operator": "steps_analysis",
+            "arguments": {"route": "$route", "landmark": "왕십리로"},
+            "depends_on": ["route"],
+            "role": "measure",
+        },
+    ]
+    grounded = _ground_graph_literals(steps, "질문", [], "routing")
+    assert grounded[0]["arguments"]["include_steps"] is True
+
+
+def test_an_itinerary_is_the_whole_list_the_plan_geocoded() -> None:
+    """A finish time has no legs to time when the plan indexes one stop out of the itinerary."""
+
+    from src.agent.spatial import _ground_graph_literals
+
+    steps = [
+        {
+            "id": "places",
+            "operator": "batch_geocode",
+            "arguments": {"place_names": ["기점", "A", "B", "기점"]},
+            "role": "extent",
+        },
+        {
+            "id": "finish",
+            "operator": "calculate_finish_time",
+            "arguments": {"start_time": "10:00", "locations": "$places.0"},
+            "depends_on": ["places"],
+            "role": "measure",
+        },
+    ]
+    grounded = _ground_graph_literals(steps, "오전 10시에 출발합니다", [], "trip")
+    assert grounded[-1]["arguments"]["locations"] == "$places"

@@ -706,7 +706,7 @@ def factorize_geoflow(analysis: dict[str, Any], payload: dict[str, Any]) -> Fact
         step_id = step_ids[index]
         declared = raw.get("depends_on") or raw.get("before") or []
         dependencies = [_normalize_dependency(value, step_ids) for value in declared]
-        dependencies.extend(_reference_roots(raw.get("arguments") or raw.get("params") or {}))
+        dependencies.extend(reference_roots(raw.get("arguments") or raw.get("params") or {}))
         dependency_map[step_id] = list(
             dict.fromkeys(value for value in dependencies if value in step_ids and value != step_id)
         )
@@ -1171,7 +1171,7 @@ def normalize_and_validate_graph(
             known_ids=known_ids,
             declared_dependencies=declared_dependencies,
         )
-        inferred = _reference_roots(arguments)
+        inferred = reference_roots(arguments)
         dependencies = list(dict.fromkeys([*declared_dependencies, *inferred]))
         # The operator's contract is authoritative about what it returns; the planner's declared
         # output_type is a guess it has no authority over. Failing the whole graph over that
@@ -1401,16 +1401,16 @@ def normalize_and_validate_graph(
     return ordered, constraints
 
 
-def _reference_roots(value: Any) -> list[str]:
+def reference_roots(value: Any) -> list[str]:
     roots: list[str] = []
     if isinstance(value, dict):
         for item in value.values():
-            roots.extend(_reference_roots(item))
+            roots.extend(reference_roots(item))
     elif isinstance(value, list):
         for item in value:
-            roots.extend(_reference_roots(item))
+            roots.extend(reference_roots(item))
     elif isinstance(value, str):
-        reference = canonical_reference(value)
+        reference, _ = split_reference_arithmetic(canonical_reference(value))
         if reference.startswith("$"):
             roots.append(reference[1:].split(".", 1)[0])
     return list(dict.fromkeys(roots))
@@ -1458,7 +1458,7 @@ def _reference_type(reference: str, node_type: str) -> str | None:
 
 
 def _references_by_argument(arguments: dict[str, Any]) -> dict[str, list[str]]:
-    return {name: _reference_roots(value) for name, value in arguments.items()}
+    return {name: reference_roots(value) for name, value in arguments.items()}
 
 
 def _reference_strings(value: Any) -> list[str]:
@@ -1466,7 +1466,7 @@ def _reference_strings(value: Any) -> list[str]:
 
     found: list[str] = []
     if isinstance(value, str) and value.strip().startswith("$"):
-        found.append(canonical_reference(value))
+        found.append(split_reference_arithmetic(canonical_reference(value))[0])
     elif isinstance(value, dict):
         for item in value.values():
             found.extend(_reference_strings(item))
@@ -1483,6 +1483,33 @@ def canonical_reference(value: str) -> str:
     if reference.startswith("${") and reference.endswith("}"):
         reference = "$" + reference[2:-1]
     return re.sub(r"\[(\d+)]", r".\1", reference)
+
+
+# A planner that has a scalar in one node and a stated constant in the question writes the sum
+# into the reference itself ("$travel_s + 2700" for the 45 minutes of errands the question
+# states). The node it names is a real node and the constant is a question literal, so the
+# reference is a reference plus an offset — not a broken id. Read undecorated it made
+# `reference_roots` hand `by_id` a key that does not exist, and the `KeyError` escaped the
+# per-step isolation and lost the whole question before any tool ran.
+_REFERENCE_ARITHMETIC = re.compile(
+    r"^(?P<reference>\$[\w.-]+?)\s*(?P<terms>(?:[+-]\s*\d+(?:\.\d+)?\s*)+)$"
+)
+
+
+def split_reference_arithmetic(value: str) -> tuple[str, float]:
+    """Split `$node.path + 2700` into its reference and the offset applied to it.
+
+    The offset is `0.0` when the string is a plain reference, so callers that only want the
+    reference can ignore it.
+    """
+
+    match = _REFERENCE_ARITHMETIC.match(value.strip())
+    if not match:
+        return value, 0.0
+    offset = 0.0
+    for term in re.findall(r"[+-]\s*\d+(?:\.\d+)?", match.group("terms")):
+        offset += float(term.replace(" ", ""))
+    return match.group("reference"), offset
 
 
 def _normalize_dependency(value: Any, raw_ids: list[str]) -> str:

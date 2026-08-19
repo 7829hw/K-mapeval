@@ -121,6 +121,11 @@ def _as_place_argument(value: Any) -> Any:
 def _as_place_list_argument(value: Any) -> Any:
     if isinstance(value, list):
         return [_as_place_argument(item) for item in value]
+    if isinstance(value, dict):
+        # The mirror of `_as_place_argument`'s one-element list: a lone place-shaped value where
+        # a list is expected is a list of one. A planner that referenced `$geocode.0` instead of
+        # `$geocode` failed `locations` as a `list_type` validation error before the clock ran.
+        return [_as_place_argument(value)]
     return value
 
 

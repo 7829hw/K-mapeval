@@ -1043,7 +1043,47 @@ def _matrix_argument(value: Any, node_count: int) -> list[list[float]] | None:
     return [[float(cell) for cell in row] for row in candidate]
 
 
+# What a planner calls a metric, against what the operators store it as. A unit conversion is
+# never an alias -- `distance_km` is not `distance_m` -- and `amount` names no metric at all, so
+# it resolves only when the item carries exactly one of them and there is nothing to guess.
+_METRIC_ALIASES: dict[str, tuple[str, ...]] = {
+    "distance": ("distance_m",),
+    "duration": ("duration_s",),
+    "travel_time": ("duration_s",),
+    "cost": ("total_cost",),
+}
+_AMBIGUOUS_METRICS = ("distance_m", "duration_s")
+# Wrappers a planner points at instead of the record inside, the same shapes `_as_place` unwraps.
+_PATH_WRAPPERS = ("place", "location", "route", "nearest", "value", "result", "farthest_pair")
+
+
 def _path(value: dict[str, Any], path: str) -> Any:
+    try:
+        return _exact_path(value, path)
+    except (IndexError, KeyError, TypeError, ValueError):
+        pass
+    head, _, remainder = path.partition(".")
+    for alias in _METRIC_ALIASES.get(head, ()):
+        try:
+            return _exact_path(value, f"{alias}.{remainder}" if remainder else alias)
+        except (IndexError, KeyError, TypeError, ValueError):
+            continue
+    if head == "amount" and isinstance(value, dict):
+        present = [metric for metric in _AMBIGUOUS_METRICS if metric in value]
+        if len(present) == 1:
+            return value[present[0]]
+    if isinstance(value, dict):
+        for wrapper in _PATH_WRAPPERS:
+            inner = value.get(wrapper)
+            if isinstance(inner, dict | list):
+                try:
+                    return _path(inner, path)
+                except (IndexError, KeyError, TypeError, ValueError):
+                    continue
+    raise KeyError(path)
+
+
+def _exact_path(value: dict[str, Any], path: str) -> Any:
     current: Any = value
     for part in path.split("."):
         current = current[int(part)] if isinstance(current, list) else current[part]

@@ -1988,3 +1988,33 @@ def test_two_anchors_are_not_an_anchor() -> None:
     assert _extract_anchor(both, "radius") is None
     one = "호스텔온기에서 직선거리 800m 이내에 있는 대형마트는 다음 중 어디인가요?"
     assert _extract_anchor(one, "radius") == "호스텔온기"
+
+
+def test_a_ranking_key_is_found_through_the_wrapper_a_planner_pointed_at() -> None:
+    """`select_max(items, "distance_m")` over geocode records used to find no comparable item."""
+
+    ops = SpatialOperatorRegistry()
+    items = [
+        {"query": "A", "place": {"name": "A", "distance_m": 120.0}},
+        {"query": "B", "place": {"name": "B", "distance_m": 900.0}},
+    ]
+    assert ops.select_max(items, "distance_m")["query"] == "B"
+    assert ops.select_min(items, "distance")["query"] == "A"
+    assert [item["query"] for item in ops.sort_by(items, "distance_m")] == ["A", "B"]
+
+
+def test_an_amount_resolves_only_when_the_item_carries_one_metric() -> None:
+    """`amount` names no metric, so it must never choose between two."""
+
+    ops = SpatialOperatorRegistry()
+    single = [{"label": "x", "distance_m": 10.0}, {"label": "y", "distance_m": 4.0}]
+    assert ops.select_min(single, "amount")["label"] == "y"
+    both = [{"label": "x", "distance_m": 10.0, "duration_s": 400.0}]
+    with pytest.raises(ValueError, match="comparable key"):
+        ops.select_min(both, "amount")
+
+
+def test_a_unit_is_never_an_alias() -> None:
+    ops = SpatialOperatorRegistry()
+    with pytest.raises(ValueError, match="comparable key"):
+        ops.select_min([{"distance_km": 1.2}], "distance_m")

@@ -8,7 +8,11 @@ import httpx
 import pytest
 
 from src.tools.kakao import KakaoMapProvider
-from src.tools.map import PlaceNotFoundError, UnsupportedTravelModeError
+from src.tools.map import (
+    PlaceNotFoundError,
+    RouteNotFoundError,
+    UnsupportedTravelModeError,
+)
 
 
 def _document(place_id: str, name: str, x: float, y: float) -> dict:
@@ -509,3 +513,73 @@ def test_region_prior_does_not_reuse_an_unbiased_cache_entry(tmp_path) -> None:
 
     assert len(calls) == 2
     assert "radius" in calls[1].url.params
+
+
+def test_a_waypoint_snapped_to_the_road_is_still_that_waypoint() -> None:
+    """The check catches a route sent through somewhere else, not a metre of rounding.
+
+    Kakao echoed 충무아트센터 대극장 one metre from the coordinate it was sent, and a tolerance of
+    1e-5 degrees — about a metre — refused the whole route. Snapping a POI to the nearest road
+    legitimately moves it tens of metres; a different place is hundreds away.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "routes": [
+                    {
+                        "result_code": 0,
+                        "summary": {
+                            "distance": 100,
+                            "duration": 20,
+                            # ~1 m east of the requested point, as Kakao actually answers.
+                            "waypoints": [{"name": "경유", "x": 127.100011, "y": 37.1}],
+                        },
+                        "sections": [{"roads": [{"name": "도로"}], "guides": []}],
+                    }
+                ]
+            },
+        )
+
+    provider = KakaoMapProvider(
+        "test-key",
+        cache_path=":memory:",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    origin = KakaoMapProvider.normalize_place(_document("o", "출발", 127.0, 37.0))
+    waypoint = KakaoMapProvider.normalize_place(_document("w", "경유", 127.1, 37.1))
+    destination = KakaoMapProvider.normalize_place(_document("d", "도착", 127.2, 37.2))
+    assert provider.directions(origin, destination, waypoints=[waypoint]).waypoints == ("경유",)
+
+
+def test_a_waypoint_kakao_moved_to_another_place_is_refused() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "routes": [
+                    {
+                        "result_code": 0,
+                        "summary": {
+                            "distance": 100,
+                            "duration": 20,
+                            # ~900 m away: a different place, not a snapped one.
+                            "waypoints": [{"name": "경유", "x": 127.11, "y": 37.1}],
+                        },
+                        "sections": [{"roads": [{"name": "도로"}], "guides": []}],
+                    }
+                ]
+            },
+        )
+
+    provider = KakaoMapProvider(
+        "test-key",
+        cache_path=":memory:",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    origin = KakaoMapProvider.normalize_place(_document("o", "출발", 127.0, 37.0))
+    waypoint = KakaoMapProvider.normalize_place(_document("w", "경유", 127.1, 37.1))
+    destination = KakaoMapProvider.normalize_place(_document("d", "도착", 127.2, 37.2))
+    with pytest.raises(RouteNotFoundError):
+        provider.directions(origin, destination, waypoints=[waypoint])

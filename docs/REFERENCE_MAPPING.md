@@ -145,7 +145,15 @@ Deliberate deviations from upstream, and the reason for each:
 - Kakao Local has no standalone place-details REST method; `place_details` and
   `batch_place_details` read normalized cached records from earlier retrieval/enrichment.
 - `reverse_geocode` uses `/v2/local/geo/coord2address.json`; waypoint routes use the official
-  `POST /v1/waypoints/directions` and verify returned waypoint names and coordinates.
+  `POST /v1/waypoints/directions` and verify returned waypoint names and coordinates — within
+  `WAYPOINT_TOLERANCE_M`, because Kakao echoes a waypoint about a metre from the coordinate it was
+  sent and snaps a POI to the nearest road. The check is for a route sent through somewhere else,
+  which is hundreds of metres away, not for rounding.
+- `geocode` falls back to the place-name index when the address index has no entry. Google's
+  geocoder answers a place name; Kakao keeps addresses and place names apart, and a planner writes
+  the question's place name into `geocode` as readily as an address — `대림동 우리 골목형상점가`
+  has one exact place entry and no address entry. The fallback is the lookup `place_search`
+  performs, so it reaches nothing the tool surface does not already carry.
 - Unsupported travel modes fail explicitly. Kakao Mobility routes cars only, where Google Directions
   answers a walking query, so every "걸어가기에 가장 가까운" question was costing a planner a failed
   call: `GRAPH_PROMPT` says that phrasing means `haversine_distance` / `nearest(metric="haversine")`

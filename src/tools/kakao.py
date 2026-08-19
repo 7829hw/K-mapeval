@@ -17,6 +17,7 @@ from src.tools.map import (
     RouteNotFoundError,
     UnsupportedTravelModeError,
 )
+from src.tools.spatial import haversine_meters
 from src.tools.spatial import parse_coordinate_literal as _parse_coordinate_literal
 
 LOCAL_BASE_URL = "https://dapi.kakao.com/v2/local"
@@ -532,6 +533,14 @@ def _mobility_point(place: Place) -> dict[str, Any]:
     return {"name": place.name, "x": place.longitude, "y": place.latitude}
 
 
+# How far Kakao's echoed waypoint may sit from the one we asked for. The check exists to catch a
+# waypoint routed through somewhere else entirely, and the old 1e-5 degrees is about a metre —
+# Kakao returned 충무아트센터 대극장 1.0 m from the coordinate we sent it and the whole route was
+# refused. Snapping a POI to the nearest road legitimately moves it tens of metres; a different
+# place is hundreds away.
+WAYPOINT_TOLERANCE_M = 50.0
+
+
 def _verify_waypoint_summary(
     summary: Mapping[str, Any], expected: tuple[Place, ...]
 ) -> None:
@@ -550,7 +559,10 @@ def _verify_waypoint_summary(
             x, y = float(actual["x"]), float(actual["y"])
         except (KeyError, TypeError, ValueError) as exc:
             raise RouteNotFoundError("Kakao waypoint has invalid coordinates") from exc
-        if abs(x - requested.longitude) > 1e-5 or abs(y - requested.latitude) > 1e-5:
+        if (
+            haversine_meters(requested.latitude, requested.longitude, y, x)
+            > WAYPOINT_TOLERANCE_M
+        ):
             raise RouteNotFoundError(f"Waypoint coordinates do not match {requested.name}")
 
 

@@ -2154,3 +2154,26 @@ def test_a_clock_reads_the_duration_out_of_whatever_carries_it() -> None:
         ops.calculate_start_time(
             arrival_time="오후 6시 00분", duration_s={"name": "A"}, timezone="Asia/Seoul"
         )
+
+
+def test_sum_route_metrics_takes_the_matrix_node_a_planner_referenced() -> None:
+    """`$legs` is the whole `distance_matrix` node, which carries its routes under "routes".
+
+    Refusing the node lost the leg sum and every clock built on it. A leg that failed carries no
+    measurement and is not a zero-length one, so it is left out of the total rather than counted
+    as nothing.
+    """
+
+    ops = SpatialOperatorRegistry()
+    node = {
+        "routes": [
+            {"distance_m": 100, "duration_s": 10, "status": "ok"},
+            {"distance_m": 200, "duration_s": 20, "status": "ok"},
+            {"status": "error", "error": "RouteNotFoundError: ..."},
+        ],
+        "matrix": None,
+    }
+    assert ops.invoke("sum_route_metrics", {"routes": node}) == {
+        "distance_m": 300,
+        "duration_s": 30,
+    }

@@ -1204,10 +1204,15 @@ def _normalize_arguments(name: str, arguments: dict[str, Any]) -> dict[str, Any]
             (args[key] for key in ("routes", "inputs", "legs") if key in args),
             None,
         )
+        # `$legs` is the whole `distance_matrix` node, which carries its routes under "routes"
+        # alongside the matrix it also emits. Referencing the node rather than the list is the
+        # same shape leniency the place arguments get, and refusing it here lost the leg sum and
+        # every clock built on it.
+        routes = _route_list(routes)
         if not isinstance(routes, list):
             raise ValueError("sum_route_metrics requires routes, inputs, or legs")
         if routes and all(isinstance(route, dict) for route in routes):
-            return {"routes": routes}
+            return {"routes": [route for route in routes if route.get("status") != "error"]}
         metric = str(args.get("metric", "distance_m"))
         if metric not in {"distance_m", "duration_s"}:
             raise ValueError("sum metric must be distance_m or duration_s")
@@ -1348,6 +1353,17 @@ def _as_place_list(
             f"({len(values)} unresolved)"
         )
     return resolved
+
+
+def _route_list(value: Any) -> Any:
+    """The routes a planner meant, whether it referenced them or the node that carries them."""
+
+    if isinstance(value, dict):
+        for key in ("routes", "legs", "inputs"):
+            found = value.get(key)
+            if isinstance(found, list):
+                return found
+    return value
 
 
 def _duration_value(value: Any) -> float:

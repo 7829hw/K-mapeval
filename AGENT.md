@@ -519,7 +519,9 @@ result the architecture earned, and re-rolling them measures luck. Retries are c
 each row carries `attempts`, and `performance` carries `retried_question_count`,
 `retry_recovered_ids`, and `llm_unavailable_count`. That last count is a fact for the write-up to
 report next to the accuracy, not a verdict the code acts on. Report `metadata` carries `agent_type`,
-`llm_model`, and `llm_base_url` so a report is attributable after the fact.
+`llm_model`, `llm_base_url` and `code_revision` so a report is attributable after the fact — a
+session of fixes leaves a shelf of reports whose accuracies differ for reasons no other field
+records, and once two runs overlap the timestamp no longer says which code answered.
 
 `SQLiteMapCache` (`src/tools/cache.py`) is keyed by operation + canonicalized arguments, stores
 normalized `Place`/`Route` payloads only — never raw responses or keys — with a TTL (`0` = never

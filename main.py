@@ -180,11 +180,43 @@ def run(agent_type: str, args: argparse.Namespace) -> dict:
             # Which tool surface the ReAct baseline had. A run is only comparable to the paper
             # when this says "mapeval", and only comparable across our own agents when "full".
             "react_tools": args.react_tools,
+            # Which code answered. A night of fixes produces a shelf of reports whose accuracies
+            # differ for reasons no field records, and "which commit was this?" is not
+            # reconstructable from the timestamp once two runs overlap.
+            "code_revision": _code_revision(),
         },
         question_retries=settings.benchmark_question_retries,
         question_retry_backoff_seconds=settings.benchmark_question_retry_backoff_seconds,
     ).run()
     return report.statistics
+
+
+def _code_revision() -> str | None:
+    """The commit this run's code came from, read from the git directory, never a subprocess."""
+
+    head = Path(__file__).resolve().parent / ".git" / "HEAD"
+    try:
+        pointer = head.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not pointer.startswith("ref:"):
+        return pointer[:12] or None
+    reference = head.parent / pointer.split(" ", 1)[1].strip()
+    try:
+        return reference.read_text(encoding="utf-8").strip()[:12] or None
+    except OSError:
+        pass
+    packed = head.parent / "packed-refs"
+    try:
+        lines = packed.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    wanted = pointer.split(" ", 1)[1].strip()
+    for line in lines:
+        commit, _, name = line.partition(" ")
+        if name.strip() == wanted:
+            return commit[:12]
+    return None
 
 
 def main() -> None:

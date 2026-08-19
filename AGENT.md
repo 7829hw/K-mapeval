@@ -315,9 +315,15 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   the word 반경 and silently used its 2000 m default for `직선거리 600m 이내`; `_extract_anchor`
   knew only `에서 가장 가까운` and returned nothing for `지금 X에 있습니다`; the temporal operators
   accepted only ISO 8601 and raised on `오전 10시 00분`, which is exactly what a planner copies out
-  of a Korean question. Each of those made a whole family unanswerable while every other stage
+  of a Korean question. And `_extract_target_type` expected `북쪽에 있는 가장 가까운 X 중`
+  and `안에 있는 X 목록` where the benchmarks say `북쪽 방향에 있는 X 중 가장 가까운 곳` and
+  `이내에 있는 X는`, so the kind of place reached the retrieval only as the Analysis stage's guess
+  and `_bind_prevalidated_template` could not be built for those intents at all — which is how a
+  direction question whose graph failed validation ended with no answer instead of a fallback.
+  Each of those made a whole family unanswerable while every other stage
   worked. When you add an extractor, cover the phrasings a Korean question actually uses, and pin
-  them with a parametrized test.
+  them with a parametrized test. Cover what is *not* a literal too: the inferred-category family
+  asks for `가장 가까운 곳`, and reading 곳 as the kind of place retrieves every kind there is.
 - **When the question does not name the kind of place, the Analysis stage infers it.**
   `normalize_analysis` carries `target_type` and `_ground_graph_literals` binds it when
   `_extract_target_type` finds nothing in the text — a question phrased as a need ("우산을 사야

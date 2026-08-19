@@ -380,7 +380,9 @@ class KakaoMapProvider(MapProvider):
             raise ValueError("Kakao Mobility supports at most 30 waypoints")
         normalized_priority = priority.upper()
         if normalized_priority not in {"RECOMMEND", "TIME", "DISTANCE"}:
-            raise ValueError("priority must be RECOMMEND, TIME, or DISTANCE")
+            raise ValueError(
+                f"priority must be RECOMMEND, TIME, or DISTANCE (got {priority!r})"
+            )
         cache_args = {
             "origin_place_id": origin_place.place_id,
             "origin_latitude": origin_place.latitude,

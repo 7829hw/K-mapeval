@@ -189,6 +189,16 @@ its halves. Feed calculate_start_time the total_cost itself; adding the stays be
 every visit twice. When the trip must finish somewhere — an appointment at a named place, with
 errands on the way — give that place as end_index, or the tour will end at an errand instead.
 For nearest among explicit options, geocode every option and compute deterministically.
+When two anchors bound the question, every option has to be tested against both, so geocode the
+two anchors and all the options in one batch_geocode and compute from those places:
+- "A에서 B까지 이동하는 경로 위에 있는" asks which option adds least to the A→B trip. Compare
+  haversine_distance(A,option) + haversine_distance(option,B) across the options, or route A→B
+  through each option as a waypoint and take the smallest. Ranking by the distance to one anchor
+  answers a different question.
+- "A와 B 양쪽 모두에서 직선거리 R 이내" is an intersection: within_radius(center=A) over the
+  option places, then within_radius(center=B) over that result. What survives both is the answer.
+Neither shape is a neighbourhood retrieval — nearby_places around one anchor cannot see the other,
+so do not answer them with nearby_places plus match_options.
 A vertical bar in one option separates grouped place names; preserve its option index while
 resolving each name. For a radius question use the exact radius and requested
 category/keyword.

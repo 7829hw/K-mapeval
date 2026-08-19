@@ -543,7 +543,8 @@ class ToolRegistry:
                 ),
                 ToolDefinition(
                     "geocode",
-                    "Convert a Korean address into normalized coordinates and address fields.",
+                    "Convert a Korean address into normalized coordinates and address fields; "
+                    "falls back to the place-name index when the address has no entry.",
                     GeocodeArgs,
                     self._geocode,
                 ),
@@ -836,10 +837,21 @@ class ToolRegistry:
     def _geocode(self, args: GeocodeArgs) -> list[Place]:
         found = self.provider.geocode(args.address, limit=args.limit)
         if not found:
-            # An address the geocoder cannot place is missing evidence, and saying so here is the
-            # difference between one clear failure and a cascade: returned as `[]` it became a
-            # `center: []` that failed the retrieval as a pydantic type error, and the error dict
-            # that left behind then failed option recovery with seven more.
+            # Kakao keeps addresses and place names in two indexes, and a planner writes the
+            # question's place name here as readily as an address. `대림동 우리 골목형상점가`
+            # has no address entry and one exact place entry, and failing here cost the whole
+            # question: the anchor never resolved, so no step after it had anything to work on.
+            # This is the lookup `place_search` already performs, so it reaches no evidence the
+            # tool surface does not carry.
+            match = _best_place_match(
+                args.address, _search_place_candidates(self.provider, args.address, limit=15)
+            )
+            found = [match] if match else []
+        if not found:
+            # Still nothing, and saying so here is the difference between one clear failure and a
+            # cascade: returned as `[]` it became a `center: []` that failed the retrieval as a
+            # pydantic type error, and the error dict that left behind then failed option
+            # recovery with seven more.
             raise PlaceNotFoundError(f"Kakao has no coordinates for {args.address!r}")
         return found
 

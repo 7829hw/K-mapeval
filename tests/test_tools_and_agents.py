@@ -2345,3 +2345,30 @@ def test_a_nested_itinerary_is_flattened_before_the_stays_are_counted() -> None:
     arguments = grounded[0]["arguments"]
     assert len(arguments["locations"]) == 4
     assert len(arguments["stay_durations_s"]) == 4
+
+
+def test_geocode_falls_back_to_the_place_name_index() -> None:
+    """Kakao keeps addresses and place names in two indexes.
+
+    `대림동 우리 골목형상점가` has no address entry and one exact place entry. Failing there cost
+    the whole question: the anchor never resolved, so no step after it had anything to work on.
+    """
+
+    class _AddresslessProvider(FakeProvider):
+        def geocode(self, address: str, *, limit: int = 5) -> list[Place]:
+            self._api_calls += 1
+            return []
+
+    registry = ToolRegistry(_AddresslessProvider())
+    execution = registry.invoke("geocode", {"address": "대림동 우리 골목형상점가"})
+    assert execution.status == "ok"
+    assert execution.output[0]["name"] == "대림동 우리 골목형상점가"
+
+    class _EmptyProvider(_AddresslessProvider):
+        def search_place(self, query: str, *, limit: int = 5) -> list[Place]:
+            self._api_calls += 1
+            return []
+
+    missing = ToolRegistry(_EmptyProvider()).invoke("geocode", {"address": "없는주소"})
+    assert missing.status == "error"
+    assert "PlaceNotFoundError" in missing.error

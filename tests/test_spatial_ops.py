@@ -597,3 +597,152 @@ def test_a_requested_kind_matches_what_kakao_calls_it(
     haystack = category.casefold()
     hit = any(term.casefold() in haystack for term in category_terms(required))
     assert hit is matches
+
+
+def test_a_reference_is_typed_by_the_field_it_names() -> None:
+    """`tsp_tw` outputs a network; `$tsp.total_cost` is the tour's duration.
+
+    Typing the reference by the node instead of the field refused eleven correctly-composed
+    plans in one run — the exact chain a "what time must I leave" question needs.
+    """
+
+    from src.agent.geoflow import normalize_and_validate_graph
+
+    graph = {
+        "graph": [
+            {
+                "id": "places",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["A", "B", "C"]},
+                "role": "extent",
+            },
+            {
+                "id": "legs",
+                "operator": "distance_matrix",
+                "arguments": {"origins": ["A", "B", "C"], "destinations": ["A", "B", "C"]},
+                "depends_on": ["places"],
+                "role": "support",
+            },
+            {
+                "id": "tsp",
+                "operator": "tsp_tw",
+                "arguments": {"nodes": "$places", "distance_matrix": "$legs"},
+                "depends_on": ["places", "legs"],
+                "role": "support",
+            },
+            {
+                "id": "start",
+                "operator": "calculate_start_time",
+                "arguments": {
+                    "arrival_time": "오후 5시",
+                    "duration_s": "$tsp.total_cost",
+                    "timezone": "Asia/Seoul",
+                },
+                "depends_on": ["tsp"],
+                "role": "measure",
+            },
+        ]
+    }
+    steps, constraints = normalize_and_validate_graph(graph, max_steps=10)
+    assert [step["id"] for step in steps] == ["places", "legs", "tsp", "start"]
+    assert constraints["connectivity"] is True
+
+
+def test_a_bare_reference_of_the_wrong_type_is_still_refused() -> None:
+    """Path-awareness must not disarm G3 for references that name the whole output."""
+
+    from src.agent.geoflow import normalize_and_validate_graph
+
+    graph = {
+        "graph": [
+            {
+                "id": "places",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["A"]},
+                "role": "extent",
+            },
+            {
+                "id": "start",
+                "operator": "calculate_start_time",
+                "arguments": {
+                    "arrival_time": "오후 5시",
+                    "duration_s": "$places",
+                    "timezone": "Asia/Seoul",
+                },
+                "depends_on": ["places"],
+                "role": "measure",
+            },
+        ]
+    }
+    with pytest.raises(ValueError, match="Type compatibility violation"):
+        normalize_and_validate_graph(graph, max_steps=10)
+
+
+def test_a_node_nothing_consumes_is_pruned_not_refused() -> None:
+    """An unused node is a planner leftover; the rest of the plan still answers the question."""
+
+    from src.agent.geoflow import normalize_and_validate_graph
+
+    graph = {
+        "graph": [
+            {
+                "id": "ends",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["A", "B"]},
+                "role": "extent",
+            },
+            {
+                "id": "orphan",
+                "operator": "nearby_places",
+                "arguments": {"center": "$ends.0.place", "category_code": "CE7"},
+                "depends_on": ["ends"],
+                "role": "support",
+            },
+            {
+                "id": "span",
+                "operator": "haversine_distance",
+                "arguments": {"place_a": "$ends.0.place", "place_b": "$ends.1.place"},
+                "depends_on": ["ends"],
+                "role": "measure",
+            },
+        ]
+    }
+    steps, _ = normalize_and_validate_graph(graph, max_steps=10)
+    assert [step["id"] for step in steps] == ["ends", "span"]
+
+
+def test_an_arithmetic_expression_names_the_node_it_depends_on() -> None:
+    """Planners write the sum they intend into depends_on; the node named there is still real."""
+
+    from src.agent.geoflow import normalize_and_validate_graph
+
+    graph = {
+        "graph": [
+            {
+                "id": "ends",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["A", "B"]},
+                "role": "extent",
+            },
+            {
+                "id": "drive_time",
+                "operator": "travel_time",
+                "arguments": {"origin": "$ends.0.place", "destination": "$ends.1.place"},
+                "depends_on": ["ends"],
+                "role": "support",
+            },
+            {
+                "id": "leave_by",
+                "operator": "calculate_start_time",
+                "arguments": {
+                    "arrival_time": "오후 5시",
+                    "duration_s": "$drive_time.duration_s",
+                    "timezone": "Asia/Seoul",
+                },
+                "depends_on": ["drive_time + 3600"],
+                "role": "measure",
+            },
+        ]
+    }
+    steps, _ = normalize_and_validate_graph(graph, max_steps=10)
+    assert steps[-1]["depends_on"] == ["drive_time"]

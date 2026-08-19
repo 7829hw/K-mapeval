@@ -1201,9 +1201,14 @@ def normalize_and_validate_graph(
             accepted = accepted_inputs.get(argument_name)
             if not accepted:
                 continue
+            paths = {
+                reference.lstrip("$").split(".")[0]: reference
+                for reference in _reference_strings(step["arguments"].get(argument_name))
+            }
             for dependency in references:
-                dependency_type = by_id[dependency]["output_type"]
-                if dependency_type not in accepted:
+                node_type = by_id[dependency]["output_type"]
+                dependency_type = _reference_type(paths.get(dependency, dependency), node_type)
+                if dependency_type is not None and dependency_type not in accepted:
                     raise ValueError(
                         f"Type compatibility violation: {dependency} outputs {dependency_type}, "
                         f"but {step['operator']}.{argument_name} accepts {sorted(accepted)}"
@@ -1224,6 +1229,35 @@ def normalize_and_validate_graph(
     for step in steps:
         for dependency in step["depends_on"]:
             outgoing[dependency].add(step["id"])
+
+    # A node nothing consumes is a planner leftover, not a broken plan: the rest of the graph
+    # answers the question perfectly well without it. Dropping it normalizes the draft into one
+    # that satisfies G5, where refusing the whole graph cost the question instead.
+    while True:
+        unused = [
+            step["id"]
+            for step in steps
+            if step["role"] != "measure" and not _reaches_measure(step["id"], outgoing, measures)
+        ]
+        if not unused:
+            break
+        dropped = set(unused)
+        steps = [step for step in steps if step["id"] not in dropped]
+        for step in steps:
+            step["depends_on"] = [
+                dependency for dependency in step["depends_on"] if dependency not in dropped
+            ]
+        by_id = {step["id"]: step for step in steps}
+        extents = [step["id"] for step in steps if step["role"] in CONTEXTUAL_ROLES]
+        outgoing = {step["id"]: set() for step in steps}
+        for step in steps:
+            for dependency in step["depends_on"]:
+                outgoing[dependency].add(step["id"])
+    if not extents:
+        raise ValueError("GeoFlow graph has no EXTENT or TEXTENT contextual node")
+    # The order was computed before pruning, so it still lists nodes that are gone.
+    ordered = _topological_sort(steps)
+
     for step in steps:
         if not _reachable_from_context(step["id"], by_id, extents):
             raise ValueError(
@@ -1341,8 +1375,64 @@ def _reference_roots(value: Any) -> list[str]:
     return list(dict.fromkeys(roots))
 
 
+# A reference that names a field is a projection, not the operator's whole output, so the node's
+# declared type does not describe it: `tsp_tw` outputs a network, but `$tsp.total_cost` is the
+# tour's duration and belongs wherever an amount does. Rejecting those cost eleven questions in
+# one run to plans that were composed correctly. Types for the projections planners actually
+# take; any other path is left unconstrained rather than refused.
+OUTPUT_FIELD_TYPES: dict[str, str] = {
+    "total_cost": "amount",
+    "duration_s": "amount",
+    "travel_duration_s": "amount",
+    "stay_duration_s": "amount",
+    "distance_m": "amount",
+    "distance_km": "amount",
+    "percentage": "amount",
+    "proportion": "proportion",
+    "routes": "field",
+    "steps": "field",
+    "order": "object",
+    "nearest": "object",
+    "ranked": "object",
+    "place": "object",
+    "candidates": "object",
+    "finish_time": "event",
+    "start_time": "event",
+}
+
+
+def _reference_type(reference: str, node_type: str) -> str | None:
+    """The type a `$node.path` reference actually carries, or None when nothing is claimed."""
+
+    parts = [part for part in reference.lstrip("$").split(".") if part]
+    if len(parts) < 2:
+        return node_type
+    for part in reversed(parts[1:]):
+        if part in OUTPUT_FIELD_TYPES:
+            return OUTPUT_FIELD_TYPES[part]
+        if part.isdigit():
+            continue
+        return None
+    return node_type
+
+
 def _references_by_argument(arguments: dict[str, Any]) -> dict[str, list[str]]:
     return {name: _reference_roots(value) for name, value in arguments.items()}
+
+
+def _reference_strings(value: Any) -> list[str]:
+    """Every `$...` reference in an argument tree, with its path kept."""
+
+    found: list[str] = []
+    if isinstance(value, str) and value.strip().startswith("$"):
+        found.append(canonical_reference(value))
+    elif isinstance(value, dict):
+        for item in value.values():
+            found.extend(_reference_strings(item))
+    elif isinstance(value, list):
+        for item in value:
+            found.extend(_reference_strings(item))
+    return found
 
 
 def canonical_reference(value: str) -> str:
@@ -1359,7 +1449,16 @@ def _normalize_dependency(value: Any, raw_ids: list[str]) -> str:
         index = int(value)
         if 0 <= index < len(raw_ids):
             return raw_ids[index]
-    return str(value)
+    text = str(value)
+    if text in raw_ids:
+        return text
+    # Planners sometimes write the arithmetic they intend into the dependency itself
+    # ("drive_time + 3600"). The dependency it names is still the node it depends on, and the
+    # sum belongs in the argument, so read the node out rather than failing the whole graph.
+    named = [candidate for candidate in raw_ids if re.search(rf"\b{re.escape(candidate)}\b", text)]
+    if len(named) == 1:
+        return named[0]
+    return text
 
 
 def _rewrite_placeholder_references(

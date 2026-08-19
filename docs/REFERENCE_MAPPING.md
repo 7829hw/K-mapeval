@@ -280,3 +280,26 @@ compositional question only gives structure a chance to pay off — any one stag
 the question throws that chance away entirely.** Three separate extractors had been written
 against a single Korean phrasing each (`반경` only, `에서 가장 가까운` only, ISO 8601 only), and
 each silently disabled a whole family while every other stage worked.
+
+## Kakao routing is only reproducible by distance
+
+Measured on one pair (은보갤러리 → 롯데슈퍼프레시 광진구의점, 13,990 m apart in a straight line):
+
+| priority | distance | duration |
+|---|---|---|
+| RECOMMEND | 17,879 m, then 23,041 m | 2,603 s / 2,457 s |
+| TIME | 23,041 m | 3,285 s |
+| DISTANCE | 16,992 m | 3,243 s, then 4,337 s |
+
+RECOMMEND and TIME both optimize against live speeds, so the route itself moves between calls —
+a 29% spread on distance, wider than the gap between two answer options. DISTANCE is a
+shortest-path over the road graph and returned the same distance every time. But the *duration*
+moved by a third even on that fixed route, because a duration is always an estimate of current
+traffic.
+
+The consequence for this benchmark: a distance gold is a fact about the road network and can be
+graded exactly; a duration gold is a snapshot and can only be graded coarsely. `Builder.route`
+therefore routes with DISTANCE, and the time-window families space their options at least 85
+minutes apart so a traffic estimate cannot reach the neighbouring option. The first v3 build did
+neither — it took durations from RECOMMEND and spaced options 25 minutes apart — which is why its
+`multisegment_total` golds disagreed with the tools by up to 15% on a whole chain.

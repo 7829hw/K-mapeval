@@ -72,7 +72,11 @@ def _clock(moment: datetime) -> str:
 
 
 def verify(row: dict[str, Any], registry: ToolRegistry, ops: SpatialOperatorRegistry) -> str:
+    from src.agent.spatial import _extract_route_priority
+
     template = row["template_id"]
+    # The question names its route; grounding binds that for the agent, so the check does too.
+    priority = _extract_route_priority(row["question"]) or "RECOMMEND"
     options, gold, evidence = row["options"], row["answer"], row["gold_evidence"]
 
     if template == "trip_finish_time":
@@ -87,6 +91,7 @@ def verify(row: dict[str, Any], registry: ToolRegistry, ops: SpatialOperatorRegi
             # end the missing entries belong to, which is why the tool refuses it.
             stay_durations_s=[0, *evidence["stay_s"], 0],
             timezone="Asia/Seoul",
+            priority=priority,
         )
         finish = datetime.fromisoformat(result["finish_time"]).replace(second=0, microsecond=0)
         choice = _nearest_option(options, finish.hour * 60 + finish.minute, _minutes)
@@ -101,6 +106,7 @@ def verify(row: dict[str, Any], registry: ToolRegistry, ops: SpatialOperatorRegi
                 {"origin": a, "destination": b}
                 for a, b in zip(chain, chain[1:], strict=False)
             ],
+            priority=priority,
         )
         legs = [entry.get("duration_s") for entry in matrix["routes"]]
         if any(value is None for value in legs):
@@ -127,6 +133,7 @@ def verify(row: dict[str, Any], registry: ToolRegistry, ops: SpatialOperatorRegi
                 {"origin": a, "destination": b}
                 for a, b in zip(chain, chain[1:], strict=False)
             ],
+            priority=priority,
         )
         totals = ops.invoke("sum_route_metrics", {"routes": matrix["routes"]})
         kilometres = round(totals["distance_m"] / 1000, 1)
@@ -164,7 +171,12 @@ def verify(row: dict[str, Any], registry: ToolRegistry, ops: SpatialOperatorRegi
         origin, rest = row["question"].split("에서", 1)
         destination = rest.split("까지")[0]
         route = call(
-            registry, "directions", origin=origin, destination=destination, include_steps=True
+            registry,
+            "directions",
+            origin=origin,
+            destination=destination,
+            include_steps=True,
+            priority=priority,
         )
         steps = route["steps"]
         boundary = evidence["boundary_road"]

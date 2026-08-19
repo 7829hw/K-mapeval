@@ -23,6 +23,7 @@ import argparse
 import itertools
 import json
 import random
+import re
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -86,15 +87,60 @@ def _clock(moment: datetime) -> str:
 
 
 def _time_options(
-    gold: datetime, rng: random.Random, offsets_min: tuple[int, ...] = (-65, -35, 30, 55, 80)
+    gold: datetime, rng: random.Random, offsets_min: tuple[int, ...] = (-150, -90, 85, 145, 200)
 ) -> list[str]:
-    """Times far enough apart that route noise cannot flip them, close enough to demand the sum."""
+    """Times far enough apart that a traffic estimate cannot flip them.
+
+    A duration is a live estimate even at a fixed routing priority — the identical route came
+    back as 3,243 s and then 4,337 s, a third of itself. Over four legs that is tens of minutes
+    on the clock, so the nearest wrong option has to sit further away than that or the question
+    grades the traffic rather than the plan.
+    """
 
     picked = rng.sample(list(offsets_min), 3)
     return [_clock(gold), *[_clock(gold + timedelta(minutes=value)) for value in picked]]
 
 
 # -------------------------------------------------------- Time-Window-Reverse
+
+
+def _survives_traffic(
+    builder: Builder,
+    chain: list[Place],
+    fixed_seconds: float,
+    gold: datetime,
+    options: list[str],
+    depart: datetime,
+    sign: int = 1,
+) -> bool:
+    """Keep only rows whose answer holds under a second, differently-routed traffic estimate.
+
+    A duration is a live estimate: the same fixed route came back as 3,243 s and then 4,337 s.
+    Widening the options absorbs most of that, but not on every chain, and a row whose answer
+    flips with the traffic grades the hour it was asked in rather than the plan. Measured here
+    against RECOMMEND, which re-optimizes against current speeds, so a row that agrees under both
+    is one whose answer does not depend on which route the agent is given.
+    """
+
+    legs = [
+        builder.route(a, b, priority="RECOMMEND")
+        for a, b in zip(chain, chain[1:], strict=False)
+    ]
+    if any(route is None for route in legs):
+        return False
+    alternative = depart + sign * timedelta(
+        seconds=sum(route.duration_s for route in legs) + fixed_seconds
+    )
+    alternative = alternative.replace(second=0, microsecond=0)
+
+    def minutes(text: str) -> int:
+        match = re.search(r"(오전|오후)\s*(\d+)시\s*(\d+)분", text)
+        hour = int(match.group(2)) % 12 + (12 if match.group(1) == "오후" else 0)
+        return hour * 60 + int(match.group(3))
+
+    target = alternative.hour * 60 + alternative.minute
+    nearest = min(range(len(options)), key=lambda i: abs(minutes(options[i]) - target))
+    return options[nearest] == _clock(gold)
 
 
 def trip_finish_time(builder: Builder, pool: Pool, rng: random.Random, count: int) -> list[dict]:
@@ -135,14 +181,20 @@ def trip_finish_time(builder: Builder, pool: Pool, rng: random.Random, count: in
         plan = ", ".join(
             f"{eul(place.name)} {stay:g}시간" for place, stay in zip(stops, stays, strict=True)
         )
+        options = _time_options(gold, rng)
+        if not _survives_traffic(
+            builder, [base, *stops, base], sum(stay * 3600 for stay in stays), gold, options,
+            depart,
+        ):
+            continue
         made.append(
             {
                 "question": (
                     f"{_clock(depart)}에 {base.name}에서 자동차로 출발해 {plan} 동안 차례로 "
-                    f"둘러본 뒤 {base.name}로 돌아옵니다. 방문 순서는 적은 그대로입니다. "
-                    "몇 시에 돌아오게 되나요?"
+                    f"둘러본 뒤 {base.name}로 돌아옵니다. 방문 순서는 적은 그대로이고 구간마다 "
+                    "가장 빠른 경로로 이동합니다. 몇 시에 돌아오게 되나요?"
                 ),
-                "options": _time_options(gold, rng),
+                "options": options,
                 "answer": 0,
                 "classification": "trip",
                 "template_id": "trip_finish_time",
@@ -209,14 +261,19 @@ def trip_latest_departure(
         errand_text = ", ".join(
             f"{place.name}에서 {stay}분" for place, stay in zip(errands, stays, strict=True)
         )
+        options = _time_options(gold, rng, offsets_min=(-155, -95, 80, 140, 195))
+        if not _survives_traffic(
+            builder, chain, sum(stay * 60 for stay in stays), gold, options, arrival, sign=-1
+        ):
+            continue
         made.append(
             {
                 "question": (
                     f"{target.name}에서 {_clock(arrival)}에 약속이 있습니다. 가는 길에 "
-                    f"{errand_text}씩 들러야 하고, 이동은 모두 자동차로 합니다. "
-                    f"{base.name}에서 늦어도 몇 시에 출발해야 하나요?"
+                    f"{errand_text}씩 들러야 하고, 이동은 모두 자동차로 가장 빠른 경로를 "
+                    f"이용합니다. {base.name}에서 늦어도 몇 시에 출발해야 하나요?"
                 ),
-                "options": _time_options(gold, rng, offsets_min=(-70, -40, 25, 50, 75)),
+                "options": options,
                 "answer": 0,
                 "classification": "trip",
                 "template_id": "trip_latest_departure",
@@ -262,15 +319,17 @@ def multisegment_total(builder: Builder, pool: Pool, rng: random.Random, count: 
         if len(stops) < 3:
             continue
         chain = [start, *stops]
-        routes = [builder.route(a, b) for a, b in zip(chain, chain[1:], strict=False)]
-        if any(route is None for route in routes):
+        legs = [builder.distance_m_driving(a, b) for a, b in zip(chain, chain[1:], strict=False)]
+        if any(value is None for value in legs):
             continue
-        total_km = sum(route.distance_m for route in routes) / 1000
+        total_km = sum(legs) / 1000
         gold = round(total_km, 1)
-        # Wrong options are plausible totals, not round numbers, so the shape of the answer
-        # cannot be guessed: an agent that sums two legs instead of three lands near 0.7x.
+        # Wrong options are plausible totals, not round numbers, so the shape of the answer cannot
+        # be guessed. The gaps are wide because the agent may route with Kakao's traffic-aware
+        # RECOMMEND while the gold is built from the stable DISTANCE priority: the two disagreed
+        # by up to 15% on a whole chain, so the nearest wrong option sits further away than that.
         candidates = {gold}
-        for factor in (0.62, 0.78, 1.22, 1.4):
+        for factor in (0.58, 1.42, 1.85):
             candidates.add(round(total_km * factor, 1))
         others = [value for value in sorted(candidates) if value != gold]
         rng.shuffle(others)
@@ -281,8 +340,8 @@ def multisegment_total(builder: Builder, pool: Pool, rng: random.Random, count: 
         made.append(
             {
                 "question": (
-                    f"{order} 순서로 자동차로 이동합니다. 이 경로의 총 주행 거리는 "
-                    "다음 중 어디에 가장 가깝나요?"
+                    f"{order} 순서로 자동차로 이동합니다. 각 구간을 거리가 가장 짧은 경로로 "
+                    "갈 때 총 주행 거리는 다음 중 어디에 가장 가깝나요?"
                 ),
                 "options": [f"약 {value:g}km" for value in [gold, *chosen]],
                 "answer": 0,
@@ -290,7 +349,7 @@ def multisegment_total(builder: Builder, pool: Pool, rng: random.Random, count: 
                 "template_id": "multisegment_total",
                 "gold_evidence": {
                     "chain": [place.name for place in chain],
-                    "leg_m": [route.distance_m for route in routes],
+                    "leg_m": legs,
                     "total_km": gold,
                 },
             }
@@ -393,7 +452,7 @@ def routing_turns_before_road(
             continue
         if not (builder.resolves_to(origin) and builder.resolves_to(destination)):
             continue
-        route = builder.route(origin, destination)
+        route = builder.route(origin, destination, priority="DISTANCE")
         if route is None or len(route.steps) < 8:
             continue
         counts: dict[str, int] = {}
@@ -420,8 +479,9 @@ def routing_turns_before_road(
         made.append(
             {
                 "question": (
-                    f"{origin.name}에서 {destination.name}까지 자동차로 운전합니다. "
-                    f"{step.road_name} 구간에 진입하기 전까지 좌회전을 몇 번 하게 되나요?"
+                    f"{origin.name}에서 {destination.name}까지 자동차로, 거리가 가장 짧은 "
+                    f"경로로 운전합니다. {step.road_name} 구간에 진입하기 전까지 좌회전을 "
+                    "몇 번 하게 되나요?"
                 ),
                 "options": [f"{value}번" for value in options],
                 "answer": options.index(before),

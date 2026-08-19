@@ -661,6 +661,7 @@ def _ground_graph_literals(
     specifications = _nearby_retrieval_specs(target) if target else []
     # tsp_tw's service_times are positional, so the stays can only be bound once the node list the
     # plan geocoded is known — it is the place order every downstream index refers to.
+    route_priority = _extract_route_priority(question)
     trip_node_names: list[str] = []
     if intent == "trip":
         trip_node_names = next(
@@ -685,6 +686,8 @@ def _ground_graph_literals(
                 _retrieval_steps(step, arguments, specifications, expand=expand_retrieval)
             )
             continue
+        if route_priority and operator in _PRIORITY_OPERATORS:
+            arguments["priority"] = route_priority
         if operator == "tsp_tw" and intent == "trip":
             stays, budget = _extract_trip_schedule(question)
             if budget is not None:
@@ -1082,6 +1085,27 @@ _RADIUS_PATTERNS = (
     r"(?:반경|직선거리|거리)\s*([\d,]+(?:\.\d+)?)\s*(km|m)\b",
     r"([\d,]+(?:\.\d+)?)\s*(km|m)\s*(?:이내|안|이하|미만)",
 )
+
+
+# Which route a question means. Kakao's RECOMMEND re-optimizes against live traffic, so the road
+# it picks — and therefore its distance, its turns and the roads it names — changes between calls.
+# A question that has to be gradable says which route it means, and the choice is bound here like
+# the radius and the direction rather than left to whichever default a tool happens to carry.
+_PRIORITY_PHRASES = (
+    ("DISTANCE", ("최단 경로", "가장 짧은 경로", "최단거리 경로", "거리가 가장 짧은")),
+    ("TIME", ("가장 빠른 경로", "최단 시간", "가장 빨리", "제일 빠른")),
+)
+
+_PRIORITY_OPERATORS = frozenset(
+    {"directions", "travel_time", "distance_matrix", "calculate_finish_time"}
+)
+
+
+def _extract_route_priority(question: str) -> str | None:
+    for priority, phrases in _PRIORITY_PHRASES:
+        if any(phrase in question for phrase in phrases):
+            return priority
+    return None
 
 
 def _extract_radius_m(question: str) -> int:

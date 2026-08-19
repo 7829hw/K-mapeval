@@ -158,7 +158,9 @@ class Builder:
 
     provider: KakaoMapProvider
     _resolved: dict[str, Place | None] = field(default_factory=dict)
-    _routes: dict[tuple[str, str, tuple[str, ...]], Route | None] = field(default_factory=dict)
+    _routes: dict[tuple[str, str, tuple[str, ...], str], Route | None] = field(
+        default_factory=dict
+    )
 
     @classmethod
     def open(cls) -> Builder:
@@ -198,18 +200,46 @@ class Builder:
         return distance_m(cached, place) <= ROUND_TRIP_TOLERANCE_M
 
     def route(
-        self, origin: Place, destination: Place, waypoints: tuple[Place, ...] = ()
+        self,
+        origin: Place,
+        destination: Place,
+        waypoints: tuple[Place, ...] = (),
+        priority: str = "DISTANCE",
     ) -> Route | None:
-        key = (origin.place_id, destination.place_id, tuple(p.place_id for p in waypoints))
+        """Route a pair, choosing the priority by what the answer is made of.
+
+        Only DISTANCE is traffic-invariant — a shortest-path over the road graph — so a distance
+        gold is built from it and is a fact about the network. A duration cannot borrow that
+        stability: the shortest route is not the one anyone drives, and on a four-leg chain its
+        duration ran 160 minutes against TIME's 96. So a duration gold is built with the priority
+        its consumer uses (`calculate_finish_time` defaults to TIME) and stays a live estimate;
+        the same fixed route came back as 3,243 s and then 4,337 s. Questions resting on a
+        duration must space their options wider than that spread.
+        """
+
+        key = (
+            origin.place_id,
+            destination.place_id,
+            tuple(p.place_id for p in waypoints),
+            priority,
+        )
         if key not in self._routes:
             try:
                 self._routes[key] = self.provider.directions(
-                    origin, destination, waypoints=list(waypoints) or None, include_steps=True
+                    origin,
+                    destination,
+                    waypoints=list(waypoints) or None,
+                    include_steps=True,
+                    priority=priority,
                 )
             except Exception:  # noqa: BLE001 - an unroutable pair is simply not usable
                 self._routes[key] = None
         return self._routes[key]
 
     def duration_s(self, origin: Place, destination: Place) -> int | None:
-        found = self.route(origin, destination)
+        found = self.route(origin, destination, priority="TIME")
         return None if found is None else found.duration_s
+
+    def distance_m_driving(self, origin: Place, destination: Place) -> int | None:
+        found = self.route(origin, destination, priority="DISTANCE")
+        return None if found is None else found.distance_m

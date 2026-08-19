@@ -265,6 +265,26 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   than failing. With a landmark it now also reports `landmark_index` and
   `*_before_landmark` / `*_after_landmark` counts. Before adding a question shape, check the
   operator can express its scope, not just its measure.
+- **G3 types a reference by the field it names, not by the node it starts at.** `tsp_tw` outputs a
+  `network`, and `$tsp.total_cost` is the tour's duration: typing that reference by the node
+  refused eleven correctly-composed plans in one run, all of them the chain a "what time must I
+  leave" question needs. `OUTPUT_FIELD_TYPES` types the projections planners actually take, an
+  unknown path is left unconstrained rather than refused, and a *bare* reference of the wrong type
+  still fails — path-awareness must not disarm the constraint.
+- **A node nothing consumes is pruned, not refused.** An unused `batch_geocode` left in a draft is
+  a planner leftover; the rest of the plan answers the question. `normalize_and_validate_graph`
+  drops such nodes and re-sorts, which yields a graph that satisfies G5 rather than one that fails
+  it. Likewise a `depends_on` written as arithmetic ("drive_time + 3600") still names a real node,
+  and `_normalize_dependency` reads it out when exactly one known id appears in the text.
+- **Only `DISTANCE` routing is reproducible; a duration never is.** RECOMMEND and TIME both
+  optimize against live speeds, so the same pair answered 17,879 m and then 23,041 m. Even at a
+  fixed priority the *duration* is a live estimate: the identical DISTANCE route came back as
+  3,243 s and then 4,337 s. So a distance gold is a fact about the road network and a duration
+  gold is a snapshot of the traffic. Benchmark builders route with `DISTANCE`
+  (`Builder.route` in `data/benchmark_core.py` defaults to it), and any question whose answer
+  rides on a duration must space its options wider than that spread — the time-window families
+  keep at least 85 minutes between options for exactly this reason. This is a property of the
+  provider, not a bug to fix: do not "stabilize" it by inventing a speed.
 - **A travelled distance comes from a route, a straight line from haversine, and they are not
   interchangeable.** Road distance runs roughly a quarter longer than the straight line between
   the same points, which is near enough to land on a plausible wrong option: every miss in the

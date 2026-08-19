@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     # A ReAct question carries its whole growing trace into every call, and a busy self-hosted
     # endpoint can take minutes to answer one. A short timeout does not make the answer arrive
     # sooner; it only turns a slow answer into a lost question.
-    llm_timeout_seconds: float = Field(default=600.0, gt=0)
+    llm_timeout_seconds: float = Field(default=1800.0, gt=0)
     llm_max_retries: int = Field(default=8, ge=0, le=20)
     llm_retry_backoff_seconds: float = Field(default=5.0, gt=0)
     max_reasoning_steps: int = Field(default=8, ge=1, le=30)
@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     # not gold metadata: it says where to look, never which option is right. Blank disables it.
     kakao_search_center: str = ""
     kakao_search_radius_m: int = Field(default=20_000, ge=0, le=20_000)
-    kakao_timeout_seconds: float = Field(default=15.0, gt=0)
+    kakao_timeout_seconds: float = Field(default=30.0, gt=0)
     kakao_cache_db_path: str = "data/kakao_cache.db"
     kakao_cache_ttl_seconds: int = Field(default=86_400, ge=0)
 

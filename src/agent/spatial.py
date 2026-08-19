@@ -981,11 +981,26 @@ def _ground_graph_literals(
         if step.get("operator") == "steps_analysis"
         for source in _step_sources(step)
     }
+    # The place names the question states outright, for repairing one a plan copied short: a plan
+    # that geocoded `문래` where the question says `빈칸 문래` routed from another place entirely
+    # and counted another route's turns, with every stage reporting success.
+    question_places = [
+        name
+        for name in (
+            anchor,
+            _extract_trip_destination(question),
+            *(_extract_compared_places(question) or ()),
+        )
+        if name
+    ]
     grounded: list[dict[str, Any]] = []
     for step in steps:
         operator = step.get("operator")
         arguments = _verbatim_place_names(
-            dict(step.get("arguments") or step.get("params") or {}), question, options
+            dict(step.get("arguments") or step.get("params") or {}),
+            question,
+            options,
+            question_places,
         )
         if operator == "nearby_places" and specifications:
             arguments.pop("query", None)
@@ -1588,7 +1603,11 @@ def _extract_anchor(question: str, intent: str) -> str | None:
     separators = {
         "radius": (" 반경", "에서 직선거리"),
         "trip": ("에서 출발",),
-        "routing": ("에서 자동차",),
+        # "A에서 B까지 자동차로" is the other half of the routing phrasing, and the first "에서"
+        # is where the drive starts. Without it a plan that geocoded `문래` for the question's
+        # `빈칸 문래` kept the shortened name, resolved a different place, and counted the turns
+        # of a route nobody asked about.
+        "routing": ("에서 자동차", "에서"),
         "nearby": ("에서 가장 가까운",),
         "direction": ("에서 북쪽", "에서 남쪽", "에서 동쪽", "에서 서쪽"),
     }
@@ -1606,7 +1625,10 @@ _TRANSCRIPTION_SIMILARITY = 0.85
 
 
 def _verbatim_place_names(
-    arguments: dict[str, Any], question: str, options: list[str]
+    arguments: dict[str, Any],
+    question: str,
+    options: list[str],
+    question_places: list[str] | None = None,
 ) -> dict[str, Any]:
     """Restore a place name the planner copied out wrong.
 
@@ -1618,22 +1640,33 @@ def _verbatim_place_names(
     """
 
     literals = [option for option in options if option.strip()]
+    stated = [name for name in (question_places or []) if name.strip()]
     corrected = dict(arguments)
     for key in _NAME_ARGUMENTS:
         value = corrected.get(key)
         if isinstance(value, str):
-            corrected[key] = _verbatim_name(value, question, literals)
+            corrected[key] = _verbatim_name(value, question, literals, stated)
         elif isinstance(value, list):
             corrected[key] = [
-                _verbatim_name(item, question, literals) if isinstance(item, str) else item
+                _verbatim_name(item, question, literals, stated) if isinstance(item, str) else item
                 for item in value
             ]
     return corrected
 
 
-def _verbatim_name(name: str, question: str, options: list[str]) -> str:
+def _verbatim_name(
+    name: str, question: str, options: list[str], stated: list[str] | None = None
+) -> str:
     candidate = name.strip()
-    if len(candidate) < 4 or candidate in question or candidate in options:
+    if candidate in options:
+        return name
+    for literal in stated or []:
+        # A name the question states, of which the planner wrote only a part. `빈칸 문래` came
+        # through as `문래`, which resolves — to 문래동창작촌, a different place, so the route
+        # measured was a different route and every stage reported success.
+        if _is_shortened_name(candidate, literal):
+            return literal
+    if len(candidate) < 4 or candidate in question:
         return name
     best = candidate
     best_ratio = _TRANSCRIPTION_SIMILARITY

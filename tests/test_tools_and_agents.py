@@ -2047,3 +2047,31 @@ def test_a_name_the_planner_copied_out_wrong_is_restored_to_the_question_s_spell
         "잠원한강공원 눈썰매장",
         "전혀다른어떤장소이름",
     ]
+
+
+def test_a_name_the_planner_wrote_short_is_restored_from_the_question() -> None:
+    """`빈칸 문래` came through as `문래`, which resolves — to a different place.
+
+    A truncated name is the worst kind of copying error: the lookup succeeds, the route is a real
+    route, and every stage reports success while measuring somewhere else. The question states
+    the origin of a routing question outright, so grounding restores it.
+    """
+
+    from src.agent.spatial import _ground_graph_literals
+
+    question = (
+        "빈칸 문래에서 훈련원공원 야외극장까지 자동차로, 거리가 가장 짧은 경로로 운전합니다. "
+        "마포대로 구간에 진입하기 전까지 좌회전을 몇 번 하게 되나요?"
+    )
+    steps = [
+        {
+            "id": "geo",
+            "operator": "batch_geocode",
+            "arguments": {"place_names": ["문래", "훈련원공원 야외극장"]},
+            "depends_on": [],
+            "output_type": "object",
+            "role": "extent",
+        }
+    ]
+    grounded = _ground_graph_literals(steps, question, ["1번", "2번"], "routing")
+    assert grounded[0]["arguments"]["place_names"] == ["빈칸 문래", "훈련원공원 야외극장"]

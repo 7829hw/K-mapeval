@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -118,6 +119,20 @@ def _as_place_argument(value: Any) -> Any:
 
     if isinstance(value, list) and len(value) == 1:
         return _as_place_argument(value[0])
+    if isinstance(value, str):
+        # A place an agent serialized back as JSON text. The ReAct baseline does this with the
+        # place it just retrieved, and the string went to Kakao as a keyword query: twelve
+        # HTTP 400s in one run, each one a retrieval the agent thought it had made. The
+        # coordinates in it came from an earlier tool result, so reading them back adds nothing.
+        stripped = value.strip()
+        if stripped.startswith("{") and stripped.endswith("}"):
+            try:
+                decoded = json.loads(stripped)
+            except json.JSONDecodeError:
+                return value
+            if isinstance(decoded, dict):
+                return _as_place_argument(decoded)
+        return value
     if not isinstance(value, dict):
         return value
     for key in PLACE_WRAPPER_KEYS:

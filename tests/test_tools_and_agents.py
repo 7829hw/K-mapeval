@@ -2274,3 +2274,28 @@ def test_a_geocode_node_written_where_its_places_belong_is_flattened() -> None:
         {"start_time": "10:00", "locations": [records]}
     )
     assert [place.name for place in args.locations] == ["출발지", "첫째", "둘째", "출발지"]
+
+
+def test_a_place_serialized_back_as_json_text_is_that_place() -> None:
+    """The ReAct baseline hands back the place it retrieved, as a JSON string.
+
+    The string went to Kakao as a keyword query — twelve HTTP 400s in one run, each one a
+    retrieval the agent believed it had made. The coordinates in it came from an earlier tool
+    result, so reading them back adds no evidence.
+    """
+
+    import json as json_module
+
+    from src.tools.registry import PlaceSearchArgs
+
+    blob = json_module.dumps(
+        {"place_id": "1", "name": "금호미술관", "latitude": 37.5774, "longitude": 126.9798}
+    )
+    args = PlaceSearchArgs.model_validate(
+        {"center": blob, "category_code": "HP8", "radius_m": 1500, "limit": 20}
+    )
+    assert isinstance(args.center, Place)
+    assert args.center.name == "금호미술관"
+    # A name that merely looks like a brace is still a name.
+    plain = PlaceSearchArgs.model_validate({"center": "{서울역", "query": "편의점"})
+    assert plain.center == "{서울역"

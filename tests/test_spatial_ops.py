@@ -1826,3 +1826,29 @@ def test_a_failed_step_is_not_evidence_the_next_step_can_read() -> None:
     # A result that merely carries an `error` key beside real output is still output.
     partial = {"matrix": {"error": None, "nodes": ["A", "B"]}}
     assert _resolve_references({"m": "$matrix.nodes"}, partial) == {"m": ["A", "B"]}
+
+
+def test_candidates_that_carry_no_coordinates_fail_instead_of_emptying_the_sector() -> None:
+    """An operator handed only names must fail, not answer "nothing lies that way".
+
+    A planner wrote the option texts into `filter_by_direction.places` instead of the places it
+    had just geocoded. The names dropped out, the empty sector read as evidence, and the
+    generation stage picked an option by eyeballing latitudes out of the trace.
+    """
+
+    ops = SpatialOperatorRegistry()
+    center = {"name": "미아사거리역", "latitude": 37.6132, "longitude": 127.0300}
+    with pytest.raises(ValueError, match="PlaceNotFoundError"):
+        ops.filter_by_direction(
+            center=center,
+            places=["하나로마트 미아점", "이마트 미아점"],
+            direction="북쪽",
+        )
+
+
+def test_an_empty_candidate_list_is_still_an_empty_ranking() -> None:
+    """Nothing to rank is not the same as candidates that could not be read."""
+
+    ops = SpatialOperatorRegistry()
+    anchor = {"name": "미아사거리역", "latitude": 37.6132, "longitude": 127.0300}
+    assert ops.nearest(anchor=anchor, candidates=[])["nearest"] is None

@@ -16,6 +16,7 @@ from src.agent.geoflow import (
 )
 from src.agent.spatial import (
     RETRIEVAL_LIMIT,
+    _bind_named_places,
     _bind_prevalidated_template,
     _ground_graph_literals,
     _heuristic_intent,
@@ -1322,7 +1323,7 @@ def test_unresolvable_plan_reference_is_isolated_and_evaluation_still_runs() -> 
                 '{"id":"s1","operator":"place_search",'
                 '"arguments":{"query":"경복궁","limit":1}},'
                 '{"id":"s2","operator":"haversine_distance",'
-                '"arguments":{"place_a":"$s1.0.name",'
+                '"arguments":{"place_a":"한번도찾지못한장소",'
                 '"place_b":"$s1.0"}}]}'
             ),
             LLMResponse('{"predicted_option":1,"confidence":0.3,"reason":"partial evidence"}'),
@@ -1891,3 +1892,84 @@ def test_the_react_prompt_carries_no_tool_strategy() -> None:
     # What MapEval's own prompt does carry stays.
     assert "^^Option_Number^^" in REACT_SYSTEM_PROMPT
     assert "0-based" in REACT_SYSTEM_PROMPT
+
+
+def test_a_place_named_in_an_argument_is_the_place_the_plan_already_resolved() -> None:
+    """Planners reference option texts where the geocoded places belong.
+
+    The local operators spend no API call, so a name they cannot look up drops out of the
+    candidate list -- and a direction filter then answers with an empty sector. Binding the
+    name back to the plan's own geocoding grants no evidence the run did not already gather.
+    """
+
+    results = {
+        "places": [
+            {
+                "query": "하나로마트 미아점",
+                "place": {
+                    "place_id": "1",
+                    "name": "하나로마트 미아점",
+                    "latitude": 37.6215,
+                    "longitude": 127.0269,
+                },
+            },
+            {
+                "query": "이마트 미아점 - 서울특별시 성북구 도봉로 17",
+                "place": {
+                    "place_id": "2",
+                    "name": "이마트 미아점",
+                    "latitude": 37.6108,
+                    "longitude": 127.0298,
+                },
+            },
+        ]
+    }
+    bound = _bind_named_places(
+        {
+            "center": "$places.0.place",
+            "places": ["하나로마트 미아점", "이마트 미아점", "한번도찾지못한장소"],
+            "direction": "북쪽",
+        },
+        results,
+    )
+    assert bound["places"][0]["place_id"] == "1"
+    assert bound["places"][1]["place_id"] == "2"
+    # A name the plan never resolved is left alone, so it still fails as a missing place.
+    assert bound["places"][2] == "한번도찾지못한장소"
+    # Only place-valued arguments are bound; a reference and a direction pass through.
+    assert bound["center"] == "$places.0.place"
+    assert bound["direction"] == "북쪽"
+
+
+def test_place_names_a_geocode_answered_under_another_spelling_still_bind() -> None:
+    """The query text is a name of the place as much as the name Kakao stores."""
+
+    results = {
+        "geo": [
+            {
+                "query": "이마트 미아점 - 서울특별시 성북구 도봉로 17",
+                "place": {
+                    "place_id": "2",
+                    "name": "이마트 미아점",
+                    "latitude": 37.6108,
+                    "longitude": 127.0298,
+                },
+            }
+        ]
+    }
+    bound = _bind_named_places(
+        {"anchor": "이마트 미아점 - 서울특별시 성북구 도봉로 17"}, results
+    )
+    assert bound["anchor"]["place_id"] == "2"
+
+
+def test_a_coordinate_literal_is_never_mistaken_for_a_name() -> None:
+    results = {
+        "geo": [
+            {
+                "query": "37.5,127.0",
+                "place": {"place_id": "9", "name": "x", "latitude": 1.0, "longitude": 2.0},
+            }
+        ]
+    }
+    assert _bind_named_places({"center": "37.5,127.0"}, results)["center"] == "37.5,127.0"

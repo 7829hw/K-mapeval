@@ -26,7 +26,11 @@ from src.agent.geoflow import (
 from src.llm import ChatClient, LLMUnavailableError
 from src.parsing import parse_answer, parse_json_object
 from src.tools import SpatialOperatorRegistry, ToolRegistry
-from src.tools.spatial import parse_clock_text
+from src.tools.spatial import (
+    parse_clock_text,
+    parse_coordinate_literal,
+    strip_location_qualifier,
+)
 
 SUPPORTED_INTENTS = frozenset(
     {"nearby", "poi", "routing", "trip", "type", "direction", "distance", "radius"}
@@ -413,6 +417,11 @@ class SpatialAgent(BenchmarkAgent):
                 raw_arguments = step.get("arguments") or {}
                 try:
                     arguments = _resolve_references(raw_arguments, results)
+                    if operator not in tool_names:
+                        # Local operators spend no API call, so a place they are handed as a
+                        # name is only a place if the plan already resolved it. The tools do
+                        # their own name resolution through the provider.
+                        arguments = _bind_named_places(arguments, results)
                     if operator in tool_names:
                         execution = self.tools.invoke(operator, arguments)
                         if execution.status == "ok":
@@ -650,6 +659,87 @@ def _resolve_references(value: Any, results: dict[str, Any]) -> Any:
         # anything but a number carries no arithmetic, so it is returned untouched.
         return current + offset
     return current
+
+
+# Every operator argument that means a place, in the local operator registry's own spelling.
+# `batch_geocode`'s `place_names` is deliberately absent: names are what it is asked to resolve.
+PLACE_VALUED_ARGUMENTS = frozenset(
+    {"anchor", "candidates", "center", "locations", "place_a", "place_b", "places"}
+)
+
+
+def _resolved_place_index(results: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Every place the plan has already resolved, keyed by each name it is known under."""
+
+    index: dict[str, dict[str, Any]] = {}
+
+    def record(name: Any, place: Any) -> None:
+        if not isinstance(name, str) or not isinstance(place, dict):
+            return
+        if "latitude" not in place or "longitude" not in place:
+            return
+        key = _name_key_for_match(strip_location_qualifier(name))
+        if key:
+            index.setdefault(key, place)
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            if {"latitude", "longitude"} <= value.keys():
+                record(value.get("name"), value)
+            if isinstance(value.get("place"), dict):
+                record(value.get("query"), value["place"])
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    walk(results)
+    return index
+
+
+def _bind_named_places(arguments: dict[str, Any], results: dict[str, Any]) -> dict[str, Any]:
+    """A place written as a name is the place the plan already resolved under that name.
+
+    Planners hand `filter_by_direction` the option texts it just geocoded rather than the
+    geocoded places, and the local operators cannot look a name up — they spend no API call by
+    design. Dropping the names left an empty sector, which reads as "nothing lies that way"
+    while the evidence for all four candidates sat in the previous step's result. A name is
+    bound only when the plan itself resolved it, so this grants no evidence the run did not
+    already gather; an unknown name is left alone and still fails as a missing place.
+    """
+
+    named = {
+        key: value
+        for key, value in arguments.items()
+        if key in PLACE_VALUED_ARGUMENTS and _holds_place_name(value)
+    }
+    if not named:
+        return arguments
+    index = _resolved_place_index(results)
+    if not index:
+        return arguments
+    bound = dict(arguments)
+    for key, value in named.items():
+        if isinstance(value, list):
+            bound[key] = [_named_place(item, index) for item in value]
+        else:
+            bound[key] = _named_place(value, index)
+    return bound
+
+
+def _holds_place_name(value: Any) -> bool:
+    if isinstance(value, str):
+        return not value.startswith("$") and parse_coordinate_literal(value) is None
+    if isinstance(value, list):
+        return any(_holds_place_name(item) for item in value)
+    return False
+
+
+def _named_place(value: Any, index: dict[str, dict[str, Any]]) -> Any:
+    if not _holds_place_name(value):
+        return value
+    return index.get(_name_key_for_match(strip_location_qualifier(str(value))), value)
 
 
 def _descend_reference(current: Any, part: str) -> Any:

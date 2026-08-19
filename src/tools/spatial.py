@@ -1206,6 +1206,16 @@ def _as_place_list(
         unwrapped = _unwrap_place(item)
         if keep_unresolved and isinstance(unwrapped, dict):
             resolved.append((index, unwrapped))
+    if values and not resolved:
+        # Every candidate was unusable -- bare names the operators cannot look up, or the error
+        # markers of a step that failed. Returning the empty list reads downstream as "no
+        # candidate qualifies", which is a fabricated negative: a direction filter answered
+        # "nothing lies north" and the generation stage then guessed from coordinates it read
+        # off the trace. Missing evidence has to fail as missing evidence.
+        raise ValueError(
+            "PlaceNotFoundError: no candidate carries coordinates "
+            f"({len(values)} unresolved)"
+        )
     return resolved
 
 

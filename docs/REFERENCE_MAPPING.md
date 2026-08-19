@@ -335,3 +335,28 @@ does the whole job, so ReAct has to reason.
 surfaces answer different questions — "does the graph add anything on top of strong aggregation
 tools" versus "does the graph beat primitives", the latter being the paper's — and
 `metadata.react_tools` records which one a run used.
+
+`MAPEVAL_BASELINE_TOOLS` is exactly the five tools `Evaluator2.py` constructs at line 33 of
+`mapeval-api@35d481a`, mapped onto their Kakao counterparts:
+
+| upstream (`FormattedTools.py`) | here | note |
+| --- | --- | --- |
+| `PlaceSearch` | `place_search` | upstream returns a place id; Kakao's keyword search returns the place itself, so there is no id round-trip |
+| `PlaceDetails` | `place_details` | |
+| `NearbyPlaces` | `nearby_places` | |
+| `TravelTime` | `travel_time` | |
+| `Directions` | `directions` | |
+
+Two of this registry's primitives are deliberately **not** in that set. `geocode` (address →
+coordinates) and `reverse_geocode` (coordinates → address) have no upstream counterpart at all:
+upstream reaches every place through a place id and never converts between an address and
+coordinates. They are primitives rather than aggregations, so they do not hand ReAct the
+composition GeoFlow provides, but they are still capability the paper's baseline was measured
+without — and in the ReAct run behind `reports/test_20260819T045330Z.json`, 40 of the 479 tool
+calls were `geocode`, most of them on bare place names (`플라이아트센터`, `노량진컵밥거리`), which
+is PlaceSearch reached through a second index rather than address handling.
+
+`Tools.py` additionally defines a `PlaceIdTool` that `Evaluator2.py` never instantiates; an
+earlier revision of this document and of `AGENT.md` counted it and called the baseline six tools.
+It is five. `FormattedTools.PlaceSearchTool` is documented as "Get place ID for a given
+location", which is the same primitive.

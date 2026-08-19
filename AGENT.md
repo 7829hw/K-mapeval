@@ -92,17 +92,26 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
 - ReAct and Spatial-Agent share one `ToolRegistry`; never give one agent evidence, a tool, or a
   Kakao implementation the other cannot reach. Tool wrappers stay thin and delegate to the provider.
 - **That parity is internal, and it is not the paper's comparison.** MapEval's own ReAct baseline
-  (`mapeval-api/Tools.py`) has six primitives: PlaceSearch, PlaceId, PlaceDetails, NearbyPlaces,
-  TravelTime, Directions. This registry adds `batch_geocode`, `batch_place_details`,
-  `distance_matrix`, `calculate_finish_time` and `recover_option_places` — every one of them an
-  *aggregation* over those primitives, which is exactly what GeoFlow's operator graph exists to
-  express. Sharing them makes our two agents differ only in architecture; it also hands the
-  baseline the composition the architecture was supposed to provide. A `trip_finish_time` question
-  that the paper's ReAct must orchestrate across a dozen turns is `batch_geocode` +
-  `calculate_finish_time` here, and ReAct scores 16/16 on it. `--react-tools mapeval` restricts
-  the baseline to `ToolRegistry.MAPEVAL_BASELINE_TOOLS`; `metadata.react_tools` records which
-  surface a run used, and runs from the two surfaces answer different questions and must not be
-  pooled.
+  is the five tools `mapeval-api/Evaluator2.py` (35d481a, line 33) instantiates: PlaceSearch,
+  PlaceDetails, NearbyPlaces, TravelTime, Directions. Read `Evaluator2.py`, not `Tools.py`, when
+  you need that list — `Tools.py` also defines a `PlaceIdTool` the evaluator never constructs, and
+  `FormattedTools.PlaceSearchTool` is itself documented as "Get place ID for a given location", so
+  the two are one primitive under two names rather than a sixth tool. This registry adds
+  `batch_geocode`, `batch_place_details`, `distance_matrix`, `calculate_finish_time` and
+  `recover_option_places` — every one of them an *aggregation* over those primitives, which is
+  exactly what GeoFlow's operator graph exists to express. Sharing them makes our two agents
+  differ only in architecture; it also hands the baseline the composition the architecture was
+  supposed to provide. A `trip_finish_time` question that the paper's ReAct must orchestrate
+  across a dozen turns is `batch_geocode` + `calculate_finish_time` here, and ReAct scores 16/16
+  on it. It adds `geocode` and `reverse_geocode` for a second reason: upstream reaches every
+  place through a place id and converts between an address and coordinates nowhere, so neither
+  is a primitive the baseline was measured with, and in a measured run `geocode` was resolving
+  bare place names — PlaceSearch again, through a second index. `--react-tools mapeval` restricts
+  the baseline to `ToolRegistry.MAPEVAL_BASELINE_TOOLS`, which is those five and nothing else;
+  `metadata.react_tools` records which surface a run used, and runs from the two surfaces answer
+  different questions and must not be pooled. **Every report in `reports/` so far is `full`** — no
+  measurement against the paper's tool surface has been taken yet, so no number here may be
+  described as reproducing the paper's comparison.
 - **Place disambiguation is anchor-relative, and both agents get it.** Korean POI names repeat
   across branches and cities, so `_best_place_match` (`src/tools/registry.py`) scores proximity to a
   known anchor *below* the name-evidence terms (exact / branch / category / containment) and *above*

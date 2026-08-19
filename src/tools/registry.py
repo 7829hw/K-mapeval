@@ -440,11 +440,18 @@ class ToolRegistry:
     #: our two agents comparable to each other, and makes neither comparable to the paper's
     #: baseline: a trip question the paper's ReAct must orchestrate over a dozen turns is two
     #: calls here. Restrict a ReAct registry to this set to reproduce the paper's comparison.
+    # The five `mapeval-api/Evaluator2.py` (35d481a, line 33) actually instantiates:
+    # PlaceSearchTool, PlaceDetailsTool, NearbyPlacesTool, TravelTimeTool, DirectionsTool.
+    # `Tools.py` also defines a PlaceIdTool, but the evaluator never constructs it, and
+    # `FormattedTools.PlaceSearchTool` is documented as "Get place ID for a given location" —
+    # they are the same primitive under two names in two files, not a sixth tool.
+    # `geocode` / `reverse_geocode` are excluded deliberately: upstream reaches every place
+    # through a place id and converts between an address and coordinates nowhere, so both are
+    # capabilities the paper's baseline was measured without. Name resolution stays reachable
+    # through `place_search`, which is what PlaceSearch is.
     MAPEVAL_BASELINE_TOOLS = frozenset(
         {
             "place_search",
-            "geocode",
-            "reverse_geocode",
             "place_details",
             "nearby_places",
             "travel_time",

@@ -1817,11 +1817,17 @@ def test_one_institution_under_two_names_is_one_place() -> None:
 def test_the_mapeval_baseline_withholds_the_aggregation_tools() -> None:
     """The paper compares its graph against ReAct over map API *primitives*.
 
-    MapEval's own baseline (`mapeval-api/Tools.py`) has PlaceSearch, PlaceId, PlaceDetails,
-    NearbyPlaces, TravelTime and Directions. Everything beyond that here — batch geocoding, a
-    distance matrix, a multi-stop finish time — is an aggregation over those primitives, which is
-    what GeoFlow's operator graph exists to express. Handing them to ReAct answers a different
-    question: a trip the paper's baseline must orchestrate over a dozen turns becomes two calls.
+    MapEval's own baseline is the five tools `mapeval-api/Evaluator2.py` (35d481a, line 33)
+    instantiates: PlaceSearch, PlaceDetails, NearbyPlaces, TravelTime, Directions. Everything
+    beyond that here — batch geocoding, a distance matrix, a multi-stop finish time — is an
+    aggregation over those primitives, which is what GeoFlow's operator graph exists to express.
+    Handing them to ReAct answers a different question: a trip the paper's baseline must
+    orchestrate over a dozen turns becomes two calls.
+
+    The address tools are withheld for a different reason. Upstream reaches every place through
+    a place id and never converts between an address and coordinates, so `geocode` and
+    `reverse_geocode` are capabilities the baseline was measured without — and in practice
+    `geocode` was answering bare place names, duplicating PlaceSearch through a second index.
     """
 
     full = ToolRegistry(FakeProvider())
@@ -1831,15 +1837,23 @@ def test_the_mapeval_baseline_withholds_the_aggregation_tools() -> None:
     baseline_names = {schema["function"]["name"] for schema in baseline.schemas()}
 
     assert baseline_names < full_names
+    # One name per tool `Evaluator2.py` constructs, and nothing else.
+    assert baseline_names == {
+        "place_search",
+        "place_details",
+        "nearby_places",
+        "travel_time",
+        "directions",
+    }
     assert full_names - baseline_names == {
         "batch_geocode",
         "batch_place_details",
         "distance_matrix",
         "calculate_finish_time",
         "recover_option_places",
+        "geocode",
+        "reverse_geocode",
     }
-    # The primitives themselves stay reachable, so the baseline can still answer every question.
-    assert {"place_search", "nearby_places", "directions", "travel_time"} <= baseline_names
 
 
 def test_restricting_to_an_unknown_tool_is_refused() -> None:

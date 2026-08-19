@@ -1372,16 +1372,39 @@ def normalize_and_validate_graph(
         # concepts. A radius is a condition on a search, and one plan calling it a measure was
         # refused outright with its retrieval already specified.
         concept_consumed = {source for source, _ in concept_edges}
-        for concept_id, node in concept_by_id.items():
-            if node.get("role") == "measure" and concept_id in concept_consumed:
-                node["role"] = "support"
+        demoted = [
+            node
+            for concept_id, node in concept_by_id.items()
+            if node.get("role") == "measure" and concept_id in concept_consumed
+        ]
+        for node in demoted:
+            node["role"] = "support"
         if not any(node.get("role") == "measure" for node in concept_by_id.values()):
             # A Measure is what the answer is read from, which is what nothing is built from.
             # Promoting the terminals completes the demotion rather than leaving a concept graph
             # with none — exactly as the operator graph does.
-            for concept_id, node in concept_by_id.items():
-                if concept_id not in concept_consumed and node.get("role") not in CONTEXTUAL_ROLES:
-                    node["role"] = "measure"
+            terminals = [
+                (concept_id, node)
+                for concept_id, node in concept_by_id.items()
+                if concept_id not in concept_consumed
+            ]
+            promoted = [
+                node for _, node in terminals if node.get("role") not in CONTEXTUAL_ROLES
+            ]
+            if not promoted:
+                # Every terminal is labelled with a contextual role. The Analysis stage does that
+                # for an answer it thinks of as a place — "the nearest bank" is a location.
+                promoted = [node for _, node in terminals]
+            if not promoted:
+                # No terminal at all: an Analysis stage that made its concepts depend on each
+                # other in a ring leaves nothing that nothing is built from. Demoting then takes
+                # the last Measure away and refuses a plan whose operator graph is correct — a
+                # direction question lost its answer that way with the retrieval already
+                # specified. The Analysis stage's own labelling stands when there is nothing
+                # better to promote.
+                promoted = demoted
+            for node in promoted:
+                node["role"] = "measure"
         for source, target in concept_edges:
             source_role = str(concept_by_id[source].get("role") or "support")
             target_role = str(concept_by_id[target].get("role") or "support")

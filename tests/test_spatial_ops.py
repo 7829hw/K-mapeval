@@ -2018,3 +2018,51 @@ def test_a_unit_is_never_an_alias() -> None:
     ops = SpatialOperatorRegistry()
     with pytest.raises(ValueError, match="comparable key"):
         ops.select_min([{"distance_km": 1.2}], "distance_m")
+
+
+def test_a_concept_ring_keeps_the_measure_the_analysis_stage_named() -> None:
+    """Demoting a consumed Measure must not leave a concept graph with none.
+
+    An Analysis stage that makes its concepts depend on each other in a ring leaves nothing that
+    nothing is built from, so there is no terminal to promote. Taking the last Measure away
+    refused a direction question whose operator graph — geocode, retrieve banks, filter south,
+    rank — was correct and whose retrieval was already specified.
+    """
+
+    from src.agent.geoflow import factorize_geoflow, normalize_and_validate_graph
+
+    analysis = {
+        "intent": "direction",
+        "concepts": [
+            {"id": "anchor", "text": "로데오모텔", "concept_type": "location",
+             "role": "extent", "depends_on": []},
+            {"id": "bearing", "text": "남쪽 방향", "concept_type": "field",
+             "role": "measure", "depends_on": ["anchor"]},
+            {"id": "kind", "text": "은행", "concept_type": "object",
+             "role": "condition", "depends_on": []},
+            {"id": "answer", "text": "가장 가까운 은행", "concept_type": "location",
+             "role": "extent", "depends_on": ["anchor", "bearing", "kind"]},
+        ],
+        "measure": "direction",
+    }
+    graph = {
+        "graph": [
+            {"id": "places", "operator": "batch_geocode",
+             "arguments": {"place_names": ["로데오모텔"], "anchor": "로데오모텔"},
+             "depends_on": [], "output_type": "object", "role": "extent"},
+            {"id": "banks", "operator": "nearby_places",
+             "arguments": {"center": "$places.0.place", "category_code": "BK9",
+                           "radius_m": 20000, "limit": 45},
+             "depends_on": ["places"], "output_type": "object", "role": "condition"},
+            {"id": "south", "operator": "filter_by_direction",
+             "arguments": {"center": "$places.0.place", "places": "$banks", "direction": "남쪽"},
+             "depends_on": ["banks"], "output_type": "object", "role": "support"},
+            {"id": "nearest", "operator": "nearest",
+             "arguments": {"anchor": "$places.0.place", "candidates": "$south"},
+             "depends_on": ["south"], "output_type": "object", "role": "measure"},
+        ]
+    }
+    factorized = factorize_geoflow(analysis, graph).as_dict()
+    steps, constraints = normalize_and_validate_graph(factorized, max_steps=8)
+    assert all(constraints.values())
+    assert [step["id"] for step in steps] == ["places", "banks", "south", "nearest"]

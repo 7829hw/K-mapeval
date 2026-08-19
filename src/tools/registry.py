@@ -70,9 +70,17 @@ PLACE_FIELDS = frozenset(Place.model_fields)
 PLACE_WRAPPER_KEYS = ("place", "location", "nearest", "center", "anchor")
 
 
+# RECOMMEND is Kakao's ordinary traffic-aware route, so every word that names *no* preference —
+# "normal", "traffic", "the usual way" — means it. Those are not a fourth objective the provider
+# lacks; they are a planner filling a required field for a question that never asked for a
+# particular route, and refusing them failed all twenty-five legs of a matrix at once, which left
+# `tsp_tw` nothing square to read and the generation stage guessing the answer.
 PRIORITY_SYNONYMS = {
     "RECOMMEND": "RECOMMEND", "RECOMMENDED": "RECOMMEND", "DEFAULT": "RECOMMEND",
     "BALANCED": "RECOMMEND", "OPTIMAL": "RECOMMEND", "BEST": "RECOMMEND",
+    "NORMAL": "RECOMMEND", "STANDARD": "RECOMMEND", "REGULAR": "RECOMMEND",
+    "TRAFFIC": "RECOMMEND", "TRAFFIC_AWARE": "RECOMMEND", "REALTIME": "RECOMMEND",
+    "REAL_TIME": "RECOMMEND", "LIVE": "RECOMMEND", "기본": "RECOMMEND", "실시간": "RECOMMEND",
     "TIME": "TIME", "FASTEST": "TIME", "FAST": "TIME", "DURATION": "TIME", "QUICKEST": "TIME",
     "DISTANCE": "DISTANCE", "SHORTEST": "DISTANCE", "SHORT": "DISTANCE",
 }
@@ -84,6 +92,8 @@ def _as_priority(value: Any) -> Any:
     Kakao names its route priorities RECOMMEND/TIME/DISTANCE; an LLM writes "fastest" or
     "shortest" and the whole node failed on the spelling. A word that does not clearly mean one
     of the three is left alone so it still fails — this is leniency about wording, not meaning.
+    A word that names no objective at all ("normal", "traffic") is not a fourth meaning; it is
+    the ordinary route, which is what RECOMMEND is.
     """
 
     if isinstance(value, str):
@@ -475,7 +485,7 @@ class ToolRegistry:
                     "geocode",
                     "Convert a Korean address into normalized coordinates and address fields.",
                     GeocodeArgs,
-                    lambda args: self.provider.geocode(args.address, limit=args.limit),
+                    self._geocode,
                 ),
                 ToolDefinition(
                     "reverse_geocode",
@@ -776,6 +786,16 @@ class ToolRegistry:
             "routes": route_evidence,
             "timezone": args.timezone,
         }
+
+    def _geocode(self, args: GeocodeArgs) -> list[Place]:
+        found = self.provider.geocode(args.address, limit=args.limit)
+        if not found:
+            # An address the geocoder cannot place is missing evidence, and saying so here is the
+            # difference between one clear failure and a cascade: returned as `[]` it became a
+            # `center: []` that failed the retrieval as a pydantic type error, and the error dict
+            # that left behind then failed option recovery with seven more.
+            raise PlaceNotFoundError(f"Kakao has no coordinates for {args.address!r}")
+        return found
 
     def _distance_matrix(self, args: DistanceMatrixArgs) -> dict[str, Any]:
         pairs = list(args.pairs or [])

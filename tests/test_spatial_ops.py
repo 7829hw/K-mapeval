@@ -1699,3 +1699,130 @@ def test_a_round_trip_starts_and_ends_where_the_question_says() -> None:
     steps[1]["arguments"]["locations"] = [*names, "키이토"]
     grounded = _ground_graph_literals(steps, question, [], "trip")
     assert grounded[-1]["arguments"]["locations"] == [*names, "키이토"]
+
+
+def test_a_priority_word_that_names_no_objective_is_the_ordinary_route() -> None:
+    """"normal" and "traffic" are a planner filling a required field, not a fourth objective.
+
+    Refusing them failed all twenty-five legs of a distance matrix at once, which left `tsp_tw`
+    nothing square to read and the generation stage guessing the answer. A word that does name a
+    different objective still fails: this stays leniency about wording, not about meaning.
+    """
+
+    from src.tools.registry import _as_priority
+
+    for written in ("normal", "traffic", "realtime", "기본", "default", "Standard"):
+        assert _as_priority(written) == "RECOMMEND"
+    assert _as_priority("fastest") == "TIME"
+    assert _as_priority("shortest") == "DISTANCE"
+    for unknown in ("scenic", "teleport", "cheapest"):
+        assert _as_priority(unknown) == unknown
+
+
+def test_a_concept_something_is_built_from_is_not_the_measure() -> None:
+    """The Analysis stage labelled a radius `measure`, and G2 refused the plan outright.
+
+    A radius is a condition on a search. The operator graph already demotes a Measure that
+    another node consumes; the concept graph gets the same treatment rather than losing a plan
+    whose retrieval was already specified.
+    """
+
+    from src.agent.geoflow import factorize_geoflow, normalize_and_validate_graph
+
+    graph = {
+        "graph": [
+            {
+                "id": "anchor",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["호스텔온기"]},
+                "role": "extent",
+                "concept_ids": ["origin"],
+            },
+            {
+                "id": "found",
+                "operator": "nearby_places",
+                "arguments": {
+                    "center": "$anchor.0.place",
+                    "radius_m": 800,
+                    "category_code": "MT1",
+                },
+                "depends_on": ["anchor"],
+                "role": "measure",
+                "concept_ids": ["radius", "derived_matches"],
+            },
+        ],
+        "concept_graph": {
+            "nodes": [
+                {
+                    "id": "origin",
+                    "text": "호스텔온기",
+                    "concept_type": "location",
+                    "role": "extent",
+                },
+                {"id": "radius", "text": "800m", "concept_type": "amount", "role": "measure"},
+                {
+                    "id": "derived_matches",
+                    "text": "대형마트",
+                    "concept_type": "object",
+                    "role": "support",
+                },
+            ],
+            "edges": [
+                {"source": "origin", "target": "radius"},
+                {"source": "radius", "target": "derived_matches"},
+            ],
+        },
+    }
+    analysis = {"intent": "radius", "concepts": graph["concept_graph"]["nodes"]}
+    factored = factorize_geoflow(analysis, {"graph": graph["graph"]}).as_dict()
+    factored["concept_graph"] = graph["concept_graph"]
+    steps, constraints = normalize_and_validate_graph(factored, max_steps=10)
+    assert constraints["concept_connectivity"] is True
+    assert [step["id"] for step in steps] == ["anchor", "found"]
+
+
+def test_an_address_the_geocoder_cannot_place_fails_once() -> None:
+    """Returned as `[]` it became a `center: []` and a cascade of validation noise.
+
+    The empty list failed the retrieval as a pydantic type error, and the `{"error": ...}` that
+    left behind was then validated as a Place by the next step, producing seven more errors
+    describing fields an error message does not have — burying the one failure that happened.
+    """
+
+    from src.tools.map import MapProvider, PlaceNotFoundError
+    from src.tools.registry import ToolRegistry
+
+    class _Empty(MapProvider):
+        @property
+        def api_call_count(self) -> int:
+            return 0
+
+        def search_place(self, query: str, *, limit: int = 5) -> list[Place]:
+            return []
+
+        def geocode(self, address: str, *, limit: int = 5) -> list[Place]:
+            return []
+
+        def nearby_search(self, center, **_):  # type: ignore[no-untyped-def]
+            return []
+
+        def place_details(self, place_id: str) -> Place:
+            raise PlaceNotFoundError(place_id)
+
+        def directions(self, origin, destination, **_):  # type: ignore[no-untyped-def]
+            raise PlaceNotFoundError("no route")
+
+    execution = ToolRegistry(_Empty()).invoke("geocode", {"address": "미스바 프로젝트"})
+    assert execution.status == "error"
+    assert execution.error.startswith("PlaceNotFoundError")
+
+
+def test_a_failed_step_is_not_evidence_the_next_step_can_read() -> None:
+    from src.agent.spatial import _resolve_references
+
+    results = {"anchor": {"error": "PlaceNotFoundError: nothing"}, "good": {"name": "A"}}
+    with pytest.raises(ValueError, match="failed step 'anchor'"):
+        _resolve_references({"center": "$anchor"}, results)
+    # A result that merely carries an `error` key beside real output is still output.
+    partial = {"matrix": {"error": None, "nodes": ["A", "B"]}}
+    assert _resolve_references({"m": "$matrix.nodes"}, partial) == {"m": ["A", "B"]}

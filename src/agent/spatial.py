@@ -630,6 +630,12 @@ def _resolve_references(value: Any, results: dict[str, Any]) -> Any:
     if root not in results:
         raise ValueError(f"Unknown plan reference: {value}")
     current = results[root]
+    if isinstance(current, dict) and set(current) == {"error"}:
+        # A failed step is recorded as `{"error": ...}` so the run continues, but that marker is
+        # not evidence and must not travel on as data. Passed into the next tool it was validated
+        # as a Place and produced seven more errors describing the fields an error message does
+        # not have, burying the one failure that actually happened.
+        raise ValueError(f"Plan reference {value} depends on failed step {root!r}")
     for part in (segment for segment in remainder.split(".") if segment):
         resolved = _descend_reference(current, part)
         if resolved is _UNRESOLVED:

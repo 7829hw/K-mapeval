@@ -1357,6 +1357,7 @@ def normalize_and_validate_graph(
         concept_incoming: dict[str, set[str]] = {
             concept_id: set() for concept_id in concept_by_id
         }
+        concept_edges: list[tuple[str, str]] = []
         for edge in concept_graph_payload.get("edges") or []:
             if not isinstance(edge, dict):
                 continue
@@ -1365,6 +1366,23 @@ def normalize_and_validate_graph(
                 raise ValueError(
                     f"Concept graph edge references an unknown node: {source}->{target}"
                 )
+            concept_edges.append((source, target))
+        # A concept something else is built from is not the Measure, whatever the Analysis stage
+        # labelled it — the same demotion the operator graph already applies, applied to the
+        # concepts. A radius is a condition on a search, and one plan calling it a measure was
+        # refused outright with its retrieval already specified.
+        concept_consumed = {source for source, _ in concept_edges}
+        for concept_id, node in concept_by_id.items():
+            if node.get("role") == "measure" and concept_id in concept_consumed:
+                node["role"] = "support"
+        if not any(node.get("role") == "measure" for node in concept_by_id.values()):
+            # A Measure is what the answer is read from, which is what nothing is built from.
+            # Promoting the terminals completes the demotion rather than leaving a concept graph
+            # with none — exactly as the operator graph does.
+            for concept_id, node in concept_by_id.items():
+                if concept_id not in concept_consumed and node.get("role") not in CONTEXTUAL_ROLES:
+                    node["role"] = "measure"
+        for source, target in concept_edges:
             source_role = str(concept_by_id[source].get("role") or "support")
             target_role = str(concept_by_id[target].get("role") or "support")
             if _violates_procedural_order(source_role, target_role):

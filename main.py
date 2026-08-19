@@ -182,8 +182,11 @@ def run(agent_type: str, args: argparse.Namespace) -> dict:
             "react_tools": args.react_tools,
             # Which code answered. A night of fixes produces a shelf of reports whose accuracies
             # differ for reasons no field records, and "which commit was this?" is not
-            # reconstructable from the timestamp once two runs overlap.
-            "code_revision": _code_revision(),
+            # reconstructable from the timestamp once two runs overlap. Read once at import, not
+            # per run: the process holds the code it loaded at startup, and a commit landing
+            # while `--agent both` is halfway through would otherwise be recorded as the code
+            # that answered the second half.
+            "code_revision": CODE_REVISION,
         },
         question_retries=settings.benchmark_question_retries,
         question_retry_backoff_seconds=settings.benchmark_question_retry_backoff_seconds,
@@ -217,6 +220,10 @@ def _code_revision() -> str | None:
         if name.strip() == wanted:
             return commit[:12]
     return None
+
+
+# Read once, at import: this is the revision whose code this process is running.
+CODE_REVISION = _code_revision()
 
 
 def main() -> None:

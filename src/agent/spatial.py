@@ -66,7 +66,11 @@ Also return "target_type": the kind of place that answers the question, as the o
 noun for it (편의점, 약국, 주유소, 카페, 은행, 병원, 주차장, 지하철역, 대형마트, 음식점, 학교 …).
 When the question only describes a need, infer the kind of place that satisfies it — "우산을 사야
 합니다" is 편의점, "두통약을 사야 합니다" is 약국, "기름을 넣어야 합니다" is 주유소, "현금을 찾아야
-합니다" is 은행. Use null when the question is not asking for a kind of place at all.
+합니다" is 은행, "장을 봐야 합니다" is 대형마트 (a week's groceries, not a convenience
+store), "끼니를 해결해야 합니다" is 음식점 (a meal, not a cafe). Pick the kind that actually
+satisfies the need: the options will include a closer place of a neighbouring kind, and naming
+that kind answers a different question. Use null when the question is not asking for a kind of
+place at all.
 Include all named places and spatial/temporal constraints.
 Return JSON only:
 {"intent":"direction","concepts":[{"id":"anchor","text":"서울역","concept_type":"location","role":"extent","attributes":{},"depends_on":[]},{"id":"answer","text":"direction","concept_type":"field","role":"measure","attributes":{},"depends_on":["anchor"]}],"measure":"direction"}

@@ -1999,3 +1999,29 @@ def test_an_unresolved_geocode_row_is_dropped_rather_than_failing_the_call() -> 
         }
     )
     assert [place.name for place in args.candidates] == ["A"]
+
+
+def test_a_name_the_planner_copied_out_wrong_is_restored_to_the_question_s_spelling() -> None:
+    """A name that is nearly a literal the question wrote is that literal.
+
+    `잠원한강공원 눈쌨매장` matched nothing at Kakao, and the step that needed it — plus every
+    step downstream — was lost. A name resembling nothing in the question is left exactly as the
+    planner wrote it, so this can only restore evidence.
+    """
+
+    from src.agent.spatial import _verbatim_place_names
+
+    question = (
+        "잠원한강공원 눈썰매장에서 오후 5시 00분에 약속이 있습니다. 가는 길에 "
+        "킴스클럽 강남점에서 30분 들러야 하고, 더월호텔에서 늦어도 몇 시에 출발해야 하나요?"
+    )
+    corrected = _verbatim_place_names(
+        {"place_names": ["더월호텔", "잠원한강공원 눈쌨매장", "전혀다른어떤장소이름"]},
+        question,
+        ["오후 1시", "오후 2시"],
+    )
+    assert corrected["place_names"] == [
+        "더월호텔",
+        "잠원한강공원 눈썰매장",
+        "전혀다른어떤장소이름",
+    ]

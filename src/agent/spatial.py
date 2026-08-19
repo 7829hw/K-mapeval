@@ -4,6 +4,7 @@ import json
 import re
 import time
 from datetime import datetime
+from difflib import SequenceMatcher
 from typing import Any
 
 from src.agent.base import (
@@ -983,7 +984,9 @@ def _ground_graph_literals(
     grounded: list[dict[str, Any]] = []
     for step in steps:
         operator = step.get("operator")
-        arguments = dict(step.get("arguments") or step.get("params") or {})
+        arguments = _verbatim_place_names(
+            dict(step.get("arguments") or step.get("params") or {}), question, options
+        )
         if operator == "nearby_places" and specifications:
             arguments.pop("query", None)
             arguments.pop("category_code", None)
@@ -1593,6 +1596,64 @@ def _extract_anchor(question: str, intent: str) -> str | None:
         if separator in question:
             return _single_anchor(question.split(separator, 1)[0].strip())
     return None
+
+
+# Arguments that carry a place *name* the question or the options wrote down. `query` is absent
+# on purpose: a retrieval's query is a kind of place, and the question need not contain the word.
+_NAME_ARGUMENTS = ("place_names", "options", "anchor", "origin", "destination")
+# How close a planner's spelling has to be to a literal before it is treated as that literal.
+_TRANSCRIPTION_SIMILARITY = 0.85
+
+
+def _verbatim_place_names(
+    arguments: dict[str, Any], question: str, options: list[str]
+) -> dict[str, Any]:
+    """Restore a place name the planner copied out wrong.
+
+    The prompt says to copy every name verbatim, and mostly they are. When they are not the
+    lookup fails outright — `잠원한강공원 눈쌨매장` for the question's `눈썰매장` matched nothing,
+    and the step that needed it, plus everything downstream, was lost. A name that is nearly a
+    literal the question wrote is that literal; a name that resembles nothing in the question is
+    left exactly as the planner wrote it, so this can only ever restore evidence.
+    """
+
+    literals = [option for option in options if option.strip()]
+    corrected = dict(arguments)
+    for key in _NAME_ARGUMENTS:
+        value = corrected.get(key)
+        if isinstance(value, str):
+            corrected[key] = _verbatim_name(value, question, literals)
+        elif isinstance(value, list):
+            corrected[key] = [
+                _verbatim_name(item, question, literals) if isinstance(item, str) else item
+                for item in value
+            ]
+    return corrected
+
+
+def _verbatim_name(name: str, question: str, options: list[str]) -> str:
+    candidate = name.strip()
+    if len(candidate) < 4 or candidate in question or candidate in options:
+        return name
+    best = candidate
+    best_ratio = _TRANSCRIPTION_SIMILARITY
+    for literal in [*options, *_question_spans(question, len(candidate))]:
+        ratio = SequenceMatcher(None, candidate, literal).ratio()
+        if ratio > best_ratio:
+            best, best_ratio = literal, ratio
+    return best
+
+
+def _question_spans(question: str, length: int) -> list[str]:
+    """Every span of the question about as long as the name, as written."""
+
+    text = question.strip()
+    spans: list[str] = []
+    for width in (length - 1, length, length + 1):
+        if width < 4:
+            continue
+        spans.extend(text[start : start + width] for start in range(0, len(text) - width + 1))
+    return spans
 
 
 def _single_anchor(candidate: str) -> str | None:

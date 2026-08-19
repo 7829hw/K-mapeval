@@ -197,9 +197,12 @@ OPERATOR_INPUT_TYPES: dict[str, dict[str, frozenset[str]]] = {
         "center": frozenset({"location", "object"}),
         "candidates": frozenset({"object"}),
     },
-    "select_min": {"items": frozenset({"object", "field", "amount"})},
-    "select_max": {"items": frozenset({"object", "field", "amount"})},
-    "sort_by": {"items": frozenset({"object", "field", "amount"})},
+    # Picking the smallest, the largest or a sort order is a property of the collection, not of
+    # what the collection holds: these read a named key off whatever they are given. Restricting
+    # them refused a plan that ranked itineraries, which are events.
+    "select_min": {"items": frozenset(CORE_CONCEPTS)},
+    "select_max": {"items": frozenset(CORE_CONCEPTS)},
+    "sort_by": {"items": frozenset(CORE_CONCEPTS)},
     "compare_routes": {"routes": frozenset({"field"})},
     "filter_routes": {"routes": frozenset({"field"})},
     "extract_distance": {"route": frozenset({"field"})},
@@ -1215,9 +1218,20 @@ def normalize_and_validate_graph(
             if step["id"] not in consumed and step["role"] not in CONTEXTUAL_ROLES:
                 step["role"] = "measure"
     for step in steps:
+        # `depends_on` is the planner's declaration; the `$` references in the arguments are what
+        # execution actually follows, and they were merged in already. A declared name that
+        # resolves to nothing — a typo, or arithmetic the planner meant to perform later — adds
+        # no edge, so drop it and keep the graph. Only a step left with nothing at all is a
+        # genuine break.
+        resolvable = [name for name in step["depends_on"] if name in by_id]
+        if len(resolvable) != len(step["depends_on"]):
+            if not resolvable and step["role"] not in CONTEXTUAL_ROLES:
+                unknown = [name for name in step["depends_on"] if name not in by_id]
+                raise ValueError(
+                    f"Unknown dependency {unknown[0]!r} on GeoFlow node {step['id']}"
+                )
+            step["depends_on"] = resolvable
         for dependency in step["depends_on"]:
-            if dependency not in by_id:
-                raise ValueError(f"Unknown dependency {dependency!r} on GeoFlow node {step['id']}")
             if _violates_procedural_order(by_id[dependency]["role"], step["role"]):
                 raise ValueError(
                     f"Role ordering violation: {dependency} ({by_id[dependency]['role']}) -> "

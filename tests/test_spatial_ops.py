@@ -1004,3 +1004,82 @@ def test_every_required_argument_in_a_contract_is_one_the_operator_demands() -> 
             f"{name}: contract requires {sorted(claimed - demanded)} which the tool accepts "
             "without"
         )
+
+
+def test_a_stray_dependency_is_dropped_when_the_references_are_sound() -> None:
+    """`depends_on` is a declaration; the `$` references are what execution follows.
+
+    A planner that writes the arithmetic it means into the dependency ("travel_duration + 3600")
+    names nothing resolvable, but the argument beside it already points at the right node.
+    """
+
+    from src.agent.geoflow import normalize_and_validate_graph
+
+    graph = {
+        "graph": [
+            {
+                "id": "ends",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["A", "B"]},
+                "role": "extent",
+            },
+            {
+                "id": "travel",
+                "operator": "travel_time",
+                "arguments": {"origin": "$ends.0.place", "destination": "$ends.1.place"},
+                "depends_on": ["ends"],
+                "role": "support",
+            },
+            {
+                "id": "departure",
+                "operator": "calculate_start_time",
+                "arguments": {
+                    "arrival_time": "오후 5시",
+                    "duration_s": "$travel.duration_s",
+                    "timezone": "Asia/Seoul",
+                },
+                "depends_on": ["travel_duration + 3600"],
+                "role": "measure",
+            },
+        ]
+    }
+    steps, _ = normalize_and_validate_graph(graph, max_steps=10)
+    assert steps[-1]["depends_on"] == ["travel"]
+
+
+def test_a_node_that_depends_on_nothing_real_still_fails() -> None:
+    """Dropping stray names must not turn a genuinely broken graph into a valid one."""
+
+    from src.agent.geoflow import normalize_and_validate_graph
+
+    graph = {
+        "graph": [
+            {
+                "id": "a",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["A"]},
+                "role": "extent",
+            },
+            {
+                "id": "b",
+                "operator": "haversine_distance",
+                "arguments": {"place_a": "A", "place_b": "B"},
+                "depends_on": ["nonexistent"],
+                "role": "measure",
+            },
+        ]
+    }
+    with pytest.raises(ValueError, match="Unknown dependency"):
+        normalize_and_validate_graph(graph, max_steps=10)
+
+
+def test_picking_an_extreme_works_on_whatever_the_collection_holds() -> None:
+    """select_min/select_max/sort_by read a named key; the concept type is not their business.
+
+    Restricting them refused a plan that ranked itineraries, which are events.
+    """
+
+    from src.agent.geoflow import CORE_CONCEPTS, OPERATOR_INPUT_TYPES
+
+    for name in ("select_min", "select_max", "sort_by"):
+        assert OPERATOR_INPUT_TYPES[name]["items"] == frozenset(CORE_CONCEPTS)

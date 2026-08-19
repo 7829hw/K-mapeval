@@ -86,7 +86,7 @@ def _verify_feasible_count(
         for destination in nodes
         if origin != destination
     ]
-    matrix_result = call(registry, "distance_matrix", pairs=pairs)
+    matrix_result = call(registry, "distance_matrix", pairs=pairs, priority="TIME")
     by_pair = {
         (entry["origin"], entry["destination"]): entry.get("duration_s")
         for entry in matrix_result["routes"]
@@ -126,6 +126,11 @@ def _verify_feasible_count(
     )
 
 
+# `Builder.route` routes with DISTANCE, and every routing family's gold is a property of *that*
+# route: which turns come in which order, and how many of them are left. Verifying through the
+# tool's own RECOMMEND default asked about a different route, one that re-optimizes against live
+# traffic — so eleven rows drifted out of agreement the first time traffic moved, none of them
+# because an answer had changed. Ask for the route the gold was built on.
 def verify(row: dict[str, Any], registry: ToolRegistry, ops: SpatialOperatorRegistry) -> str:
     template = row["template_id"]
     options = row["options"]
@@ -218,7 +223,12 @@ def verify(row: dict[str, Any], registry: ToolRegistry, ops: SpatialOperatorRegi
         durations = []
         for via in options:
             route = call(
-                registry, "directions", origin=origin, destination=destination, waypoints=[via]
+                registry,
+                "directions",
+                origin=origin,
+                destination=destination,
+                waypoints=[via],
+                priority="TIME",
             )
             durations.append(route["duration_s"])
         best_index = min(range(4), key=lambda i: durations[i])
@@ -228,7 +238,12 @@ def verify(row: dict[str, Any], registry: ToolRegistry, ops: SpatialOperatorRegi
         origin, rest = question.split("에서", 1)
         destination = rest.split("까지")[0]
         route = call(
-            registry, "directions", origin=origin, destination=destination, include_steps=True
+            registry,
+            "directions",
+            origin=origin,
+            destination=destination,
+            include_steps=True,
+            priority="DISTANCE",
         )
         steps = route["steps"]
         target = evidence["step_index"]
@@ -251,6 +266,7 @@ def verify(row: dict[str, Any], registry: ToolRegistry, ops: SpatialOperatorRegi
             destination=destination,
             waypoints=[via],
             include_steps=True,
+            priority="DISTANCE",
         )
         turns = sum(1 for step in route["steps"] if "좌회전" in step["instruction"])
         return "ok" if options[gold] == f"{turns}번" else f"tools counted {turns}"
@@ -267,7 +283,8 @@ def verify(row: dict[str, Any], registry: ToolRegistry, ops: SpatialOperatorRegi
             for index in range(3):
                 pairs.append({"origin": path[index], "destination": path[index + 1]})
                 labels.append((order, index))
-        matrix = call(registry, "distance_matrix", pairs=pairs)
+        # `Builder.duration_s` routes with TIME, so the gold is the fastest route's duration.
+        matrix = call(registry, "distance_matrix", pairs=pairs, priority="TIME")
         by_pair = {
             (entry["origin"], entry["destination"]): entry.get("duration_s")
             for entry in matrix["routes"]

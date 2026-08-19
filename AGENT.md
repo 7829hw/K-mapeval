@@ -342,6 +342,18 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   rides on a duration must space its options wider than that spread — the time-window families
   keep at least 85 minutes between options for exactly this reason. This is a property of the
   provider, not a bug to fix: do not "stabilize" it by inventing a speed.
+- **A route-shaped gold names its route, in the builder, in the question, and in the verifier.**
+  Which turns come in which order, and how many of them are left, are properties of *one* route,
+  and Kakao serves a different one per priority. `dataset/seoul_kmapeval_v2_mcq_100.jsonl` was
+  first built before `Builder.route` defaulted to DISTANCE, so its two guidance families were
+  built on RECOMMEND — and the day traffic moved, eleven rows stopped re-deriving, none of them
+  because an answer had changed. They are now built on DISTANCE, their questions say
+  `거리가 가장 짧은 경로로` the way v3's do, and `data/verify_benchmark.py` asks for the same
+  priority the builder used. A duration family is the mirror image: `routing_via_compare` asks
+  which detour is *fastest*, so its gold is built with TIME and verified with TIME — reading a
+  duration off the DISTANCE route measures a route nobody drives. When you add a routing family,
+  make the builder, the question text and the verifier agree on the priority, and check the
+  verifier still re-derives after the next traffic change, not just today.
 - **A travelled distance comes from a route, a straight line from haversine, and they are not
   interchangeable.** Road distance runs roughly a quarter longer than the straight line between
   the same points, which is near enough to land on a plausible wrong option: every miss in the

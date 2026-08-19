@@ -267,7 +267,10 @@ def routing_via_compare(builder: Builder, pool: Pool, rng: random.Random, count:
                 break
             if not builder.resolves_to(via):
                 continue
-            route = builder.route(origin, destination, (via,))
+            # "어디를 경유하는 것이 가장 빠릅니까" is a question about time, so the gold is the
+            # duration of the route a driver asking for the fastest one gets. Reading a duration
+            # off the DISTANCE route measures a route nobody drives.
+            route = builder.route(origin, destination, (via,), priority="TIME")
             if route is None:
                 continue
             scored.append((route.duration_s, via))
@@ -297,6 +300,12 @@ def routing_via_compare(builder: Builder, pool: Pool, rng: random.Random, count:
     return made
 
 
+# A guidance step and a left-turn count are properties of *one* route, and the route Kakao serves
+# depends on the priority it was asked for. This dataset's first build predated `Builder.route`
+# defaulting to DISTANCE, so these two families were built on RECOMMEND — which re-optimizes
+# against live traffic, and their golds stopped reproducing the first time traffic moved. Built on
+# DISTANCE the gold is a fact about the road network, and the question has to say so, because an
+# agent given the choice has no way to know which route the answer belongs to.
 def _guide_text(step: RouteStep) -> str:
     return f"{step.instruction} ({step.road_name})" if step.road_name else step.instruction
 
@@ -358,8 +367,9 @@ def routing_next_turn(builder: Builder, pool: Pool, rng: random.Random, count: i
         made.append(
             {
                 "question": (
-                    f"{origin.name}에서 {destination.name}까지 자동차로 운전하고 있습니다. "
-                    f"{step.road_name} 구간에 진입한 뒤 이어지는 주행 안내는 무엇인가요?"
+                    f"{origin.name}에서 {destination.name}까지 자동차로, 거리가 가장 짧은 "
+                    f"경로로 운전하고 있습니다. {step.road_name} 구간에 진입한 뒤 이어지는 "
+                    "주행 안내는 무엇인가요?"
                 ),
                 "options": options,
                 "answer": 0,
@@ -415,7 +425,8 @@ def routing_turn_count(builder: Builder, pool: Pool, rng: random.Random, count: 
             {
                 "question": (
                     f"{origin.name}에서 {eul(via.name)} 경유하여 {destination.name}까지 "
-                    "자동차로 이동합니다. 주행 안내에 따르면 좌회전을 몇 번 해야 하나요?"
+                    "자동차로, 거리가 가장 짧은 경로로 이동합니다. 주행 안내에 따르면 "
+                    "좌회전을 몇 번 해야 하나요?"
                 ),
                 "options": [str(value) + "번" for value in choices],
                 "answer": choices.index(turns),

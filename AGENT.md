@@ -223,6 +223,20 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   `candidate_index` keys an operator staples on), and an anchor written as a name is that place
   named. Without this the artifact `_as_place` shrugs off failed as a `ValidationError` before any
   tool ran, and the cascade emptied the rest of the graph.
+- **A place written as a name is the place the plan already resolved.** The local operators spend
+  no API call by design, so a name is not something they can look up: `filter_by_direction` handed
+  the four option texts instead of the four places the plan had just geocoded dropped every one of
+  them, and the empty sector read downstream as "nothing lies north". `_bind_named_places`
+  (`src/agent/spatial.py`) substitutes, for the place-valued operator arguments only, the place the
+  plan itself resolved under that name — by the query text or by the name Kakao stores. It grants
+  no evidence the run had not already gathered, and a name the plan never resolved is left alone so
+  it still fails as a missing place. The tools keep resolving names through the provider.
+- **An empty ranking is a claim, and a list that resolves nothing cannot make it.**
+  `_as_place_list` used to return `[]` when every candidate was a bare name or the `{"error": …}`
+  marker of a failed step, which downstream is indistinguishable from "no candidate qualifies" —
+  and the generation stage then answered from coordinates it read off the trace. A non-empty input
+  that resolves nothing raises `PlaceNotFoundError`. An input that is genuinely empty still ranks
+  empty: nothing to rank is not the same as candidates that could not be read.
 - **ReAct's step budget is generous on purpose.** `MAX_REASONING_STEPS` is 30 here against
   langchain's `initialize_agent` default of 15, and on five primitives a four-stop itinerary needs
   four PlaceSearch turns plus four TravelTime turns before any arithmetic. Being generous to the
@@ -302,7 +316,15 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   the question's noun does not appear in those paths at all. Keep the terms to words the taxonomy
   uses for a *type*: a bare 마트 also matches `가정,생활 > 편의점 > 이마트24`, which let a
   convenience-store brand answer a 대형마트 question. Add terms from category strings you have
-  actually observed, never from what a category ought to be called.
+  actually observed, never from what a category ought to be called. `CATEGORY_CODE_NOUNS` reads
+  the other vocabulary the same lexicon has to speak: a planner copies `CS2` out of `GRAPH_PROMPT`
+  and writes it where a kind of place belongs, and looking for those three letters inside a Korean
+  category path matches nothing. `filter_places` normalizes its input like every other coordinate
+  operator (it was reading `category` off `batch_geocode`'s `{query, place, candidates}` wrapper,
+  where every field is `None`), treats several required types as alternatives rather than demanding
+  one path contain them all, and — as `nearest` does — drops a kind filter that matches nothing.
+  Each of those emptied the candidate list, and an empty list is what the generation stage guesses
+  over: the inferred-category family answered with a cafe 16 m from the anchor.
 - **An operator that only reports totals cannot answer a bounded question.** `steps_analysis`
   returned whole-route turn counts, so "how many left turns *before* 왕십리로" had no number
   available except the route's total — and the answer came back confidently over-counted rather
@@ -353,7 +375,13 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   which detour is *fastest*, so its gold is built with TIME and verified with TIME — reading a
   duration off the DISTANCE route measures a route nobody drives. When you add a routing family,
   make the builder, the question text and the verifier agree on the priority, and check the
-  verifier still re-derives after the next traffic change, not just today.
+  verifier still re-derives after the next traffic change, not just today. Both agents can ask for
+  the route the question names — `directions.priority` is in the schema ReAct sees, documented as
+  "RECOMMEND, TIME, or DISTANCE" — but only Spatial-Agent binds it, in `_extract_route_priority`.
+  Two of ReAct's turn-count misses on the reproduction benchmark are exactly the RECOMMEND count
+  for a question that says 거리가 가장 짧은 경로로. That asymmetry is grounding, an architectural
+  stage; it is not a tool the baseline was denied, and a write-up should say so rather than let it
+  read as one.
 - **A travelled distance comes from a route, a straight line from haversine, and they are not
   interchangeable.** Road distance runs roughly a quarter longer than the straight line between
   the same points, which is near enough to land on a plausible wrong option: every miss in the
@@ -439,7 +467,14 @@ already emits one node per spec, so it grounds with `expand_retrieval=False`.
 
 The generation stage asks for `predicted_answer` *and* `predicted_option`; `_select_option`
 reconciles them text-first (exact candidate text → declared index → single containment match) and
-records which path fired in the trace as `selection_method`.
+records which path fired in the trace as `selection_method`. A clock the graph *computed* outranks
+all of them — the generation stage kept revising one, once "for real-world traffic" and once for an
+"unrecorded return trip", each adjustment moving the answer exactly one option — but only when it
+picks an option decisively, twice as close to it as to the runner-up. The nearest option is always
+*some* option: a plan whose stays failed to bind computed a travel-only 12:30 against options at
+14:23 and 15:23, and taking the nearer one overruled a generation stage that had added the four
+stated hours itself and written the right answer. `derived_clock` names which end the operator
+computed, because run backwards it echoes the deadline the question supplied.
 
 ## Concurrency, cache, and outputs
 

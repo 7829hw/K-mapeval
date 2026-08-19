@@ -1916,6 +1916,36 @@ def test_the_react_prompt_carries_no_tool_strategy() -> None:
     assert "0-based" in REACT_SYSTEM_PROMPT
 
 
+def test_the_react_baseline_is_the_upstream_port_and_stays_frozen() -> None:
+    """Pins the port so a future edit to the baseline has to be deliberate.
+
+    `mapeval-api/Evaluator2.py` constructs five tools and prompts with the question, the options
+    and the answer format. Everything this repo learns from a benchmark run belongs on the
+    Spatial-Agent side; an accuracy gap ReAct shows is the finding, and closing one here would
+    make the baseline a function of the test set.
+    """
+
+    from src.agent.react import REACT_SYSTEM_PROMPT
+    from src.tools.registry import DirectionsArgs, ToolRegistry
+
+    assert ToolRegistry.MAPEVAL_BASELINE_TOOLS == frozenset(
+        {"place_search", "place_details", "nearby_places", "travel_time", "directions"}
+    )
+    assert REACT_SYSTEM_PROMPT == (
+        "You are the MapEval-style ReAct baseline for Korean spatial questions.\n"
+        "Use the map tools to gather evidence and reason over only the question and candidate "
+        "options.\nSelect one 0-based option. Never invent a place ID. When you have enough "
+        "evidence, answer exactly as\n^^Option_Number^^. You are not given and must not ask for "
+        "the gold answer."
+    )
+    # A parameter is documented by its accepted values, the way upstream documents travelMode.
+    # Glossing what each priority optimizes was written after watching ReAct read a
+    # shortest-route question as RECOMMEND -- which priority a question asks for is grounding,
+    # and grounding is a Spatial-Agent stage under measurement.
+    priority = DirectionsArgs.model_fields["priority"]
+    assert priority.description == "RECOMMEND, TIME, or DISTANCE"
+
+
 def test_a_place_named_in_an_argument_is_the_place_the_plan_already_resolved() -> None:
     """Planners reference option texts where the geocoded places belong.
 

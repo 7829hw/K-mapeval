@@ -268,6 +268,23 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   four PlaceSearch turns plus four TravelTime turns before any arithmetic. Being generous to the
   baseline is the conservative direction for the paper's claim; cutting it would handicap ReAct
   beyond what MapEval does. Do not "fix" it downward to make a gap appear.
+- **The ReAct baseline is a finished port, and it is not tuned against benchmark results.**
+  `src/agent/react.py` carries the element-by-element comparison with `mapeval-api/Evaluator2.py`
+  (35d481a) in its header, and `tests/test_tools_and_agents.py` pins the prompt and the tool set so
+  an edit has to be deliberate. An accuracy gap ReAct shows *is* the finding; closing one by
+  rewriting its prompt, raising its budget, or glossing a parameter it reaches would make the
+  baseline a function of the test set. The two live surfaces are the ones shared with the other
+  architecture — the provider below the tools, and the tool contracts both agents read — and a
+  change to either is argued from the provider or from upstream, never from a question ReAct got
+  wrong. Everything learned from a run belongs on the Spatial-Agent side, where it is an
+  architectural stage under measurement.
+- **A route carries its guidance; a travel time does not.** Upstream's `DirectionsTool` prints
+  every step on every call and `TravelTimeTool` reports one duration and one distance, so the two
+  differ by what they *report*. `DirectionsArgs.include_steps` therefore defaults to True and
+  `TravelTimeArgs` overrides it to False. Defaulting both to False made the guidance something an
+  agent had to know to ask for — a capability our port withheld from the baseline rather than one
+  MapEval's design withholds — and forced Spatial-Agent's grounding to bind the flag so
+  `steps_analysis` had turns to count.
 - No separate HTTP backend server, web UI, or extra datastore beyond the SQLite cache. Keep
   `src/agent/` and `src/tools/` as the only source subpackages and `main.py` as the only *runtime*
   entry point. `data/build_*.py` and `data/verify_benchmark.py` are offline dataset tooling,
@@ -357,11 +374,24 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   one path contain them all, and — as `nearest` does — drops a kind filter that matches nothing.
   Each of those emptied the candidate list, and an empty list is what the generation stage guesses
   over: the inferred-category family answered with a cafe 16 m from the anchor.
-  `CATEGORY_EXCLUSIONS` is the same rule pointing the other way: Kakao files a cafe as
-  `음식점 > 카페`, so the word that names the type also names its neighbour, and a question about
-  a meal was answered by a cafe 220 m nearer than the restaurant it meant. `matches_required_type`
-  is the single test both `filter_places` and `nearest` apply, so a filter and the ranking after
-  it can never disagree about what a kind is.
+  **The kind a place is, is the deepest kind this lexicon can name in its path.** Kakao files a
+  category coarse-to-fine — `음식점 > 카페 > 커피전문점`, `의료,건강 > 약국` — so the word that
+  names a type also names the parent of its neighbours, and a question about a meal was answered
+  by a cafe 220 m nearer than the restaurant it meant. `_finer_type_overrides` reads that off the
+  path instead of off a list of pairs: below the level where the requested kind matched, any other
+  kind `TYPE_VOCABULARY` knows wins. That covers the 병원/약국 overlap 병원's own `의료` alias
+  creates, which no pair list had been written for — the point of deriving the rule from the
+  taxonomy rather than from the misses observed so far. `matches_required_type` is the single test
+  both `filter_places` and `nearest` apply, so a filter and the ranking after it can never
+  disagree about what a kind is.
+- **A filter over a field the evidence does not carry is not a filter.** `evidence_carries`
+  (`src/tools/spatial.py`) drops `min_rating` / `price_levels` / `open_now` when *no* candidate
+  carries the field, and applies them normally the moment one does. Kakao Local publishes no
+  rating and no opening hours, so `min_rating=4.0` deleted every candidate — and an empty list is
+  what the generation stage guesses over. A source that publishes no ratings is not a source in
+  which every place is unrated. The same rule holds in `ToolRegistry._place_search`, and it is why
+  those parameters can stay in the schema: against a context corpus that carries them they filter,
+  against Kakao they stand down.
 - **An operator that only reports totals cannot answer a bounded question.** `steps_analysis`
   returned whole-route turn counts, so "how many left turns *before* 왕십리로" had no number
   available except the route's total — and the answer came back confidently over-counted rather
@@ -419,9 +449,10 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   multi-segment misses (each answer ~1.4x its gold, the RECOMMEND detour), are exactly the
   RECOMMEND reading of a question that says 거리가 가장 짧은 경로로. That asymmetry is grounding,
   an architectural stage; it is not a tool the baseline was denied, and a write-up should say so
-  rather than let it read as one. The parameter's *description* is a different matter and now
-  names what each value optimizes — documenting a parameter is not strategy for a question, and
-  being generous to the baseline is the conservative direction, as with its step budget.
+  rather than let it read as one. The parameter's *description* stays the bare value list, the way
+  upstream's `travelMode` is documented: an earlier revision glossed what each value optimizes,
+  which was written after seeing exactly those misses and so made the baseline's vocabulary a
+  function of the test set.
 - **A travelled distance comes from a route, a straight line from haversine, and they are not
   interchangeable.** Road distance runs roughly a quarter longer than the straight line between
   the same points, which is near enough to land on a plausible wrong option: every miss in the

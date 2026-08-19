@@ -396,3 +396,31 @@ is PlaceSearch reached through a second index rather than address handling.
 earlier revision of this document and of `AGENT.md` counted it and called the baseline six tools.
 It is five. `FormattedTools.PlaceSearchTool` is documented as "Get place ID for a given
 location", which is the same primitive.
+
+### The port is finished, and that is a rule rather than a status
+
+`src/agent/react.py` carries the element-by-element comparison in its header. What matters beyond
+the table is the direction of maintenance: **the baseline is not edited in response to a benchmark
+result.** An accuracy gap ReAct shows *is* the finding, so closing one by rewriting its prompt,
+raising its budget, or glossing a parameter it reaches would make the baseline a function of the
+test set — the same overfitting the shared-tool-surface correction above was about, one layer
+down. Only two surfaces stay live, and both are shared with the other architecture: the provider
+below the tools, and the tool contracts both agents read. A change to either has to be argued from
+the provider or from upstream, never from a question ReAct got wrong.
+
+Two consequences, applied together:
+
+- `directions` returns its turn-by-turn guidance by default, and `travel_time` does not
+  (`TravelTimeArgs`). Upstream's `DirectionsTool` prints every step's instructions on every call
+  while `TravelTimeTool` reports one duration and one distance — the two tools differ by what they
+  *report*, not by what an agent has to know to ask for. Our port had `include_steps=False` on
+  both, which made the guidance a capability the port withheld from the baseline rather than one
+  MapEval's design withholds; `steps_analysis` on the Spatial-Agent side had to bind the flag
+  during grounding to get a route it could count turns on, and that binding is now unnecessary.
+- `DirectionsArgs.priority` is documented as `"RECOMMEND, TIME, or DISTANCE"` — the accepted
+  values, the way upstream documents `travelMode` as "(driving, walking, bicycling, transit)". An
+  earlier revision glossed each value with what it optimizes, written after watching ReAct read a
+  question that says 거리가 가장 짧은 경로로 as RECOMMEND. Kakao requires the parameter, so the
+  baseline has it; *which* priority a question asks for is grounding, and grounding is a
+  Spatial-Agent stage under measurement (`_extract_route_priority`). A write-up should report that
+  asymmetry as architectural, which it is, rather than close it in the baseline's prose.

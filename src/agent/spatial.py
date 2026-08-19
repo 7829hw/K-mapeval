@@ -20,7 +20,6 @@ from src.agent.geoflow import (
     normalize_analysis,
     normalize_and_validate_graph,
     reference_expression,
-    reference_roots,
     retrieve_templates,
     split_reference_arithmetic,
 )
@@ -103,7 +102,7 @@ Exact operator contracts:
   AC5 academy, PK6 parking, OL7 gas/charging, SW8 subway station, BK9 bank,
   CT1 culture, AG2 real estate, PO3 public institution, AT4 attraction, AD5 lodging,
   FD6 restaurant, CE7 cafe, HP8 hospital, PM9 pharmacy. Use the matching code whenever possible.
-- directions(origin,destination,mode="driving",priority,waypoints?,include_steps=false) -> field
+- directions(origin,destination,mode="driving",priority,waypoints?) -> field (with steps)
 - travel_time(origin, destination, mode="driving", priority) -> field Route
   Kakao Mobility routes cars only, so a walking question — 걸어서, 걸어가기에 가장 가까운 —
   is answered with haversine_distance or nearest(metric="haversine"), never by asking these two
@@ -978,14 +977,6 @@ def _carries_written_sum(value: str) -> bool:
     return parsed is not None and (len(parsed[0]) > 1 or parsed[1] != 0.0)
 
 
-def _step_sources(step: dict[str, Any]) -> set[str]:
-    """Every node id a step reads from, whether declared as a dependency or only referenced."""
-
-    sources = {str(name) for name in step.get("depends_on") or []}
-    sources.update(reference_roots(step.get("arguments") or step.get("params") or {}))
-    return sources
-
-
 def _ground_graph_literals(
     steps: list[dict[str, Any]],
     question: str,
@@ -1025,22 +1016,11 @@ def _ground_graph_literals(
             ),
             [],
         )
-    # `steps_analysis` has nothing to count when the route it reads was fetched without its
-    # turn-by-turn guidance, and `directions` omits them by default. The operator then reported
-    # zero turns for every question and the generation stage answered from prose instead, which
-    # is a confident wrong number rather than a failure. A route a step analysis consumes is a
-    # route whose steps are needed, so bind it here rather than hope the prompt lands.
     # Which node ids produce a tour whose cost already carries the stays.
     tour_totals = {
         str(step.get("id"))
         for step in steps
         if step.get("operator") == "tsp_tw"
-    }
-    stepwise_sources = {
-        source
-        for step in steps
-        if step.get("operator") == "steps_analysis"
-        for source in _step_sources(step)
     }
     # The place names the question states outright, for repairing one a plan copied short: a plan
     # that geocoded `문래` where the question says `빈칸 문래` routed from another place entirely
@@ -1103,12 +1083,6 @@ def _ground_graph_literals(
             source = next(iter(step.get("depends_on") or []), None)
             if source:
                 arguments["value"] = f"${source}"
-            grounded.append({**step, "arguments": arguments})
-            continue
-        if operator == "directions" and step.get("id") in stepwise_sources:
-            arguments["include_steps"] = True
-            if route_priority and operator in _PRIORITY_OPERATORS:
-                arguments["priority"] = route_priority
             grounded.append({**step, "arguments": arguments})
             continue
         if operator == "calculate_finish_time" and intent == "trip":

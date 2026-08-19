@@ -372,15 +372,24 @@ class SpatialOperatorRegistry:
         open_now: bool | None = None,
     ) -> list[dict[str, Any]]:
         price_set = {value.casefold() for value in (price_levels or [])}
+        candidates = [place for _, place in _as_place_list(places, keep_unresolved=True)]
+        # A filter over a field none of these places carries is not a filter, it is a way to
+        # return nothing: Kakao Local publishes no rating, no price level and no opening hours, so
+        # `min_rating=4.0` deleted every candidate and the ranking after it answered from an empty
+        # list. Where some place does carry the field, an empty result is real evidence and the
+        # filter stands. Same rule as the kind filter below, one attribute earlier.
+        rated = evidence_carries(candidates, "rating")
+        priced = evidence_carries(candidates, "price_level")
+        timed = evidence_carries(candidates, "is_open")
         attribute_matches: list[dict[str, Any]] = []
-        for _, place in _as_place_list(places, keep_unresolved=True):
-            if min_rating is not None and (
-                place.get("rating") is None or float(place["rating"]) < min_rating
+        for place in candidates:
+            if min_rating is not None and rated and float(place.get("rating") or 0) < min_rating:
+                continue
+            if price_set and priced and (
+                str(place.get("price_level") or "").casefold() not in price_set
             ):
                 continue
-            if price_set and str(place.get("price_level") or "").casefold() not in price_set:
-                continue
-            if open_now is not None and bool(place.get("is_open")) is not open_now:
+            if open_now is not None and timed and bool(place.get("is_open")) is not open_now:
                 continue
             attribute_matches.append(place)
         if not required_types:
@@ -979,28 +988,67 @@ def category_terms(required_type: str) -> tuple[str, ...]:
     return (noun or required_type,)
 
 
+def evidence_carries(places: list[dict[str, Any]], field: str) -> bool:
+    """Whether any candidate actually carries the field a filter would test.
+
+    An attribute filter says which of these places qualifies. Over a field the evidence source
+    never populates it says something else — that none of them do — and a source that publishes
+    no ratings is not a source in which every place is unrated. So the filter is dropped when the
+    field is absent everywhere, and applied normally the moment one place carries it.
+    """
+
+    return any(place.get(field) is not None for place in places)
+
+
 def _category_haystack(place: dict[str, Any]) -> str:
     return f"{place.get('category', '')} {place.get('name', '')}".casefold()
 
 
-# Kakao files a cafe as `음식점 > 카페`, so the word that names the type also names its neighbour.
-# A question about a meal is not answered by a cafe 200 m nearer than the restaurant, and the
-# option-ranking path had no retrieval category to keep them apart. Only overlaps observed in real
-# category strings belong here, and only where the two kinds answer different questions.
-CATEGORY_EXCLUSIONS: dict[str, tuple[str, ...]] = {
-    "음식점": ("카페",),
+# The vocabulary of kinds this lexicon can name, in the terms each one wears inside a Kakao
+# category path. Both tables speak about types, so both are vocabulary: the aliases are the words
+# a question uses, the code nouns are the words a planner copies out of the operator prompt.
+TYPE_VOCABULARY: dict[str, tuple[str, ...]] = {
+    noun: category_terms(noun)
+    for noun in sorted({*CATEGORY_ALIASES, *CATEGORY_CODE_NOUNS.values()})
 }
+
+
+def _finer_type_overrides(category: Any, required_terms: tuple[str, ...]) -> bool:
+    """Whether the path names a *more specific* kind than the one asked for, below the match.
+
+    Kakao files a category as a path from coarse to fine — `음식점 > 카페 > 커피전문점`,
+    `의료,건강 > 약국` — so the word that names a kind also names the parent of its neighbours,
+    and a question about a meal was answered by a cafe 220 m nearer than the restaurant it meant.
+    The taxonomy already says which of the two the place is: whichever kind this lexicon can name
+    sits *deepest*. So the rule is structural rather than a list of pairs to keep in step with the
+    benchmark — every kind the vocabulary knows excludes every coarser kind above it, including
+    pairs nobody has hit yet.
+    """
+
+    levels = [level.strip() for level in str(category or "").split(">")]
+    matched = -1
+    for index, level in enumerate(levels):
+        if any(term in level for term in required_terms):
+            matched = index
+    if matched < 0:
+        return False
+    own = set(required_terms)
+    for level in levels[matched + 1 :]:
+        for terms in TYPE_VOCABULARY.values():
+            if own.intersection(terms):
+                continue  # the same kind under one of its own other names
+            if any(term in level for term in terms):
+                return True
+    return False
 
 
 def matches_required_type(place: dict[str, Any], required_type: str) -> bool:
     """Whether a place is of the kind asked for, in Kakao's own category vocabulary."""
 
-    haystack = _category_haystack(place)
-    key = "".join(str(required_type).split()).casefold()
-    noun = CATEGORY_CODE_NOUNS.get(key.upper(), key)
-    if any(term.casefold() in haystack for term in CATEGORY_EXCLUSIONS.get(noun, ())):
+    terms = category_terms(str(required_type))
+    if not any(term.casefold() in _category_haystack(place) for term in terms):
         return False
-    return any(term.casefold() in haystack for term in category_terms(str(required_type)))
+    return not _finer_type_overrides(place.get("category"), terms)
 
 
 def build_duration_matrix(routes: Any) -> dict[str, Any]:

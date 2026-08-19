@@ -1194,33 +1194,20 @@ def test_an_offset_reference_resolves_to_the_number_plus_the_offset() -> None:
     assert _resolve_references({"value": "$who.name"}, results) == {"value": "A"}
 
 
-def test_a_route_a_step_analysis_reads_is_fetched_with_its_steps() -> None:
-    """`directions` omits turn-by-turn guidance by default, and `steps_analysis` needs it.
+def test_a_route_carries_its_guidance_and_a_travel_time_does_not() -> None:
+    """Upstream's Directions prints every step; its TravelTime reports a duration and a distance.
 
-    Without it the operator reported zero turns on every route and the generation stage answered
-    from prose, which is a confident wrong count rather than a failure.
+    Our port had `directions` omit the guidance unless asked, which made `steps_analysis` report
+    zero turns on every route -- and made the guidance a capability the port withheld from the
+    baseline rather than one MapEval's design withholds. The split lives in the two args models,
+    so both architectures get the same route from the same tool.
     """
 
-    from src.agent.spatial import _ground_graph_literals
+    from src.tools.registry import DirectionsArgs, TravelTimeArgs
 
-    steps = [
-        {
-            "id": "route",
-            "operator": "directions",
-            "arguments": {"origin": "$ends.0.place", "destination": "$ends.1.place"},
-            "depends_on": ["ends"],
-            "role": "support",
-        },
-        {
-            "id": "turns",
-            "operator": "steps_analysis",
-            "arguments": {"route": "$route", "landmark": "왕십리로"},
-            "depends_on": ["route"],
-            "role": "measure",
-        },
-    ]
-    grounded = _ground_graph_literals(steps, "질문", [], "routing")
-    assert grounded[0]["arguments"]["include_steps"] is True
+    pair = {"origin": "A", "destination": "B"}
+    assert DirectionsArgs.model_validate(pair).include_steps is True
+    assert TravelTimeArgs.model_validate(pair).include_steps is False
 
 
 def test_an_itinerary_is_the_whole_list_the_plan_geocoded() -> None:
@@ -2085,6 +2072,50 @@ def test_a_meal_question_is_not_answered_by_a_cafe() -> None:
     # The cafe is still a cafe when a cafe is what was asked for.
     assert matches_required_type(cafe, "카페") is True
     assert matches_required_type(cafe, "CE7") is True
+
+
+def test_the_deepest_kind_the_vocabulary_names_is_the_kind_the_place_is() -> None:
+    """The taxonomy decides which of two kinds a path names, not a list of pairs to maintain.
+
+    `음식점 > 카페` is the instance that was observed; `의료,건강 > 약국` is one nobody wrote a
+    rule for, and it has to behave the same way or the exclusion is tuned to the benchmark. A
+    coarser kind above a finer one in the same path is the parent, not the answer.
+    """
+
+    from src.tools.spatial import matches_required_type
+
+    pharmacy = {"name": "이도약국", "category": "의료,건강 > 약국"}
+    clinic = {"name": "드림서울이비인후과의원", "category": "의료,건강 > 병원 > 이비인후과"}
+    # 병원's own alias list carries 의료, which the pharmacy's path also leads with.
+    assert matches_required_type(pharmacy, "병원") is False
+    assert matches_required_type(pharmacy, "약국") is True
+    assert matches_required_type(clinic, "병원") is True
+    # A kind named deeper than the match is only a finer kind when the lexicon knows it: a
+    # 한식 restaurant is a restaurant, because the alias table files 한식 under 음식점.
+    korean = {"name": "고기리막국수", "category": "음식점 > 한식 > 국수"}
+    assert matches_required_type(korean, "음식점") is True
+
+
+def test_a_filter_over_a_field_the_evidence_lacks_is_dropped() -> None:
+    """Kakao publishes no ratings, so `min_rating` was a way to return nothing.
+
+    An empty candidate list is what the generation stage guesses over, so a filter the evidence
+    cannot speak to has to stand down -- and stand up again the moment one place carries the
+    field, where an empty result is a real answer.
+    """
+
+    ops = SpatialOperatorRegistry()
+    unrated = [
+        {"place_id": "1", "name": "가", "latitude": 37.5, "longitude": 127.0},
+        {"place_id": "2", "name": "나", "latitude": 37.5, "longitude": 127.0},
+    ]
+    assert ops.filter_places(unrated, min_rating=4.0) == unrated
+    assert ops.filter_places(unrated, open_now=True) == unrated
+    rated = [
+        {**unrated[0], "rating": 4.5},
+        {**unrated[1], "rating": 3.0},
+    ]
+    assert [place["place_id"] for place in ops.filter_places(rated, min_rating=4.0)] == ["1"]
 
 
 def test_the_type_filter_and_the_ranking_agree_on_what_a_kind_is() -> None:

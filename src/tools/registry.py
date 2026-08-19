@@ -297,15 +297,14 @@ class DirectionsArgs(BaseModel):
         description="Destination name, place_id, or normalized Place from an earlier step"
     )
     mode: str = Field(default="driving", description="MVP supports driving")
-    # What each value optimizes, in the words the provider's own documentation uses. Naming the
-    # objective is documentation of the parameter, not strategy for a question: the baseline had
-    # the parameter and no way to know that a question about the shortest route meant DISTANCE.
+    # Kakao's own value list, the way upstream's TravelTime documents its travelMode: the accepted
+    # values and nothing else. Glossing what each one optimizes was written after watching ReAct
+    # read a question about the shortest route as RECOMMEND, which makes the baseline's vocabulary
+    # a function of the test set. Which priority a question asks for is grounding, and grounding is
+    # a Spatial-Agent stage under measurement (`_extract_route_priority`) — not a gap to close in
+    # prose here.
     priority: str = Field(
-        default="RECOMMEND",
-        description=(
-            "Route objective: RECOMMEND (Kakao's default, optimized against live traffic), "
-            "TIME (fastest), DISTANCE (shortest)"
-        ),
+        default="RECOMMEND", description="RECOMMEND, TIME, or DISTANCE"
     )
 
     @field_validator("priority", mode="before")
@@ -313,7 +312,12 @@ class DirectionsArgs(BaseModel):
     def normalize_priority(cls, value: Any) -> Any:
         return _as_priority(value)
     waypoints: list[str | Place] = Field(default_factory=list, max_length=30)
-    include_steps: bool = False
+    # Upstream's `DirectionsTool` prints every step's instructions on every call, so a route and
+    # its guidance are one observation there. Defaulting this to False made the guidance something
+    # an agent had to know to ask for, which is a capability our port withheld from the baseline
+    # rather than one MapEval's design withholds. TravelTime is the tool that answers without
+    # steps -- see `TravelTimeArgs`.
+    include_steps: bool = True
 
     @field_validator("origin", "destination", mode="before")
     @classmethod
@@ -324,6 +328,18 @@ class DirectionsArgs(BaseModel):
     @classmethod
     def normalize_waypoints(cls, value: Any) -> Any:
         return _as_place_list_argument(value)
+
+
+class TravelTimeArgs(DirectionsArgs):
+    """The same route request, reported as duration and distance.
+
+    Upstream keeps TravelTime and Directions apart by what they return: `TravelTimeTool` reports
+    one duration and one distance, `DirectionsTool` reports the routes with their steps. Same
+    evidence, same provider call, different report -- so the only thing that differs here is the
+    default.
+    """
+
+    include_steps: bool = False
 
 
 class CalculateFinishTimeArgs(BaseModel):
@@ -608,7 +624,7 @@ class ToolRegistry:
                 ToolDefinition(
                     "travel_time",
                     "Get normalized driving time and distance. Same evidence schema as directions.",
-                    DirectionsArgs,
+                    TravelTimeArgs,
                     self._route,
                 ),
                 ToolDefinition(
@@ -794,13 +810,17 @@ class ToolRegistry:
                 limit=args.limit,
             )
         )
-        if args.min_rating is not None:
+        # An attribute filter over a field this provider never populates returns nothing rather
+        # than filtering — see `evidence_carries`. Kakao Local publishes neither ratings nor
+        # opening hours, so both of these are dropped there and both apply against a context
+        # corpus that carries them.
+        if args.min_rating is not None and any(place.rating is not None for place in places):
             places = [
                 place
                 for place in places
                 if place.rating is not None and place.rating >= args.min_rating
             ]
-        if args.open_now is not None:
+        if args.open_now is not None and any(place.is_open is not None for place in places):
             places = [place for place in places if place.is_open is args.open_now]
         return places
 

@@ -14,14 +14,38 @@ from src.llm import ChatClient, LLMUnavailableError
 from src.parsing import parse_answer
 from src.tools import ToolRegistry
 
-# MapEval's own baseline is a stock langchain STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION agent
-# whose prompt is the question, the options, and the answer format — `Evaluator2.py` adds no
-# strategy at all. An earlier revision of this prompt named the benchmark's question taxonomy and
-# told the agent which tool each shape wants ("coordinates for direction and straight-line
-# distance", "directions only for road-route questions"), which is planning handed to the baseline
-# in prose — the same mistake as handing it the aggregation tools, in the other currency. What is
-# left is role, evidence discipline, and the wire format, all of which MapEval's prompt has too.
-# Tool contracts belong in the tool descriptions, where both agents read them.
+# This agent is a *port* of MapEval-API's baseline, and it is finished. Upstream is
+# `mapeval-api/Evaluator2.py` (35d481a): a stock langchain
+# `initialize_agent(tools, llm, AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION,
+# handle_parsing_errors=True, return_intermediate_steps=True)` over the five tools
+# `FormattedTools.py` defines, prompted with the question, the options, and the answer format.
+# Element by element:
+#
+#   upstream                                   | here
+#   -------------------------------------------|--------------------------------------------
+#   five tools, constructed in `evaluate()`    | `ToolRegistry.MAPEVAL_BASELINE_TOOLS`
+#   structured-chat JSON action blob in text   | the provider's native tool-call channel
+#   `handle_tool_error=True` on every tool     | `ToolRegistry.invoke` returns errors as
+#                                              |   observations, never as exceptions
+#   `handle_parsing_errors=True`               | an unparsed final answer is a recorded
+#                                              |   `answer_parse_failure`, not a crash
+#   `max_iterations=15` (langchain default)    | `MAX_REASONING_STEPS` (30 in the run env)
+#   1-based options, `^^Option_Number^^`       | 0-based options, `^^N^^` (repo-wide invariant)
+#   question + options + answer format         | `REACT_SYSTEM_PROMPT` + `format_question`
+#
+# **Do not tune it against benchmark results.** Every accuracy gap this agent shows is the
+# finding; closing one by editing its prompt, its budget, or the description of a parameter it
+# reaches would make the baseline a function of the test set. The two places that stay live are
+# the ones shared with the other architecture — the provider below the tools, and the tool
+# contracts both agents read — and a change there has to be argued from the provider, never from
+# a question ReAct got wrong. Anything MapEval's own baseline does not do belongs on the
+# Spatial-Agent side, where it is an architectural stage under measurement.
+#
+# The prompt itself carries what MapEval's carries and nothing more: role, evidence discipline,
+# and the wire format. An earlier revision named the benchmark's question taxonomy and told the
+# agent which tool each shape wants, which is planning handed to the baseline in prose — the same
+# mistake as handing it the aggregation tools, in another currency. Tool contracts live in the
+# tool descriptions, where both agents read them.
 REACT_SYSTEM_PROMPT = """You are the MapEval-style ReAct baseline for Korean spatial questions.
 Use the map tools to gather evidence and reason over only the question and candidate options.
 Select one 0-based option. Never invent a place ID. When you have enough evidence, answer exactly as

@@ -386,10 +386,13 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   verifier still re-derives after the next traffic change, not just today. Both agents can ask for
   the route the question names — `directions.priority` is in the schema ReAct sees, documented as
   "RECOMMEND, TIME, or DISTANCE" — but only Spatial-Agent binds it, in `_extract_route_priority`.
-  Two of ReAct's turn-count misses on the reproduction benchmark are exactly the RECOMMEND count
-  for a question that says 거리가 가장 짧은 경로로. That asymmetry is grounding, an architectural
-  stage; it is not a tool the baseline was denied, and a write-up should say so rather than let it
-  read as one.
+  Two of ReAct's turn-count misses on the reproduction benchmark, and all three of its
+  multi-segment misses (each answer ~1.4x its gold, the RECOMMEND detour), are exactly the
+  RECOMMEND reading of a question that says 거리가 가장 짧은 경로로. That asymmetry is grounding,
+  an architectural stage; it is not a tool the baseline was denied, and a write-up should say so
+  rather than let it read as one. The parameter's *description* is a different matter and now
+  names what each value optimizes — documenting a parameter is not strategy for a question, and
+  being generous to the baseline is the conservative direction, as with its step budget.
 - **A travelled distance comes from a route, a straight line from haversine, and they are not
   interchangeable.** Road distance runs roughly a quarter longer than the straight line between
   the same points, which is near enough to land on a plausible wrong option: every miss in the

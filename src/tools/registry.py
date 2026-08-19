@@ -269,7 +269,16 @@ class DirectionsArgs(BaseModel):
         description="Destination name, place_id, or normalized Place from an earlier step"
     )
     mode: str = Field(default="driving", description="MVP supports driving")
-    priority: str = Field(default="RECOMMEND", description="RECOMMEND, TIME, or DISTANCE")
+    # What each value optimizes, in the words the provider's own documentation uses. Naming the
+    # objective is documentation of the parameter, not strategy for a question: the baseline had
+    # the parameter and no way to know that a question about the shortest route meant DISTANCE.
+    priority: str = Field(
+        default="RECOMMEND",
+        description=(
+            "Route objective: RECOMMEND (Kakao's default, optimized against live traffic), "
+            "TIME (fastest), DISTANCE (shortest)"
+        ),
+    )
 
     @field_validator("priority", mode="before")
     @classmethod

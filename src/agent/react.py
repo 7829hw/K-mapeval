@@ -14,12 +14,16 @@ from src.llm import ChatClient, LLMUnavailableError
 from src.parsing import parse_answer
 from src.tools import ToolRegistry
 
+# MapEval's own baseline is a stock langchain STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION agent
+# whose prompt is the question, the options, and the answer format — `Evaluator2.py` adds no
+# strategy at all. An earlier revision of this prompt named the benchmark's question taxonomy and
+# told the agent which tool each shape wants ("coordinates for direction and straight-line
+# distance", "directions only for road-route questions"), which is planning handed to the baseline
+# in prose — the same mistake as handing it the aggregation tools, in the other currency. What is
+# left is role, evidence discipline, and the wire format, all of which MapEval's prompt has too.
+# Tool contracts belong in the tool descriptions, where both agents read them.
 REACT_SYSTEM_PROMPT = """You are the MapEval-style ReAct baseline for Korean spatial questions.
 Use the map tools to gather evidence and reason over only the question and candidate options.
-The benchmark includes nearby, POI, routing, trip, place-type, cardinal-direction,
-straight-line-distance, and radius-constrained questions. Use a place's category for type,
-coordinates for direction and straight-line distance, nearby_places with the exact radius for
-radius questions, and directions only for road-route questions. Nearby results are nearest first.
 Select one 0-based option. Never invent a place ID. When you have enough evidence, answer exactly as
 ^^Option_Number^^. You are not given and must not ask for the gold answer."""
 

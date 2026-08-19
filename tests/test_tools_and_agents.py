@@ -1859,3 +1859,35 @@ def test_the_mapeval_baseline_withholds_the_aggregation_tools() -> None:
 def test_restricting_to_an_unknown_tool_is_refused() -> None:
     with pytest.raises(ValueError, match="Unknown tools"):
         ToolRegistry(FakeProvider(), allowed={"place_search", "teleport"})
+
+
+def test_the_baseline_gets_the_papers_tool_surface_by_default() -> None:
+    """A tool surface is part of an architecture, so the two agents do not share one.
+
+    Making them identical did not remove a confound — it deleted the difference the paper
+    measures. Upstream carries `get_distance_matrix` in `spatial-agent/src/tools/google_maps.py`
+    and `mapeval-api/Evaluator2.py` hands its baseline nothing of the kind. `full` remains
+    reachable as an explicit ablation, which is why the flag still exists.
+    """
+
+    from main import build_parser
+
+    parser = build_parser()
+    assert parser.parse_args([]).react_tools == "mapeval"
+    assert parser.parse_args(["--react-tools", "full"]).react_tools == "full"
+
+
+def test_the_react_prompt_carries_no_tool_strategy() -> None:
+    """MapEval's baseline gets the question, the options and the answer format, and no plan.
+
+    Naming the question taxonomy and which tool each shape wants is planning handed to the
+    baseline in prose — the same error as handing it the aggregation tools, in another currency.
+    """
+
+    from src.agent.react import REACT_SYSTEM_PROMPT
+
+    for planted in ("nearby_places", "directions only", "coordinates for direction", "radius"):
+        assert planted not in REACT_SYSTEM_PROMPT
+    # What MapEval's own prompt does carry stays.
+    assert "^^Option_Number^^" in REACT_SYSTEM_PROMPT
+    assert "0-based" in REACT_SYSTEM_PROMPT

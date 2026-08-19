@@ -323,18 +323,35 @@ the five extra ones are all aggregations over those primitives:
 | `calculate_finish_time` | routes, stays and clock arithmetic by hand over many turns |
 | `recover_option_places` | ground each option separately |
 
-Aggregating primitives into a typed, executable plan is what GeoFlow is *for*. Putting those
-aggregations in the shared tool layer satisfies this repository's own parity rule — both agents
-reach every tool — and simultaneously hands the baseline the work the architecture was meant to
-do. The measurements line up with that reading exactly: ReAct answers `trip_finish_time` 16/16 in
-two tool calls (`batch_geocode` then `calculate_finish_time`), and the single family where
-Spatial-Agent leads (`nearby_from_need`, 11/14 against 9/14) is the only one with no tool that
-does the whole job, so ReAct has to reason.
+Aggregating primitives into a typed, executable plan is what GeoFlow is *for*. An earlier revision
+of this repository put those aggregations in a tool layer both agents shared, on a rule that the
+two must differ only in architecture. **That rule was a design error**, and it is retired. A tool
+surface *is* part of an architecture: upstream carries `get_distance_matrix` in
+`spatial-agent/src/tools/google_maps.py` and `mapeval-api/Evaluator2.py` hands its baseline nothing
+of the kind, so making the surfaces identical did not remove a confound — it deleted the very
+difference the paper measures, and handed the baseline the work the architecture was meant to do.
 
-`--react-tools mapeval` restricts the baseline to `ToolRegistry.MAPEVAL_BASELINE_TOOLS`. The two
-surfaces answer different questions — "does the graph add anything on top of strong aggregation
-tools" versus "does the graph beat primitives", the latter being the paper's — and
-`metadata.react_tools` records which one a run used.
+The measurements under the shared surface line up with that reading exactly. In the ReAct run
+behind `reports/test_20260819T045330Z.json` (92/100), 79 of 100 questions saw ReAct call at least
+one aggregation tool; `trip_finish_time` was 16/16 and `trip_latest_departure` 14/14, every one of
+them using them. A four-stop itinerary took five tool calls — one `batch_geocode` plus four
+`travel_time` — where the paper's baseline needs four PlaceSearch calls, four TravelTime calls, and
+the place ids carried across turns. `batch_geocode` also reconciles the four names against each
+other and against an anchor, which PlaceSearch has no equivalent of at all.
+
+So ReAct is now constructed with `allowed=ToolRegistry.MAPEVAL_BASELINE_TOOLS` and `--react-tools`
+defaults to `mapeval`. `--react-tools full` restores the shared surface as an explicit ablation —
+"does the graph add anything on top of strong aggregation tools" rather than the paper's "does the
+graph beat primitives" — and `metadata.react_tools` records which question a run asked. Reports
+from the two surfaces must never be pooled; every report predating this default is a `full` run.
+
+The same correction applies to the ReAct prompt. MapEval's baseline is a stock langchain
+`STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION` agent whose prompt is the question, the options and
+the answer format, with no strategy. `REACT_SYSTEM_PROMPT` used to name the benchmark's question
+taxonomy and say which tool each shape wants ("coordinates for direction and straight-line
+distance", "directions only for road-route questions"): planning handed to the baseline in prose,
+the same error in another currency. It now carries role, evidence discipline and the wire format
+only. Tool contracts stay in the tool descriptions, which is where MapEval keeps them too.
 
 `MAPEVAL_BASELINE_TOOLS` is exactly the five tools `Evaluator2.py` constructs at line 33 of
 `mapeval-api@35d481a`, mapped onto their Kakao counterparts:

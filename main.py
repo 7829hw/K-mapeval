@@ -42,15 +42,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     result.add_argument(
         "--react-tools",
-        choices=("full", "mapeval"),
-        default="full",
+        choices=("mapeval", "full"),
+        default="mapeval",
         help=(
-            "Tool surface for the ReAct baseline. 'full' shares this repository's registry with "
-            "Spatial-Agent, so the two differ only in architecture. 'mapeval' restricts ReAct to "
-            "the primitives MapEval's own baseline has, which is the comparison the paper reports: "
-            "batch geocoding, distance matrices and multi-stop finish times are aggregations that "
-            "GeoFlow's graph is meant to compose, and handing them to ReAct answers a different "
-            "question. Recorded in the report metadata either way."
+            "Tool surface for the ReAct baseline. 'mapeval' (default) gives ReAct the five "
+            "primitives MapEval's own baseline has, which is the comparison the paper reports. "
+            "'full' shares this repository's whole registry with Spatial-Agent — an ablation "
+            "asking whether the graph adds anything on top of strong aggregation tools, not the "
+            "paper's question. Recorded in the report metadata either way."
         ),
     )
     result.add_argument("--output-dir", default="reports")
@@ -94,15 +93,16 @@ def create_agent_session(
     settings: Settings,
     provider_kind: str,
     contexts: list[str],
-    react_tools: str = "full",
+    react_tools: str = "mapeval",
 ) -> Iterator[ReactAgent | SpatialAgent]:
     """Create resources owned by exactly one benchmark worker thread.
 
-    `react_tools="mapeval"` restricts the ReAct agent to the primitives MapEval's own baseline is
-    given. The extra tools this registry offers — batch geocoding, a distance matrix, a multi-stop
-    finish time — are aggregations over those primitives, which is precisely what GeoFlow's
-    operator graph exists to express. Sharing them keeps our two agents comparable to each other;
-    withholding them makes ours comparable to the paper's. Report which was used.
+    The two agents get different tool surfaces, because the tool surface is part of the
+    architecture under test. ReAct gets the five primitives MapEval's own baseline is given;
+    Spatial-Agent gets this registry's aggregations and its local operators, which is the
+    arrangement upstream has (`spatial-agent/src/tools/google_maps.py` carries a distance matrix
+    that `mapeval-api/Evaluator2.py` never hands its baseline). `react_tools="full"` restores the
+    shared surface as an ablation. Report which was used.
     """
 
     provider = build_provider(provider_kind, settings, contexts)
@@ -111,7 +111,7 @@ def create_agent_session(
         llm = OpenAIChatClient(settings)
         allowed = (
             ToolRegistry.MAPEVAL_BASELINE_TOOLS
-            if agent_type == "react" and react_tools == "mapeval"
+            if agent_type == "react" and react_tools != "full"
             else None
         )
         tools = ToolRegistry(provider, allowed=allowed)

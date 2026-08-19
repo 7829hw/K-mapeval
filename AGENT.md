@@ -6,10 +6,17 @@ edit here, not there.
 ## What this is
 
 A research MVP that compares a MapEval-style **ReAct** agent against a **Spatial-Agent** (GeoFlow)
-port on Korean multiple-choice map questions, both driven by the same tool layer. The research
-question is whether Spatial-Agent's reported gains reproduce on Korean geography and POI data. The
-independent variable is agent architecture — everything below the agent (provider, tools, cache,
-normalized schemas, evaluator) must stay identical for both.
+port on Korean multiple-choice map questions, over one shared evidence source. The research
+question is whether Spatial-Agent's reported gains reproduce on Korean geography and POI data.
+
+**The independent variable is the architecture, and an agent's tool surface is part of its
+architecture.** The two agents therefore get *different* tools: ReAct gets the five primitives
+`mapeval-api/Evaluator2.py` gives its baseline, Spatial-Agent gets this registry's aggregations
+plus `SpatialOperatorRegistry`. That is the arrangement upstream has — `spatial-agent/src/tools/
+google_maps.py` carries `get_distance_matrix`, and MapEval's baseline is never handed anything
+like it. What must stay identical is everything *below* the tools: provider, cache, normalized
+schemas, region prior, name resolution, evaluator. An agent may reach fewer tools than the other;
+it must never see different evidence through the ones it reaches.
 
 The tool layer has three interchangeable evidence sources, chosen per run and never mixed:
 
@@ -46,6 +53,10 @@ ruff check .                 # line-length 100, rules E,F,I,UP,B
 
 # Does the architecture separate the two agents? The compositional benchmark answers that.
 python main.py --agent both --dataset dataset/seoul_kmapeval_v3_mcq_100.jsonl
+
+# ReAct runs on MapEval's five primitives by default. `full` is the ablation, not the benchmark:
+# it shares this registry's aggregations with the baseline and answers a different question.
+python main.py --agent react --react-tools full
 
 # The reproduction run: the Kakao-grounded benchmark against live Kakao, both architectures.
 python main.py --agent both                   # dataset/seoul_kmapeval_v2_mcq_100.jsonl, kakao evidence
@@ -89,30 +100,34 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   the cache payload.
 - Deterministic math (haversine, bearing, sorting, min/max, route comparison, TSP-TW, time
   arithmetic) belongs in `src/tools/spatial.py` and must never spend an API call.
-- ReAct and Spatial-Agent share one `ToolRegistry`; never give one agent evidence, a tool, or a
-  Kakao implementation the other cannot reach. Tool wrappers stay thin and delegate to the provider.
-- **That parity is internal, and it is not the paper's comparison.** MapEval's own ReAct baseline
-  is the five tools `mapeval-api/Evaluator2.py` (35d481a, line 33) instantiates: PlaceSearch,
-  PlaceDetails, NearbyPlaces, TravelTime, Directions. Read `Evaluator2.py`, not `Tools.py`, when
-  you need that list — `Tools.py` also defines a `PlaceIdTool` the evaluator never constructs, and
+- **The two agents get different tool surfaces, and that is the experiment, not a violation of
+  it.** ReAct is constructed with `allowed=ToolRegistry.MAPEVAL_BASELINE_TOOLS` — the five tools
+  `mapeval-api/Evaluator2.py` (35d481a, line 33) instantiates: PlaceSearch, PlaceDetails,
+  NearbyPlaces, TravelTime, Directions. Read `Evaluator2.py`, not `Tools.py`, when you need that
+  list — `Tools.py` also defines a `PlaceIdTool` the evaluator never constructs, and
   `FormattedTools.PlaceSearchTool` is itself documented as "Get place ID for a given location", so
-  the two are one primitive under two names rather than a sixth tool. This registry adds
-  `batch_geocode`, `batch_place_details`, `distance_matrix`, `calculate_finish_time` and
-  `recover_option_places` — every one of them an *aggregation* over those primitives, which is
-  exactly what GeoFlow's operator graph exists to express. Sharing them makes our two agents
-  differ only in architecture; it also hands the baseline the composition the architecture was
-  supposed to provide. A `trip_finish_time` question that the paper's ReAct must orchestrate
-  across a dozen turns is `batch_geocode` + `calculate_finish_time` here, and ReAct scores 16/16
-  on it. It adds `geocode` and `reverse_geocode` for a second reason: upstream reaches every
-  place through a place id and converts between an address and coordinates nowhere, so neither
-  is a primitive the baseline was measured with, and in a measured run `geocode` was resolving
-  bare place names — PlaceSearch again, through a second index. `--react-tools mapeval` restricts
-  the baseline to `ToolRegistry.MAPEVAL_BASELINE_TOOLS`, which is those five and nothing else;
-  `metadata.react_tools` records which surface a run used, and runs from the two surfaces answer
-  different questions and must not be pooled. **Every report in `reports/` so far is `full`** — no
-  measurement against the paper's tool surface has been taken yet, so no number here may be
-  described as reproducing the paper's comparison.
-- **Place disambiguation is anchor-relative, and both agents get it.** Korean POI names repeat
+  the two are one primitive under two names rather than a sixth tool. Everything this registry
+  adds beyond those five — `batch_geocode`, `batch_place_details`, `distance_matrix`,
+  `calculate_finish_time`, `recover_option_places` — is an *aggregation* over them, which is
+  exactly what GeoFlow's operator graph exists to express, and every one of them was added by a
+  commit whose subject names Spatial-Agent. `geocode` / `reverse_geocode` are withheld too:
+  upstream reaches every place through a place id and converts between an address and coordinates
+  nowhere, and in a measured run `geocode` was resolving bare place names — PlaceSearch again,
+  through a second index.
+- **Adding a tool to `ToolRegistry` gives it to Spatial-Agent only.** Putting one in
+  `MAPEVAL_BASELINE_TOOLS` is a claim that `Evaluator2.py` constructs its counterpart; make that
+  claim only with the upstream line in front of you. `tests/test_tools_and_agents.py` pins the
+  set.
+- **`--react-tools full` is an ablation, not the benchmark.** It restores the shared surface to
+  ask whether the graph adds anything on top of strong aggregation tools. That is a different
+  question from the paper's, `metadata.react_tools` records which was asked, and runs from the two
+  surfaces must never be pooled. Under `full`, ReAct reached an aggregation tool on 79 of 100
+  compositional questions and answered `trip_finish_time` 16/16 and `trip_latest_departure` 14/14
+  — with `batch_geocode` doing the joint, anchor-relative name resolution that PlaceSearch has no
+  equivalent of. Every report in `reports/` predating this default is a `full` run.
+- **Place disambiguation is anchor-relative, and it lives below the tool surface.** It is how
+  the provider resolves a name at all, so it reaches whichever agent calls `place_search` and
+  is not capability handed to one of them. Korean POI names repeat
   across branches and cities, so `_best_place_match` (`src/tools/registry.py`) scores proximity to a
   known anchor *below* the name-evidence terms (exact / branch / category / containment) and *above*
   string similarity — without that term a bare brand name resolves to whichever branch has the
@@ -127,7 +142,8 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   `KakaoMapProvider`, because Kakao searches nationwide and Korean POI names repeat across cities. A
   name with no match in the region still falls back to the unbiased nationwide search, so the prior
   can never hide a place; the cache key carries it so biased and unbiased runs cannot share entries.
-  It applies to both agents identically and reads nothing from `BenchmarkItem` — deriving it from
+  It is evidence-layer configuration, so it applies to whichever agent queries and reads nothing
+  from `BenchmarkItem` — deriving it from
   `region` would leak eval-only metadata. Blank disables it, and reports must say which it was.
 - **Reconciliation is for pairs only, and the anchor is authoritative.** `_reconcile_batch` runs
   when exactly two names resolved. With three or more the batch is an anchor plus option texts, the
@@ -197,7 +213,9 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   retrieval heads its own block — and ranked by distance it wins with 0.0 m every time, which the
   generation stage then reports faithfully. It is kept only when it is the sole candidate, because
   an empty ranking answers nothing.
-- **Leniency about shape is a property of the tools, not only the operators.**
+- **Leniency about shape is a property of the tools, not only the operators.** It is about
+  argument shapes a *planner* emits, so in practice it serves Spatial-Agent; it grants no
+  evidence and no capability, which is why it is not withheld from anyone.
   `_as_place_argument` / `_as_place_list_argument` (`src/tools/registry.py`) normalize every
   `Place`-typed tool argument the way `_as_place` normalizes an operator's: a one-element list is
   the geocode result the planner forgot to index into, a wrapper carries the place under `place` or
@@ -205,6 +223,11 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   `candidate_index` keys an operator staples on), and an anchor written as a name is that place
   named. Without this the artifact `_as_place` shrugs off failed as a `ValidationError` before any
   tool ran, and the cascade emptied the rest of the graph.
+- **ReAct's step budget is generous on purpose.** `MAX_REASONING_STEPS` is 30 here against
+  langchain's `initialize_agent` default of 15, and on five primitives a four-stop itinerary needs
+  four PlaceSearch turns plus four TravelTime turns before any arithmetic. Being generous to the
+  baseline is the conservative direction for the paper's claim; cutting it would handicap ReAct
+  beyond what MapEval does. Do not "fix" it downward to make a gap appear.
 - No separate HTTP backend server, web UI, or extra datastore beyond the SQLite cache. Keep
   `src/agent/` and `src/tools/` as the only source subpackages and `main.py` as the only *runtime*
   entry point. `data/build_*.py` and `data/verify_benchmark.py` are offline dataset tooling,

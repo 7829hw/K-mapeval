@@ -1911,3 +1911,40 @@ def test_a_kind_the_category_vocabulary_misses_drops_the_filter() -> None:
          "latitude": 1.0, "longitude": 1.0}
     ]
     assert ops.filter_places(places=places, required_types=["우산가게"]) == places
+
+
+def test_a_clock_that_cannot_tell_two_options_apart_is_not_evidence_for_either() -> None:
+    """A computed clock counts only when it picks an option decisively.
+
+    A plan whose stays failed to bind computed a travel-only 12:30 for an itinerary with four
+    stated hours of visits. That is 113 minutes from one option and 173 from the next, which
+    tells the two apart no better than a coin — and it overruled a generation stage that had
+    added the four hours itself and written the correct answer.
+    """
+
+    from src.agent.spatial import _select_option
+
+    options = ["오후 7시 18분", "오후 4시 53분", "오후 2시 23분", "오후 3시 23분"]
+    travel_only = {
+        "s": {
+            "start_time": "2026-08-19T10:00:00+09:00",
+            "finish_time": "2026-08-19T12:30:32+09:00",
+            "derived_clock": "finish_time",
+        }
+    }
+    assert _select_option({"predicted_answer": "오후 4시 53분"}, options, travel_only) == (
+        1,
+        "exact_answer_text",
+    )
+
+    complete = {
+        "s": {
+            "start_time": "2026-08-19T10:00:00+09:00",
+            "finish_time": "2026-08-19T16:53:00+09:00",
+            "derived_clock": "finish_time",
+        }
+    }
+    assert _select_option({"predicted_answer": "오후 2시 23분"}, options, complete) == (
+        1,
+        "computed_clock",
+    )

@@ -1621,12 +1621,23 @@ def _computed_clock_option(results: dict[str, Any] | None, options: list[str]) -
         # No computed clock, or two of them and no way to know which the question asked for.
         return None
     computed = next(iter(derived))
-    distances = [
-        abs((option.hour * 60 + option.minute) - (computed.hour * 60 + computed.minute))
-        for option in parsed_options
-        if option is not None
+    minutes = [
+        option.hour * 60 + option.minute for option in parsed_options if option is not None
     ]
-    return min(range(len(distances)), key=distances.__getitem__)
+    distances = sorted(
+        (abs(value - (computed.hour * 60 + computed.minute)), index)
+        for index, value in enumerate(minutes)
+    )
+    (nearest_gap, nearest), (runner_up_gap, _) = distances[0], distances[1]
+    if nearest_gap * 2 >= runner_up_gap:
+        # The nearest option is always *some* option, so the clock counts only when it picks one
+        # decisively — twice as close as the next. A plan that lost its stays computed 12:30
+        # against options at 14:23 and 15:23, was 113 minutes from one and 173 from the other,
+        # and took the first; the generation stage had added the four stated hours itself and
+        # written the right answer. A clock that does land on its option still outranks that
+        # prose, because it is computed evidence and the prose is recalled.
+        return None
+    return nearest
 
 
 def _clock_moment(value: str) -> datetime | None:

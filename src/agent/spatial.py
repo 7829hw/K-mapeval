@@ -100,6 +100,9 @@ Exact operator contracts:
   FD6 restaurant, CE7 cafe, HP8 hospital, PM9 pharmacy. Use the matching code whenever possible.
 - directions(origin,destination,mode="driving",priority,waypoints?,include_steps=false) -> field
 - travel_time(origin, destination, mode="driving", priority) -> field Route
+  Kakao Mobility routes cars only, so a walking question — 걸어서, 걸어가기에 가장 가까운 —
+  is answered with haversine_distance or nearest(metric="haversine"), never by asking these two
+  for a walking route: the call fails and the evidence is lost.
 - distance_matrix(origins,destinations OR pairs, mode="driving", priority) -> field;
   pairs is [{origin,destination,label?}], and output routes preserve pair order at $node.routes
 - haversine_distance(place_a, place_b) -> amount; straight-line distance only. Output is

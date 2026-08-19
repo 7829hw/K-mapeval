@@ -1852,3 +1852,62 @@ def test_an_empty_candidate_list_is_still_an_empty_ranking() -> None:
     ops = SpatialOperatorRegistry()
     anchor = {"name": "미아사거리역", "latitude": 37.6132, "longitude": 127.0300}
     assert ops.nearest(anchor=anchor, candidates=[])["nearest"] is None
+
+
+def test_filter_places_reads_geocode_records_and_kakao_category_codes() -> None:
+    """The filter is handed what `batch_geocode` returns, and the kind as the prompt spells it.
+
+    A planner wrote `required_types: ["CS2"]` over the `{query, place, candidates}` records of
+    its own geocoding step. Neither the code nor the wrapper was understood, the filter emptied
+    the candidate list, and the ranking that followed had nothing to rank — so the generation
+    stage answered with a cafe 16 m away instead of the convenience store the question needs.
+    """
+
+    ops = SpatialOperatorRegistry()
+    records = [
+        {
+            "query": "카페더블린",
+            "place": {
+                "place_id": "1",
+                "name": "카페더블린",
+                "category": "음식점 > 카페",
+                "latitude": 37.58,
+                "longitude": 127.0,
+            },
+        },
+        {
+            "query": "CU 동숭아트점",
+            "place": {
+                "place_id": "2",
+                "name": "CU 동숭아트점",
+                "category": "가정,생활 > 편의점 > CU",
+                "latitude": 37.581,
+                "longitude": 127.001,
+            },
+        },
+    ]
+    kept = ops.filter_places(places=records, required_types=["CS2"])
+    assert [place["place_id"] for place in kept] == ["2"]
+
+
+def test_several_required_types_are_alternatives_not_a_conjunction() -> None:
+    ops = SpatialOperatorRegistry()
+    places = [
+        {"place_id": "1", "name": "약국", "category": "의료 > 약국",
+         "latitude": 1.0, "longitude": 1.0},
+        {"place_id": "2", "name": "카페", "category": "음식점 > 카페",
+         "latitude": 1.0, "longitude": 1.0},
+    ]
+    kept = ops.filter_places(places=places, required_types=["약국", "병원"])
+    assert [place["place_id"] for place in kept] == ["1"]
+
+
+def test_a_kind_the_category_vocabulary_misses_drops_the_filter() -> None:
+    """An unknown kind is a gap in the lexicon, not evidence that nothing qualifies."""
+
+    ops = SpatialOperatorRegistry()
+    places = [
+        {"place_id": "1", "name": "가게", "category": "가정,생활 > 잡화",
+         "latitude": 1.0, "longitude": 1.0}
+    ]
+    assert ops.filter_places(places=places, required_types=["우산가게"]) == places

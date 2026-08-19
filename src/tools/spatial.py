@@ -367,22 +367,39 @@ class SpatialOperatorRegistry:
         open_now: bool | None = None,
     ) -> list[dict[str, Any]]:
         price_set = {value.casefold() for value in (price_levels or [])}
-        type_terms = [value.casefold() for value in (required_types or [])]
-        selected: list[dict[str, Any]] = []
-        for place in places:
+        # A requested kind arrives as a Korean noun, as a Kakao category code, or as the words
+        # Kakao files the type under; `category_terms` speaks all three. Several types are
+        # alternatives — a place of any one of them qualifies — where the old `all` demanded a
+        # category path containing every one at once, which no place has.
+        type_terms = [
+            [term.casefold() for term in category_terms(str(value))]
+            for value in (required_types or [])
+        ]
+        attribute_matches: list[dict[str, Any]] = []
+        for _, place in _as_place_list(places, keep_unresolved=True):
             if min_rating is not None and (
                 place.get("rating") is None or float(place["rating"]) < min_rating
             ):
                 continue
             if price_set and str(place.get("price_level") or "").casefold() not in price_set:
                 continue
-            haystack = f"{place.get('category', '')} {place.get('name', '')}".casefold()
-            if type_terms and not all(term in haystack for term in type_terms):
-                continue
             if open_now is not None and bool(place.get("is_open")) is not open_now:
                 continue
-            selected.append(place)
-        return selected
+            attribute_matches.append(place)
+        if not type_terms:
+            return attribute_matches
+        selected = [
+            place
+            for place in attribute_matches
+            if any(
+                any(term in _category_haystack(place) for term in terms) for terms in type_terms
+            )
+        ]
+        # The kind filter is a preference, exactly as it is in `nearest`: a category vocabulary
+        # that does not cover this type is a gap in the lexicon, not evidence that none of these
+        # places qualifies. Emptying the list here is worse than not filtering, because the
+        # ranking downstream then has nothing to rank and the answer gets guessed.
+        return selected or attribute_matches
 
     @staticmethod
     def steps_analysis(route: dict[str, Any], landmark: str | None = None) -> dict[str, Any]:
@@ -919,14 +936,46 @@ CATEGORY_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 
+# Kakao's own category codes, in the vocabulary the questions and the aliases speak. A planner
+# copies the code out of the prompt's list and writes it where a kind of place belongs, so the
+# filter has to read it as that kind rather than look for the letters "CS2" in a category path.
+CATEGORY_CODE_NOUNS: dict[str, str] = {
+    "MT1": "대형마트",
+    "CS2": "편의점",
+    "PS3": "어린이집",
+    "SC4": "학교",
+    "AC5": "학원",
+    "PK6": "주차장",
+    "OL7": "주유소",
+    "SW8": "지하철역",
+    "BK9": "은행",
+    "CT1": "문화시설",
+    "AG2": "부동산",
+    "PO3": "공공기관",
+    "AT4": "관광명소",
+    "AD5": "숙박시설",
+    "FD6": "음식점",
+    "CE7": "카페",
+    "HP8": "병원",
+    "PM9": "약국",
+}
+
+
 def category_terms(required_type: str) -> tuple[str, ...]:
     """The strings that identify a requested kind of place inside a Kakao category path."""
 
     key = "".join(required_type.split()).casefold()
-    for noun, terms in CATEGORY_ALIASES.items():
-        if key == noun.casefold():
+    noun = CATEGORY_CODE_NOUNS.get(key.upper())
+    if noun is not None:
+        key = noun.casefold()
+    for alias, terms in CATEGORY_ALIASES.items():
+        if key == alias.casefold():
             return terms
-    return (required_type,)
+    return (noun or required_type,)
+
+
+def _category_haystack(place: dict[str, Any]) -> str:
+    return f"{place.get('category', '')} {place.get('name', '')}".casefold()
 
 
 def build_duration_matrix(routes: Any) -> dict[str, Any]:

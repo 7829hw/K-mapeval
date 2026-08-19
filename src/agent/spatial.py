@@ -17,6 +17,7 @@ from src.agent.geoflow import (
     factorize_geoflow,
     normalize_analysis,
     normalize_and_validate_graph,
+    reference_expression,
     reference_roots,
     retrieve_templates,
     split_reference_arithmetic,
@@ -143,7 +144,9 @@ Exact operator contracts:
   meets it — the output carries both start_time and finish_time either way. Use this rather than
   summing legs into calculate_start_time by hand
 - calculate_start_time(arrival_time,duration_s,timezone) -> event
-- tsp_tw(nodes,distance_matrix,time_windows?,service_times?,start_index=0,time_budget?) -> network;
+- tsp_tw(nodes,distance_matrix,time_windows?,service_times?,start_index=0,time_budget?,
+  end_index?) -> network; end_index fixes the last stop when the trip must finish
+  somewhere (an appointment), leaving only the stops between it and the start to order;
   distance_matrix accepts a distance_matrix node directly ($legs), which carries the square
   duration matrix in seconds; nodes must be the matching place list in the same order, with the
   starting place at start_index. service_times are the stay durations in seconds (0 for the start)
@@ -175,6 +178,10 @@ time as time_budget. When the options are visiting orders, still build the same 
 the orders the options name. When the options are counts of places ("한 곳"/"두 곳"/…), the answer
 is how many stops fit the budget, so let tsp_tw decide feasibility — never guess from the number
 of places mentioned. Convert hours to seconds (1시간 = 3600).
+tsp_tw.total_cost is the whole tour with the stays already in it, and travel_cost/service_cost are
+its halves. Feed calculate_start_time the total_cost itself; adding the stays beside it counts
+every visit twice. When the trip must finish somewhere — an appointment at a named place, with
+errands on the way — give that place as end_index, or the tour will end at an errand instead.
 For nearest among explicit options, geocode every option and compute deterministically.
 A vertical bar in one option separates grouped place names; preserve its option index while
 resolving each name. For a radius question use the exact radius and requested
@@ -602,7 +609,19 @@ def _resolve_references(value: Any, results: dict[str, Any]) -> Any:
         return [_resolve_references(item, results) for item in value]
     if not isinstance(value, str):
         return value
-    reference, offset = split_reference_arithmetic(canonical_reference(value))
+    canonical = canonical_reference(value)
+    expression = reference_expression(canonical)
+    if expression is not None and len(expression[0]) > 1:
+        # A sum over several nodes: every term must resolve to a number, or the planner meant
+        # something we cannot defend and the step fails with its own reference error.
+        total = expression[1]
+        for name in expression[0]:
+            resolved = _resolve_references(name, results)
+            if isinstance(resolved, bool) or not isinstance(resolved, int | float):
+                raise ValueError(f"Unknown plan reference: {value}")
+            total += float(resolved)
+        return total
+    reference, offset = split_reference_arithmetic(canonical)
     if not reference.startswith("$"):
         return value
     root, _, remainder = reference[1:].partition(".")
@@ -662,6 +681,73 @@ def _whole_list_reference(value: Any) -> Any:
     return match.group(1) if match else value
 
 
+# Every `trip_latest_departure` question opens the same way: the appointment's place, its clock
+# time, and only then the errands on the way. The deadline is what makes that place the end of
+# the trip, so the clock has to be part of the pattern — a bare "X에서" is any of the stops.
+_DESTINATION_PATTERNS = (
+    r"^\s*(.+?)에서\s*(?:오전|오후|아침|저녁|밤)?\s*\d{1,2}\s*시(?:\s*\d{1,2}\s*분)?에?\s*"
+    r"(?:약속이|미팅이|모임이)",
+    r"(.+?)(?:에|까지)\s*(?:오전|오후|아침|저녁|밤)?\s*\d{1,2}\s*시(?:\s*\d{1,2}\s*분)?(?:까지)?\s*"
+    r"(?:도착|가야)",
+)
+
+
+def _extract_trip_destination(question: str) -> str | None:
+    for pattern in _DESTINATION_PATTERNS:
+        match = re.search(pattern, question)
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+def _index_of_name(names: list[str], wanted: str) -> int | None:
+    """Position of a question's place among the names the plan geocoded."""
+
+    key = _name_key_for_match(wanted)
+    for index, name in enumerate(names):
+        if _name_key_for_match(name) == key:
+            return index
+    for index, name in enumerate(names):
+        candidate = _name_key_for_match(name)
+        if candidate and key and (candidate in key or key in candidate):
+            return index
+    return None
+
+
+def _name_key_for_match(value: str) -> str:
+    return "".join(character for character in value.casefold() if character.isalnum())
+
+
+_TOUR_TOTAL_FIELDS = frozenset({"total_cost", ""})
+
+
+def _counts_its_own_stays(value: str, tour_totals: set[str]) -> bool:
+    """Is this a `tsp_tw` whole-tour cost with something added beside it?"""
+
+    if not _carries_written_sum(value):
+        return False
+    parsed = reference_expression(canonical_reference(value))
+    if parsed is None:
+        return False
+    for name in parsed[0]:
+        root, _, path = name[1:].partition(".")
+        if root in tour_totals and path in _TOUR_TOTAL_FIELDS:
+            return True
+    return False
+
+
+def _sole_reference(value: str) -> str | None:
+    parsed = reference_expression(canonical_reference(value))
+    return parsed[0][0] if parsed and len(parsed[0]) == 1 else None
+
+
+def _carries_written_sum(value: str) -> bool:
+    """Did the planner already add something to this reference?"""
+
+    parsed = reference_expression(canonical_reference(value))
+    return parsed is not None and (len(parsed[0]) > 1 or parsed[1] != 0.0)
+
+
 def _step_sources(step: dict[str, Any]) -> set[str]:
     """Every node id a step reads from, whether declared as a dependency or only referenced."""
 
@@ -714,6 +800,12 @@ def _ground_graph_literals(
     # zero turns for every question and the generation stage answered from prose instead, which
     # is a confident wrong number rather than a failure. A route a step analysis consumes is a
     # route whose steps are needed, so bind it here rather than hope the prompt lands.
+    # Which node ids produce a tour whose cost already carries the stays.
+    tour_totals = {
+        str(step.get("id"))
+        for step in steps
+        if step.get("operator") == "tsp_tw"
+    }
     stepwise_sources = {
         source
         for step in steps
@@ -741,8 +833,20 @@ def _ground_graph_literals(
             # carries travel and nothing else, so the stays are certainly missing. A literal may
             # already include them, and binding on top of that would count them twice.
             duration = arguments.get("duration_s")
-            if stays and isinstance(duration, str) and duration.strip().startswith("$"):
-                arguments["stay_durations_s"] = list(stays.values())
+            if isinstance(duration, str) and duration.strip().startswith("$"):
+                if _counts_its_own_stays(duration, tour_totals):
+                    # `tsp_tw.total_cost` is the whole tour, stays included, so an added constant
+                    # beside it is the stays counted a second time — a whole visit, wider than the
+                    # gap between two options. The operator's contract says so regardless of what
+                    # the constant happens to equal, so drop the addition rather than match it.
+                    arguments["duration_s"] = _sole_reference(duration) or duration
+                    arguments.pop("stay_durations_s", None)
+                elif _carries_written_sum(duration):
+                    # Some other written sum: whatever the planner added, adding the stays on top
+                    # would count them twice.
+                    arguments.pop("stay_durations_s", None)
+                elif stays:
+                    arguments["stay_durations_s"] = list(stays.values())
             grounded.append({**step, "arguments": arguments})
             continue
         if operator == "identity_measure" and not arguments.get("value"):
@@ -763,13 +867,21 @@ def _ground_graph_literals(
             stays, _ = _extract_trip_schedule(question)
             locations = _whole_list_reference(arguments.get("locations"))
             arguments["locations"] = locations
-            if stays and isinstance(locations, list) and len(locations) > 1:
-                # One stay per location, in the order the itinerary visits them. The stays are
-                # stated in the question exactly; a plan that drops the last one or invents one
-                # for the return lands a whole visit away, which is wider than the gap between
-                # two answer options.
+            # One stay per location, in the order the itinerary visits them. The stays are stated
+            # in the question exactly; a plan that drops the last one or invents one for the
+            # return lands a whole visit away, which is wider than the gap between two options.
+            # When `locations` is a reference the names are not in hand here — but the itinerary
+            # is exactly what the trip's `batch_geocode` node lists, and the operator resolves the
+            # reference to that same list. Without this the planner's own stays were left to
+            # mismatch the resolved length, and the args model rejected the call outright.
+            itinerary: list[Any] = []
+            if isinstance(locations, list) and len(locations) > 1:
+                itinerary = locations
+            elif isinstance(locations, str) and len(trip_node_names) > 1:
+                itinerary = list(trip_node_names)
+            if stays and itinerary:
                 arguments["stay_durations_s"] = [
-                    _stay_stated_for(question, _location_name(item)) for item in locations
+                    _stay_stated_for(question, _location_name(item)) for item in itinerary
                 ]
             grounded.append({**step, "arguments": arguments})
             continue
@@ -778,6 +890,15 @@ def _ground_graph_literals(
             if budget is not None:
                 arguments["time_budget"] = budget
             names = trip_node_names
+            destination = _extract_trip_destination(question)
+            if destination and names:
+                # The place the deadline names is where the trip ends, positionally against the
+                # same node list the stays line up with. Left free, the search reordered the
+                # itinerary so the tour finished at an errand — cheaper, and an answer to a
+                # different question.
+                index = _index_of_name(names, destination)
+                if index is not None and index != int(arguments.get("start_index") or 0):
+                    arguments["end_index"] = index
             if names and stays:
                 # service_times must line up with the node list, and the start is not a visit.
                 arguments["service_times"] = [

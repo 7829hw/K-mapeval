@@ -1247,6 +1247,12 @@ def normalize_and_validate_graph(
                 for reference in _reference_strings(step["arguments"].get(argument_name))
             }
             for dependency in references:
+                if dependency not in by_id:
+                    # An unresolvable reference root is not a node, so it has no declared type to
+                    # check. Indexing `by_id` with it raised a `KeyError` from inside validation,
+                    # which is outside the per-step isolation and lost the whole question before a
+                    # tool ran. Execution reports it as that step's own failure instead.
+                    continue
                 node_type = by_id[dependency]["output_type"]
                 dependency_type = _reference_type(paths.get(dependency, dependency), node_type)
                 if dependency_type is not None and dependency_type not in accepted:
@@ -1410,9 +1416,12 @@ def reference_roots(value: Any) -> list[str]:
         for item in value:
             roots.extend(reference_roots(item))
     elif isinstance(value, str):
-        reference, _ = split_reference_arithmetic(canonical_reference(value))
-        if reference.startswith("$"):
-            roots.append(reference[1:].split(".", 1)[0])
+        canonical = canonical_reference(value)
+        parsed = reference_expression(canonical)
+        names = parsed[0] if parsed else [canonical]
+        for name in names:
+            if name.startswith("$"):
+                roots.append(name[1:].split(".", 1)[0])
     return list(dict.fromkeys(roots))
 
 
@@ -1423,6 +1432,8 @@ def reference_roots(value: Any) -> list[str]:
 # take; any other path is left unconstrained rather than refused.
 OUTPUT_FIELD_TYPES: dict[str, str] = {
     "total_cost": "amount",
+    "travel_cost": "amount",
+    "service_cost": "amount",
     "duration_s": "amount",
     "travel_duration_s": "amount",
     "stay_duration_s": "amount",
@@ -1491,25 +1502,55 @@ def canonical_reference(value: str) -> str:
 # reference is a reference plus an offset — not a broken id. Read undecorated it made
 # `reference_roots` hand `by_id` a key that does not exist, and the `KeyError` escaped the
 # per-step isolation and lost the whole question before any tool ran.
-_REFERENCE_ARITHMETIC = re.compile(
-    r"^(?P<reference>\$[\w.-]+?)\s*(?P<terms>(?:[+-]\s*\d+(?:\.\d+)?\s*)+)$"
-)
+_EXPRESSION_TERM = re.compile(r"(?P<sign>^|[+-])\s*(?P<term>\$[\w.-]+|\d+(?:\.\d+)?)\s*")
+
+
+def reference_expression(value: str) -> tuple[list[str], float] | None:
+    """Read `$a.b + 2700 + $c` as the references it sums and the constant it adds.
+
+    A planner with a scalar in one node and a stated constant in the question writes the sum
+    into the reference itself, and a three-leg errand run writes several: `$dur1 + 2700 + $dur2
+    + 900 + $dur3`. Every `$` name in it is a real node and every number is a question literal,
+    so the whole string is an expression over the graph — not a broken id. Returns None when the
+    text is not a `+`/`-` chain of references and numbers, which leaves anything unrecognized to
+    fail exactly as before.
+    """
+
+    text = value.strip()
+    if not text.startswith("$"):
+        return None
+    references: list[str] = []
+    constant = 0.0
+    position = 0
+    while position < len(text):
+        match = _EXPRESSION_TERM.match(text, position)
+        if not match or (position and not match.group("sign")):
+            return None
+        sign = -1.0 if match.group("sign") == "-" else 1.0
+        term = match.group("term")
+        if term.startswith("$"):
+            if sign < 0:
+                # A subtracted reference has no meaning we can defend; leave it unrecognized.
+                return None
+            references.append(term)
+        else:
+            constant += sign * float(term)
+        position = match.end()
+    return (references, constant) if references else None
 
 
 def split_reference_arithmetic(value: str) -> tuple[str, float]:
     """Split `$node.path + 2700` into its reference and the offset applied to it.
 
     The offset is `0.0` when the string is a plain reference, so callers that only want the
-    reference can ignore it.
+    reference can ignore it. An expression naming several references has no single reference to
+    return, so it is handed back unchanged for `reference_expression` to deal with.
     """
 
-    match = _REFERENCE_ARITHMETIC.match(value.strip())
-    if not match:
+    parsed = reference_expression(value)
+    if parsed is None or len(parsed[0]) != 1:
         return value, 0.0
-    offset = 0.0
-    for term in re.findall(r"[+-]\s*\d+(?:\.\d+)?", match.group("terms")):
-        offset += float(term.replace(" ", ""))
-    return match.group("reference"), offset
+    return parsed[0][0], parsed[1]
 
 
 def _normalize_dependency(value: Any, raw_ids: list[str]) -> str:

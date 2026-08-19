@@ -1242,3 +1242,209 @@ def test_an_itinerary_is_the_whole_list_the_plan_geocoded() -> None:
     ]
     grounded = _ground_graph_literals(steps, "오전 10시에 출발합니다", [], "trip")
     assert grounded[-1]["arguments"]["locations"] == "$places"
+
+
+def test_a_tour_that_must_end_somewhere_is_not_free_to_end_anywhere() -> None:
+    """"An appointment at X at 7pm, with errands on the way" fixes the last stop.
+
+    Left free, the search finds a cheaper route that finishes at an errand and answers a
+    departure time for a trip that never reaches the appointment.
+    """
+
+    registry = SpatialOperatorRegistry()
+    # 0 start, 1 and 2 errands, 3 the appointment. The appointment sits next door to the start
+    # and the errands are across town, so the cheapest free tour visits it second and finishes at
+    # an errand — a departure time for a trip that never ends where the deadline is.
+    matrix = [
+        [0, 2000, 2500, 200],
+        [2000, 0, 300, 2000],
+        [2500, 300, 0, 2400],
+        [200, 2000, 2400, 0],
+    ]
+    nodes = [{"name": name} for name in ("start", "errand1", "errand2", "appointment")]
+    service = [0.0, 1800.0, 2700.0, 0.0]
+
+    free = registry.invoke(
+        "tsp_tw",
+        {"nodes": nodes, "distance_matrix": matrix, "service_times": service, "start_index": 0},
+    )
+    fixed = registry.invoke(
+        "tsp_tw",
+        {
+            "nodes": nodes,
+            "distance_matrix": matrix,
+            "service_times": service,
+            "start_index": 0,
+            "end_index": 3,
+        },
+    )
+    assert free["order"][-1] != 3
+    assert fixed["order"] == [0, 1, 2, 3]
+    assert fixed["total_cost"] == 2000 + 300 + 2400 + 4500
+    # The halves are reported so a planner cannot mistake the total for travel alone.
+    assert fixed["travel_cost"] == 4700
+    assert fixed["service_cost"] == 4500
+
+
+def test_an_expression_over_several_nodes_names_all_of_them() -> None:
+    """`$dur1 + 2700 + $dur2 + 900 + $dur3` is a three-leg errand run, not a broken id.
+
+    Read as one name it reached `by_id` with a key that is not a node, and the `KeyError` came
+    from inside validation — outside the per-step isolation — losing the whole question.
+    """
+
+    from src.agent.geoflow import reference_expression, reference_roots
+    from src.agent.spatial import _resolve_references
+
+    assert reference_expression("$dur1 + 2700 + $dur2 + 900 + $dur3") == (
+        ["$dur1", "$dur2", "$dur3"],
+        3600.0,
+    )
+    assert reference_expression("not a reference") is None
+    assert reference_roots({"value": "$dur1 + 2700 + $dur2"}) == ["dur1", "dur2"]
+
+    results = {"dur1": {"duration_s": 1000.0}, "dur2": 2000.0, "dur3": {"duration_s": 500.0}}
+    assert _resolve_references(
+        {"value": "$dur1.duration_s + 2700 + $dur2 + 900 + $dur3.duration_s"}, results
+    ) == {"value": 7100.0}
+
+
+def test_an_unresolvable_reference_root_fails_its_step_not_the_graph() -> None:
+    from src.agent.geoflow import normalize_and_validate_graph
+
+    graph = {
+        "graph": [
+            {
+                "id": "ends",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["A", "B"]},
+                "role": "extent",
+            },
+            {
+                "id": "total",
+                "operator": "identity_measure",
+                "arguments": {"value": "$nowhere * 3"},
+                "depends_on": ["ends"],
+                "role": "measure",
+            },
+        ]
+    }
+    steps, _ = normalize_and_validate_graph(graph, max_steps=10)
+    assert [step["id"] for step in steps] == ["ends", "total"]
+
+
+def test_a_ranking_answers_on_the_geometry_it_has() -> None:
+    """A metric is the planner's choice of measure; it has no authority over what evidence exists.
+
+    Asking for travel time without fetching routes is a plan that forgot a step. Failing threw
+    away an anchor and a candidate set that were both resolved, and the generation stage then
+    picked the nearest place of any kind — exactly the decoy these questions plant.
+    """
+
+    registry = SpatialOperatorRegistry()
+    anchor = {"name": "anchor", "latitude": 37.5, "longitude": 127.0}
+    candidates = [
+        {"name": "far pharmacy", "latitude": 37.5009, "longitude": 127.0},
+        {"name": "near cafe", "latitude": 37.5001, "longitude": 127.0},
+    ]
+    result = registry.invoke(
+        "nearest", {"anchor": anchor, "candidates": candidates, "metric": "travel_time"}
+    )
+    assert result["nearest"]["name"] == "near cafe"
+    # The trace must not claim a travel time nobody computed.
+    assert result["metric_used"] == "haversine"
+    assert result["metric_requested"] == "travel_time"
+
+
+def test_a_tour_cost_is_not_topped_up_with_the_stays_it_already_counts() -> None:
+    from src.agent.spatial import _ground_graph_literals
+
+    question = (
+        "천장산 하늘길에서 오후 7시 00분에 약속이 있습니다. 가는 길에 킴스클럽 강남점에서 30분, "
+        "메가MGC커피 상계주공6단지점에서 45분씩 들러야 하고, 이동은 모두 자동차로 가장 빠른 "
+        "경로를 이용합니다. 신용산역 4호선에서 늦어도 몇 시에 출발해야 하나요?"
+    )
+    names = ["신용산역 4호선", "킴스클럽 강남점", "메가MGC커피 상계주공6단지점", "천장산 하늘길"]
+    steps = [
+        {
+            "id": "places",
+            "operator": "batch_geocode",
+            "arguments": {"place_names": names},
+            "role": "extent",
+        },
+        {
+            "id": "tsp",
+            "operator": "tsp_tw",
+            "arguments": {
+                "nodes": "$places",
+                "distance_matrix": "$legs",
+                "service_times": [0, 1800, 2700, 0],
+                "start_index": 0,
+            },
+            "depends_on": ["places"],
+            "role": "support",
+        },
+        {
+            "id": "dep",
+            "operator": "calculate_start_time",
+            "arguments": {
+                "arrival_time": "2024-01-01T19:00:00",
+                "duration_s": "$tsp.total_cost + 4500",
+            },
+            "depends_on": ["tsp"],
+            "role": "measure",
+        },
+    ]
+    grounded = _ground_graph_literals(steps, question, [], "trip")
+    assert grounded[1]["arguments"]["end_index"] == 3
+    assert grounded[2]["arguments"]["duration_s"] == "$tsp.total_cost"
+    assert "stay_durations_s" not in grounded[2]["arguments"]
+
+    # A duration that is genuinely travel-only still gets the stated stays bound beside it.
+    steps[2]["arguments"]["duration_s"] = "$legs.total_duration_s"
+    grounded = _ground_graph_literals(steps, question, [], "trip")
+    assert grounded[2]["arguments"]["stay_durations_s"] == [1800.0, 2700.0]
+
+
+def test_the_itinerary_carries_its_stays_even_when_it_is_a_reference() -> None:
+    """The names are not in hand when `locations` is `$places`, but the geocode node lists them.
+
+    Left unbound, the planner's own stays mismatched the resolved length and the args model
+    rejected the call outright — the whole clock step lost to a length check.
+    """
+
+    from src.agent.spatial import _ground_graph_literals
+
+    question = (
+        "오전 10시 00분에 가예에서 자동차로 출발해 가산로데오거리를 1시간, "
+        "용양봉저정공원 하늘전망대를 1.5시간, 메가박스 상암월드컵경기장점을 1시간 동안 차례로 "
+        "둘러본 뒤 가예로 돌아옵니다. 몇 시에 돌아오게 되나요?"
+    )
+    names = [
+        "가예",
+        "가산로데오거리",
+        "용양봉저정공원 하늘전망대",
+        "메가박스 상암월드컵경기장점",
+        "가예",
+    ]
+    steps = [
+        {
+            "id": "geo",
+            "operator": "batch_geocode",
+            "arguments": {"place_names": names},
+            "role": "extent",
+        },
+        {
+            "id": "finish",
+            "operator": "calculate_finish_time",
+            "arguments": {
+                "start_time": "10:00",
+                "locations": "$geo",
+                "stay_durations_s": [3600, 5400, 3600, 0],
+            },
+            "depends_on": ["geo"],
+            "role": "measure",
+        },
+    ]
+    grounded = _ground_graph_literals(steps, question, [], "trip")
+    assert grounded[-1]["arguments"]["stay_durations_s"] == [0.0, 3600.0, 5400.0, 3600.0, 0.0]

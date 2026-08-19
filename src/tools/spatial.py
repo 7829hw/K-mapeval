@@ -232,7 +232,30 @@ class SpatialOperatorRegistry:
         elif metric == "travel_time":
             route_values = routes.get("routes") if isinstance(routes, dict) else routes
             if not isinstance(route_values, list):
-                raise ValueError("travel_time nearest requires aligned routes")
+                # A metric is the planner's choice of measure, and it has no authority over what
+                # evidence exists: asking for travel time without fetching any routes is a plan
+                # that forgot a step, not a claim that the candidates are unreachable. Failing
+                # here threw away an anchor and a candidate set that were both already resolved,
+                # and the generation stage answered from prose — picking the nearest place of any
+                # kind, which is exactly the decoy these questions plant. Rank on the geometry
+                # that is actually in hand and say so, rather than report a travel time nobody
+                # computed.
+                metric = "haversine"
+                ranked = [
+                    {
+                        "candidate_index": index,
+                        **candidate,
+                        **cls.haversine_distance(anchor, candidate),
+                    }
+                    for index, candidate in resolved
+                ]
+                ranked.sort(key=lambda candidate: float(candidate["distance_m"]))
+                return {
+                    "nearest": ranked[0] if ranked else None,
+                    "ranked": ranked,
+                    "metric_used": "haversine",
+                    "metric_requested": "travel_time",
+                }
             ranked = []
             for index, candidate in resolved:
                 route = next(
@@ -258,7 +281,7 @@ class SpatialOperatorRegistry:
             ranked.sort(key=lambda candidate: float(candidate["duration_s"]))
         else:
             raise ValueError("nearest metric must be haversine or travel_time")
-        return {"nearest": ranked[0] if ranked else None, "ranked": ranked}
+        return {"nearest": ranked[0] if ranked else None, "ranked": ranked, "metric_used": metric}
 
     @classmethod
     def within_radius(
@@ -780,16 +803,28 @@ class SpatialOperatorRegistry:
         service_times: list[float] | None = None,
         start_index: int = 0,
         time_budget: float | None = None,
+        end_index: int | None = None,
     ) -> dict[str, Any]:
         matrix = _matrix_argument(distance_matrix, len(nodes))
         if matrix is None:
             raise ValueError("tsp_tw distance_matrix must be square and match nodes")
         if len(nodes) > 9:
             raise ValueError("Deterministic tsp_tw supports at most 9 nodes")
-        visit_indexes = [index for index in range(len(nodes)) if index != start_index]
+        if end_index is not None and not 0 <= int(end_index) < len(nodes):
+            raise ValueError("tsp_tw end_index must name one of the nodes")
+        if end_index is not None and int(end_index) == start_index:
+            raise ValueError("tsp_tw end_index must differ from start_index")
+        # A tour that must end somewhere is not free to end anywhere. "I have an appointment at X
+        # at 7pm, with errands on the way" fixes the last stop and leaves only the errands to
+        # order; without saying so, the search finds a cheaper route that ends at an errand and
+        # answers a departure time for a trip that never reaches the appointment.
+        fixed_end = None if end_index is None else int(end_index)
+        visit_indexes = [
+            index for index in range(len(nodes)) if index not in (start_index, fixed_end)
+        ]
         best: dict[str, Any] | None = None
         for order in permutations(visit_indexes):
-            route = (start_index, *order)
+            route = (start_index, *order) if fixed_end is None else (start_index, *order, fixed_end)
             elapsed = 0.0
             feasible = True
             for position, node_index in enumerate(route):
@@ -806,7 +841,18 @@ class SpatialOperatorRegistry:
                     feasible = False
                     break
             if feasible and (best is None or elapsed < best["total_cost"]):
-                best = {"order": list(route), "total_cost": elapsed, "feasible": True}
+                stays = service_times or [0.0] * len(nodes)
+                service = sum(float(stays[index]) for index in route)
+                best = {
+                    "order": list(route),
+                    "total_cost": elapsed,
+                    # `total_cost` is the whole tour, stays included. Reporting the halves as well
+                    # is what stops a planner adding the stays a second time on the way into
+                    # `calculate_start_time` — a whole visit, wider than the gap between options.
+                    "travel_cost": elapsed - service,
+                    "service_cost": service,
+                    "feasible": True,
+                }
         if best is not None:
             return {**best, "fallback_used": False}
         order = [start_index]
@@ -831,6 +877,10 @@ class SpatialOperatorRegistry:
                 break
             order.append(accepted)
             remaining.remove(accepted)
+        if fixed_end is not None:
+            elapsed += float(matrix[order[-1]][fixed_end])
+            elapsed += float((service_times or [0.0] * len(nodes))[fixed_end])
+            order.append(fixed_end)
         return {
             "order": order,
             "total_cost": elapsed,

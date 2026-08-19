@@ -145,6 +145,12 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   It is evidence-layer configuration, so it applies to whichever agent queries and reads nothing
   from `BenchmarkItem` — deriving it from
   `region` would leak eval-only metadata. Blank disables it, and reports must say which it was.
+- **The anchor is written into the node that has a slot for it, and nowhere else.** A plan may
+  geocode the anchor in one `batch_geocode` and the four option texts in another; grounding
+  replaced the head of *every* such node with the anchor, which deleted an option — the gold one
+  in a radius question whose every other stage then worked. The head is the anchor's slot only
+  when the node holds anchor + options, or when the name there is the anchor written short. The
+  `anchor` argument itself is still bound on both, because biasing a lookup removes nothing.
 - **Reconciliation is for pairs only, and the anchor is authoritative.** `_reconcile_batch` runs
   when exactly two names resolved. With three or more the batch is an anchor plus option texts, the
   anchored search has already placed each option, and "tightest span" lets scattered option brands
@@ -207,8 +213,10 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   치안센터 for the same reason: which of the two names an institution goes by is editorial, so the
   distinguishing part (연남) has to decide, not the institution word.
 - **A place is not near itself.** `_excluding_self` (`src/tools/spatial.py`) drops the anchor from
-  its own `nearest` ranking and its own `filter_by_direction` sector, by id or by standing on the
-  same spot. The anchor is a place of the type being asked about often enough to appear among the
+  its own `nearest` ranking, its own `filter_by_direction` sector and its own `within_radius`
+  neighbourhood, by id or by standing on the same spot. The radius case is the same failure at
+  0 m: in one question the anchor was the *only* place inside 600 m, so "which mart is within
+  600 m of it" was answered with it. The anchor is a place of the type being asked about often enough to appear among the
   candidates — a nearest-convenience-store question lists the store it starts from, and a stored
   retrieval heads its own block — and ranked by distance it wins with 0.0 m every time, which the
   generation stage then reports faithfully. It is kept only when it is the sole candidate, because

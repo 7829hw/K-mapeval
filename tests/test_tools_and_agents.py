@@ -2097,3 +2097,55 @@ def test_pair_endpoints_written_as_names_bind_like_any_other_place() -> None:
     assert pair["place_a"]["place_id"] == "1"
     assert pair["place_b"]["place_id"] == "2"
     assert pair["label"] == "A"
+
+
+def test_grounding_does_not_overwrite_an_option_with_the_anchor() -> None:
+    """Only a node that has an anchor slot gets the anchor written into it.
+
+    A plan may geocode the anchor in one node and the four option texts in another. Replacing the
+    head of the second deleted an option — the gold one — from a radius question whose every
+    other stage worked.
+    """
+
+    from src.agent.spatial import _ground_graph_literals
+
+    question = "강북솔밭국악당에서 직선거리 600m 이내에 있는 대형마트는 다음 중 어디인가요?"
+    options = [
+        "이마트에브리데이 쌍문동점",
+        "GS더프레시 수유중앙점",
+        "홈플러스 메가푸드마켓 방학점",
+        "북서울농협하나로마트",
+    ]
+    steps = [
+        {
+            "id": "anchor_geocode",
+            "operator": "batch_geocode",
+            "arguments": {"place_names": ["강북솔밭국악당"]},
+            "depends_on": [],
+            "output_type": "object",
+            "role": "extent",
+        },
+        {
+            "id": "option_geocodes",
+            "operator": "batch_geocode",
+            "arguments": {"place_names": list(options)},
+            "depends_on": [],
+            "output_type": "object",
+            "role": "support",
+        },
+    ]
+    grounded = _ground_graph_literals(steps, question, options, "radius")
+    assert grounded[0]["arguments"]["place_names"] == ["강북솔밭국악당"]
+    assert grounded[1]["arguments"]["place_names"] == options
+    # The anchor still biases both lookups; it just does not replace a name.
+    assert grounded[1]["arguments"]["anchor"] == "강북솔밭국악당"
+
+
+def test_a_place_is_not_within_its_own_radius() -> None:
+    from src.tools import SpatialOperatorRegistry
+
+    ops = SpatialOperatorRegistry()
+    center = {"place_id": "1", "name": "강북솔밭국악당", "latitude": 37.6546, "longitude": 127.0127}
+    other = {"place_id": "2", "name": "이마트", "latitude": 37.6560, "longitude": 127.0130}
+    inside = ops.within_radius(center=center, candidates=[dict(center), other], radius_m=600)
+    assert [place["place_id"] for place in inside] == ["2"]

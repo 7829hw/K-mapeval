@@ -291,9 +291,13 @@ class SpatialOperatorRegistry:
         radius_m: float,
     ) -> list[dict[str, Any]]:
         center = _as_place(center, "center")
+        # A place is not near itself, here as in `nearest` and `filter_by_direction`. The anchor
+        # is a place of the kind being asked about often enough to end up among the options, and
+        # at 0 m it satisfies every radius — in one question it was the *only* place inside 600 m,
+        # which reported the anchor as the answer to "which mart is within 600 m of it".
         matches = [
             {"candidate_index": index, **candidate, **cls.haversine_distance(center, candidate)}
-            for index, candidate in _as_place_list(candidates)
+            for index, candidate in _excluding_self(center, _as_place_list(candidates))
         ]
         return sorted(
             (candidate for candidate in matches if candidate["distance_m"] <= float(radius_m)),

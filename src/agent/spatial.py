@@ -1201,7 +1201,16 @@ def _ground_graph_literals(
             names = list(pair)
             arguments["anchor"] = names[0]
         elif anchor:
-            if names and names[0] != anchor:
+            # Only the node that *has* an anchor slot gets the anchor written into it. A plan may
+            # geocode the anchor in one node and the four option texts in another, and replacing
+            # the head of the second deleted an option — the gold one, in a radius question whose
+            # every other stage then worked: the anchor stood 0 m from itself, was the only place
+            # inside 600 m, and the generation stage picked from the leftovers.
+            if names and (
+                len(names) == len(options) + 1
+                or names[0] == anchor
+                or _is_shortened_name(names[0], anchor)
+            ):
                 names[0] = anchor
             arguments["anchor"] = anchor
         if (

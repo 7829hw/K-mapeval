@@ -2246,3 +2246,31 @@ def test_a_direction_question_has_a_template_to_fall_back_on() -> None:
     # The constraint comes after the enrichment, which is the order recovery needs.
     operators = [step["operator"] for step in graph]
     assert operators.index("recover_option_places") < operators.index("filter_by_direction")
+
+
+def test_a_geocode_node_written_where_its_places_belong_is_flattened() -> None:
+    """`locations: ["$places"]` resolves to a list holding one list of four records.
+
+    An itinerary of one four-place list is not a shape any operator can read, and the clock
+    failed before a single leg was routed. The planner indexed one level too few — the mirror of
+    the one-element unwrap the same normalizer already does.
+    """
+
+    from src.tools.registry import CalculateFinishTimeArgs
+
+    records = [
+        {
+            "query": name,
+            "place": {
+                "place_id": name,
+                "name": name,
+                "latitude": 37.5 + index / 100,
+                "longitude": 127.0,
+            },
+        }
+        for index, name in enumerate(["출발지", "첫째", "둘째", "출발지"])
+    ]
+    args = CalculateFinishTimeArgs.model_validate(
+        {"start_time": "10:00", "locations": [records]}
+    )
+    assert [place.name for place in args.locations] == ["출발지", "첫째", "둘째", "출발지"]

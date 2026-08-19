@@ -150,7 +150,15 @@ def _is_unresolved_place(value: Any) -> bool:
 
 def _as_place_list_argument(value: Any) -> Any:
     if isinstance(value, list):
-        normalized = [_as_place_argument(item) for item in value]
+        # A list inside the list is the whole geocode node written where its places belong:
+        # `locations: ["$places"]` resolves to `[[rec, rec, rec, rec]]`, and an itinerary of one
+        # four-place list is not a shape any operator can read. This is the mirror of the
+        # one-element unwrap below — the planner indexed one level too few instead of too many —
+        # and it failed the clock before a single leg was routed.
+        flattened: list[Any] = []
+        for item in value:
+            flattened.extend(item) if isinstance(item, list) else flattened.append(item)
+        normalized = [_as_place_argument(item) for item in flattened]
         return [item for item in normalized if not _is_unresolved_place(item)]
     if isinstance(value, dict):
         # The mirror of `_as_place_argument`'s one-element list: a lone place-shaped value where

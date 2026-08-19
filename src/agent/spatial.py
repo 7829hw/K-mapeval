@@ -435,7 +435,9 @@ class SpatialAgent(BenchmarkAgent):
                         # Local operators spend no API call, so a place they are handed as a
                         # name is only a place if the plan already resolved it. The tools do
                         # their own name resolution through the provider.
-                        arguments = _bind_named_places(arguments, results)
+                        arguments = _bind_named_pairs(
+                            _bind_named_places(arguments, results), results
+                        )
                     if operator in tool_names:
                         execution = self.tools.invoke(operator, arguments)
                         if execution.status == "ok":
@@ -680,6 +682,8 @@ def _resolve_references(value: Any, results: dict[str, Any]) -> Any:
 PLACE_VALUED_ARGUMENTS = frozenset(
     {"anchor", "candidates", "center", "locations", "place_a", "place_b", "places"}
 )
+# The endpoint keys inside a `pairs` entry, which is where the pairwise operators keep theirs.
+PLACE_VALUED_PAIR_KEYS = frozenset({"place_a", "place_b", "origin", "destination"})
 
 
 def _resolved_place_index(results: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -740,6 +744,37 @@ def _bind_named_places(arguments: dict[str, Any], results: dict[str, Any]) -> di
         else:
             bound[key] = _named_place(value, index)
     return bound
+
+
+def _bind_named_pairs(arguments: dict[str, Any], results: dict[str, Any]) -> dict[str, Any]:
+    """The same binding one level down, where `pairs` keeps its endpoints.
+
+    `pairwise_distances` takes `[{place_a, place_b}]`, and a planner fills those with the option
+    texts it geocoded a step earlier. Unbound they are names the operator cannot look up, and the
+    pair is reported as an unresolved endpoint — 64 of them in one run of the farthest-pair
+    family, which is every comparison the question asks for.
+    """
+
+    pairs = arguments.get("pairs")
+    if not isinstance(pairs, list) or not any(isinstance(pair, dict) for pair in pairs):
+        return arguments
+    index = _resolved_place_index(results)
+    if not index:
+        return arguments
+    return {
+        **arguments,
+        "pairs": [
+            {
+                key: (
+                    _named_place(value, index) if key in PLACE_VALUED_PAIR_KEYS else value
+                )
+                for key, value in pair.items()
+            }
+            if isinstance(pair, dict)
+            else pair
+            for pair in pairs
+        ],
+    }
 
 
 def _holds_place_name(value: Any) -> bool:

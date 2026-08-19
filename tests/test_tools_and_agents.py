@@ -2075,3 +2075,25 @@ def test_a_name_the_planner_wrote_short_is_restored_from_the_question() -> None:
     ]
     grounded = _ground_graph_literals(steps, question, ["1번", "2번"], "routing")
     assert grounded[0]["arguments"]["place_names"] == ["빈칸 문래", "훈련원공원 야외극장"]
+
+
+def test_pair_endpoints_written_as_names_bind_like_any_other_place() -> None:
+    """`pairwise_distances` keeps its endpoints one level down, inside `pairs`."""
+
+    from src.agent.spatial import _bind_named_pairs
+
+    results = {
+        "geo": [
+            {"query": "보라믹", "place": {"place_id": "1", "name": "보라믹",
+                                          "latitude": 37.5, "longitude": 127.0}},
+            {"query": "봉제산", "place": {"place_id": "2", "name": "봉제산",
+                                          "latitude": 37.6, "longitude": 126.9}},
+        ]
+    }
+    bound = _bind_named_pairs(
+        {"pairs": [{"place_a": "보라믹", "place_b": "봉제산", "label": "A"}]}, results
+    )
+    pair = bound["pairs"][0]
+    assert pair["place_a"]["place_id"] == "1"
+    assert pair["place_b"]["place_id"] == "2"
+    assert pair["label"] == "A"

@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from src.models import Place
+from src.models import Place, Route
 from src.tools.map import MapProvider, PlaceNotFoundError
 from src.tools.spatial import (
     _parse_datetime,
@@ -558,27 +558,13 @@ class ToolRegistry:
                     "directions",
                     "Get a route with optional verified waypoints and navigation steps.",
                     DirectionsArgs,
-                    lambda args: self.provider.directions(
-                        args.origin,
-                        args.destination,
-                        mode=args.mode,
-                        priority=args.priority,
-                        waypoints=args.waypoints,
-                        include_steps=args.include_steps,
-                    ),
+                    self._route,
                 ),
                 ToolDefinition(
                     "travel_time",
                     "Get normalized driving time and distance. Same evidence schema as directions.",
                     DirectionsArgs,
-                    lambda args: self.provider.directions(
-                        args.origin,
-                        args.destination,
-                        mode=args.mode,
-                        priority=args.priority,
-                        waypoints=args.waypoints,
-                        include_steps=args.include_steps,
-                    ),
+                    self._route,
                 ),
                 ToolDefinition(
                     "distance_matrix",
@@ -815,6 +801,20 @@ class ToolRegistry:
             raise PlaceNotFoundError(f"Kakao has no coordinates for {args.address!r}")
         return found
 
+    def _route(self, args: DirectionsArgs) -> Route:
+        """One route, with the leg from a place to itself answered rather than asked for."""
+
+        if not args.waypoints and _same_endpoint(args.origin, args.destination):
+            return _self_route(args.origin, args.destination)
+        return self.provider.directions(
+            args.origin,
+            args.destination,
+            mode=args.mode,
+            priority=args.priority,
+            waypoints=args.waypoints,
+            include_steps=args.include_steps,
+        )
+
     def _distance_matrix(self, args: DistanceMatrixArgs) -> dict[str, Any]:
         pairs = list(args.pairs or [])
         if not pairs:
@@ -843,17 +843,11 @@ class ToolRegistry:
                 # one run, each one an API call, and the generation stage read them as a matrix
                 # that had failed. This is the one leg that may be filled — an *absent*
                 # off-diagonal leg is still missing evidence, never a zero-cost hop.
-                label = _place_label(pair.origin)
                 routes.append(
                     {
                         "pair_index": index,
                         "label": pair.label,
-                        "origin": label,
-                        "destination": _place_label(pair.destination),
-                        "distance_m": 0,
-                        "duration_s": 0,
-                        "steps": [],
-                        "waypoints": [],
+                        **_jsonable(_self_route(pair.origin, pair.destination)),
                         "status": "ok",
                     }
                 )
@@ -1023,6 +1017,24 @@ def _reject_unresolved_places(name: str, arguments: dict[str, Any]) -> None:
                 f"{name} received an unresolved place for {argument!r}; "
                 "the upstream geocode found no match"
             )
+
+
+def _self_route(origin: str | Place | None, destination: str | Place | None) -> Route:
+    """A place is no distance from itself.
+
+    Kakao refuses to route it — "출발지와 도착지가 5 m 이내로 설정된 경우 경로를 탐색할 수 없음" —
+    and one run spent 750 matrix calls and 64 baseline calls collecting that refusal, which the
+    generation stage then read as evidence that the legs had failed. This is the only leg either
+    architecture may have filled in, and both get it identically: the evidence below the tools is
+    the same for both, whatever tools they reach it through.
+    """
+
+    return Route(
+        origin=_place_label(origin),
+        destination=_place_label(destination),
+        distance_m=0,
+        duration_s=0,
+    )
 
 
 def _same_endpoint(origin: str | Place | None, destination: str | Place | None) -> bool:

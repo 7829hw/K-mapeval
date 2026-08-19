@@ -1255,14 +1255,36 @@ def test_spatial_operators_skip_unresolved_candidates() -> None:
 
 def test_directions_accepts_a_normalized_place_from_a_plan_reference() -> None:
     registry = ToolRegistry(FakeProvider())
-    place = FakeProvider().place.model_dump()
+    origin = FakeProvider().place.model_dump()
+    destination = {**origin, "place_id": "2", "name": "남산", "latitude": 37.55}
     execution = registry.invoke(
         "directions",
-        {"origin": place, "destination": place, "mode": "driving"},
+        {"origin": origin, "destination": destination, "mode": "driving"},
     )
     assert execution.status == "ok"
     # The fake echoes the endpoints it was given, so the span follows from their names.
-    assert execution.output["distance_m"] == 160
+    assert execution.output["origin"] == "경복궁"
+    assert execution.output["destination"] == "남산"
+    assert execution.output["distance_m"] > 0
+
+
+def test_a_leg_from_a_place_to_itself_is_answered_for_both_architectures() -> None:
+    """Kakao refuses to route it, and the refusal was being collected by the hundred.
+
+    The evidence below the tools has to be the same for both agents, so the zero-cost leg is
+    answered in `travel_time` and `directions` — which is all ReAct has — exactly as it is inside
+    `distance_matrix`, which only Spatial-Agent reaches.
+    """
+
+    provider = FakeProvider()
+    registry = ToolRegistry(provider)
+    before = provider.api_call_count
+    for tool in ("travel_time", "directions"):
+        execution = registry.invoke(tool, {"origin": "경복궁", "destination": "경복궁"})
+        assert execution.status == "ok"
+        assert execution.output["distance_m"] == 0
+        assert execution.output["duration_s"] == 0
+    assert provider.api_call_count == before
 
 
 def test_spatial_agent_handles_google_style_references_without_aborting() -> None:

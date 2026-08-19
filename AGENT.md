@@ -231,6 +231,14 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   plan itself resolved under that name — by the query text or by the name Kakao stores. It grants
   no evidence the run had not already gathered, and a name the plan never resolved is left alone so
   it still fails as a missing place. The tools keep resolving names through the provider.
+- **A place is no distance from itself, and both architectures are told so identically.** Kakao
+  refuses that leg — "출발지와 도착지가 5 m 이내로 설정된 경우 경로를 탐색할 수 없음" — and a trip
+  matrix asks for its own diagonal, so one run spent 750 matrix calls plus 64 baseline
+  `travel_time` calls collecting the refusal, which the generation stage then read as legs that
+  had failed. `_self_route` answers it at zero cost in `directions`, `travel_time` and
+  `distance_matrix` alike: the tool surfaces differ between the agents, the evidence below them
+  does not. It is the only leg that may be filled — `build_duration_matrix` still reports an
+  absent off-diagonal leg as missing evidence rather than a free hop.
 - **An empty ranking is a claim, and a list that resolves nothing cannot make it.**
   `_as_place_list` used to return `[]` when every candidate was a bare name or the `{"error": …}`
   marker of a failed step, which downstream is indistinguishable from "no candidate qualifies" —

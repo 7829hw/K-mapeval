@@ -482,3 +482,56 @@ plans do retrieve.
 
 Report the floor next to every accuracy (`data/measure_no_tool_floor.py`). Without it, 91 against
 96 is uninterpretable.
+
+## How MapEval built its QA set, and what v4 ports
+
+`mapqator-backend/database/schema.sql` shows the pipeline behind `mapeval-api/dataset.json`: an
+annotator issues map API calls that are cached in `places` / `nearby` / `distance` / `directions` /
+`inside`, the calls are assembled into one `context`, and a person then writes the question and the
+options against that evidence (`dataset.username` records who). `human` holds the human baseline
+that the paper reports models against. There is no generator — the questions are hand-written over
+collected evidence.
+
+Counting `dataset.json` says what the annotators actually wrote, per class:
+
+| class | value options | name options |
+| --- | --- | --- |
+| nearby | 19 | 64 |
+| poi | 36 | 28 |
+| routing | 44 | 22 |
+| trip | 48 | 19 |
+| unanswerable | 5 | 15 |
+
+`['South, 13.45 kilometers', …]`, `['61.224 km', …]`, `['10.13', '10.23', …]`, `['1','2','3','0']`.
+Every one of v2's eleven families offers place names, orderings or guidance strings instead, which
+is where its retrieval bypass comes from — geocode the four options and the question is over.
+
+`data/build_mapeval_benchmark.py` ports the method rather than the proportions:
+
+- **Values where upstream uses values.** 45 of 100 rows. `poi_straight_distance`,
+  `routing_distance_via`, `trip_total_distance`, `trip_arrival_clock`, `routing_turn_count`,
+  `poi_direction_distance`.
+- **A constraint where upstream uses names.** Upstream asks for an *orthopedic* hospital; Kakao's
+  paths carry the same subtypes, so `nearby_clinic_subtype` / `nearby_cuisine_subtype` offer three
+  *nearer* siblings and the subtype is what decides. The gold is selected with
+  `matches_required_type` — the tools' own test — because choosing it on the category path while
+  `filter_places` also reads the name left one question whose true answer was not among its
+  options.
+- **The unanswerable class, which here is not a choice.** Kakao publishes no rating, price level or
+  opening hours, so upstream's attribute half cannot be asked. Those 7 rows ask it anyway and the
+  gold is the refusal; `data/verify_mapeval_benchmark.py` verifies them in the negative, by
+  checking every candidate carries `None` for the field.
+- **No engineered margins.** v2 rejected close calls; MapEval's annotators read whatever the
+  evidence said. Margins survive only where Kakao is not reproducible: `trip_arrival_clock`
+  out-spaces the traffic, `trip_feasible_count` keeps only budgets whose answer holds at ±30% per
+  leg. `trip_feasible_count` additionally rejects any row a constant travel assumption answers —
+  the flaw measured on v2, where "15 minutes a leg" and no map scored 9/10.
+
+Two deviations, both because we have no annotators and one because upstream leaks:
+
+- The questions are templated. The *shape* of every family is upstream's; the phrasing is
+  generated, so v4 does not carry the colloquial naming ("the hospital", "the lake") that makes
+  upstream's place resolution hard.
+- `Evaluator2.py` prepends "Option0: Unanswerable" only when a row is unanswerable, which tells the
+  model the answer before it reads the question. Here "주어진 지도 정보로는 알 수 없음" is an
+  ordinary option: gold on the 7 unanswerable rows and a distractor on 22 answerable ones.

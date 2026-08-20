@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -155,6 +156,90 @@ def test_the_need_questions_never_name_the_category_they_want() -> None:
         assert min(item.gold_evidence["nearer_wrong_kind_m"]) < item.gold_evidence[
             "gold_distance_m"
         ]
+
+
+MAPEVAL_METHOD_BENCHMARK = Path("dataset/seoul_kmapeval_v4_mcq_100.jsonl")
+
+REFUSAL_TEXT = "주어진 지도 정보로는 알 수 없음"
+
+
+def test_the_mapeval_method_benchmark_carries_upstreams_class_mix() -> None:
+    """MapEval-API is nearby 83 / trip 67 / routing 66 / poi 64 / unanswerable 20, out of 300.
+
+    `classification` is the intent the agent routes on, so the paper-level class lives in
+    `mapeval_class` — losing it would leave the mix unreportable.
+    """
+
+    items = load_dataset(MAPEVAL_METHOD_BENCHMARK)
+    assert len(items) == 100
+    mix = Counter(item.mapeval_class for item in items)
+    assert mix == Counter(
+        {"nearby": 28, "trip": 22, "routing": 22, "poi": 21, "unanswerable": 7}
+    )
+    assert all(0 <= item.answer < len(item.options) for item in items)
+    assert all(len(item.options) == len(set(item.options)) for item in items)
+    assert len({item.question for item in items}) == 100
+    assert not any(item.context for item in items)
+
+
+def test_most_of_the_benchmark_cannot_be_answered_by_geocoding_its_options() -> None:
+    """The measurement that motivated this dataset: v2's options *were* the candidate set.
+
+    Upstream answers poi, routing and trip with values (36/64, 44/66, 48/67) and only `nearby`
+    with names. A row whose options are all numbers cannot be finished by looking up the option
+    texts, which is the shortcut being closed.
+    """
+
+    items = load_dataset(MAPEVAL_METHOD_BENCHMARK)
+    valued = [
+        item
+        for item in items
+        if sum(bool(re.search(r"\d", option)) for option in item.options)
+        >= len(item.options) - 1
+    ]
+    assert len(valued) >= 40
+    # And every one of the value families is represented among them.
+    assert {item.mapeval_class for item in valued} >= {"poi", "routing", "trip"}
+
+
+def test_the_refusal_option_is_not_a_signal() -> None:
+    """Upstream announces "Option0: Unanswerable" only on unanswerable rows, which gives the
+    answer away before the question is read. Here it also sits among answerable rows."""
+
+    items = load_dataset(MAPEVAL_METHOD_BENCHMARK)
+    carrying = [item for item in items if any(REFUSAL_TEXT in o for o in item.options)]
+    gold_on_it = [item for item in carrying if REFUSAL_TEXT in item.options[item.answer]]
+    assert len(gold_on_it) == 7
+    # A model that answers "refusal whenever offered" must do worse than chance on this set.
+    assert len(gold_on_it) / len(carrying) < 0.3
+
+
+def test_a_named_option_family_is_decided_by_the_constraint_not_by_proximity() -> None:
+    """Upstream asks for an *orthopedic* hospital. The nearest hospital is a wrong answer."""
+
+    items = load_dataset(MAPEVAL_METHOD_BENCHMARK)
+    constrained = [
+        item
+        for item in items
+        if item.template_id in ("nearby_clinic_subtype", "nearby_cuisine_subtype")
+    ]
+    assert len(constrained) == 28
+    for item in constrained:
+        evidence = item.gold_evidence
+        assert evidence["required_subtype"] in item.question
+        nearer = evidence["nearer_wrong_subtype_m"]
+        assert len(nearer) == 3
+        assert max(nearer) < evidence["gold_distance_m"]
+
+
+def test_the_feasible_count_family_cannot_be_answered_without_the_map() -> None:
+    """v2's version was answerable 9/10 by assuming a constant 15 minutes a leg."""
+
+    items = load_dataset(MAPEVAL_METHOD_BENCHMARK)
+    rows = [item for item in items if item.template_id == "trip_feasible_count"]
+    assert rows
+    for item in rows:
+        assert item.gold_evidence["count_without_travel"] != item.answer + 1
 
 
 def test_invalid_gold_index_is_rejected() -> None:

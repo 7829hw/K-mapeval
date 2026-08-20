@@ -58,10 +58,13 @@ python main.py --agent both --dataset dataset/seoul_kmapeval_v3_mcq_100.jsonl
 # it shares this registry's aggregations with the baseline and answers a different question.
 python main.py --agent react --react-tools full
 
-# The reproduction run: the Kakao-grounded benchmark against live Kakao, both architectures.
-python main.py --agent both                   # dataset/seoul_kmapeval_v2_mcq_100.jsonl, kakao evidence
+# The reproduction run: the MapEval-method benchmark against live Kakao, both architectures.
+python main.py --agent both                   # dataset/seoul_kmapeval_v4_mcq_100.jsonl, kakao evidence
 python main.py --agent react
-python main.py --agent both --ids seoul_kmapeval_v2_000 seoul_kmapeval_v2_024
+python main.py --agent both --ids seoul_kmapeval_v4_000 seoul_kmapeval_v4_024
+
+# An accuracy without its floor is not a number. Same model, same options, no tools.
+PYTHONPATH=data python data/measure_no_tool_floor.py dataset/seoul_kmapeval_v4_mcq_100.jsonl
 
 # The context-cache benchmark, which needs the dataset whose rows ship a context.
 python main.py --agent both --dataset dataset/seoul_mapeval_v1_mcq_100.jsonl --provider context
@@ -73,6 +76,8 @@ PYTHONPATH=data python data/build_benchmark.py
 PYTHONPATH=data python data/verify_benchmark.py
 PYTHONPATH=data python data/build_hard_benchmark.py     # the compositional benchmark
 PYTHONPATH=data python data/verify_hard_benchmark.py
+PYTHONPATH=data python data/build_mapeval_benchmark.py  # the MapEval-method benchmark
+PYTHONPATH=data python data/verify_mapeval_benchmark.py
 
 python main.py --agent spatial --concurrency 4
 ```
@@ -672,11 +677,58 @@ touching both, plus the intent heuristics and evaluation rules). Extra fields ar
 `agent_input()` returns `(question, options)` and nothing else, so `gold_evidence` — which records
 *why* an answer is the answer — can never reach an agent.
 
-Three benchmarks ship. They answer different questions and their numbers must never be pooled.
+Four benchmarks ship. They answer different questions and their numbers must never be pooled.
 
-### `dataset/seoul_kmapeval_v2_mcq_100.jsonl` — the reproduction benchmark
+### `dataset/seoul_kmapeval_v4_mcq_100.jsonl` — the MapEval-method benchmark
 
-The one to run when the question is whether Spatial-Agent's reported gains reproduce. Built by
+**The one to run when the question is whether Spatial-Agent's gains reproduce.** v2 matched
+MapEval-API's class *proportions* and missed its *method*, and `docs/REFERENCE_MAPPING.md` records
+what that cost: 91 of 100 drafted graphs contained no retrieval operator, because the four MCQ
+options were the candidate set. This one is built by `data/build_mapeval_benchmark.py`, seed
+`20260820`, following what MapQaTor actually does — evidence collected first, then a question and
+options written against it — and `data/verify_mapeval_benchmark.py` re-derives all 100.
+
+Three properties are ported from `mapeval-api/dataset.json` itself, not from its description:
+
+- **The options are a value, except for `nearby`.** Counted upstream: poi 36 value / 28 names,
+  routing 44 / 22, trip 48 / 19, nearby 19 / 64. A question answered by `['약 15.2km', …]` or
+  `['오후 3시 00분', …]` cannot be finished by geocoding its options, which is the shortcut v2 left
+  open. 45 of the 100 rows here carry value options.
+- **Where the options are names, a constraint decides, not proximity.** Upstream asks for an
+  *orthopedic* hospital, a restaurant *rated 4.8+*, the nearest *mosque*. Kakao's category paths
+  carry the same subtype vocabulary (`의료,건강 > 병원 > 정형외과`, `음식점 > 중식 > 중국요리`), so
+  `nearby_clinic_subtype` and `nearby_cuisine_subtype` offer three *nearer* places of sibling
+  subtypes: the nearest hospital is the wrong answer, and only the subtype test finds the right one.
+- **Some questions have no answer.** 20 of upstream's 300 carry `correct = -1`. Kakao publishes no
+  rating, price level or opening hours, so upstream's whole attribute half is unanswerable here by
+  nature — those are the 7 `unanswerable_*` rows, and the verifier checks them *in the negative*:
+  every candidate must carry `None` for the field asked about.
+
+Two deliberate deviations. The questions are **templated, not hand-written** — there are no
+annotators, so the shape of each family is upstream's and the phrasing is generated. And the
+refusal option is **not announced**: `Evaluator2.py` prepends "Option0: Unanswerable" only on
+unanswerable rows, which gives the answer away before the question is read, so
+"주어진 지도 정보로는 알 수 없음" is an ordinary option here — gold on the 7, a distractor on 22 of
+the answerable rows.
+
+One rule is dropped on purpose: **v2's engineered margins.** MapEval's annotators read whatever the
+evidence said. Margins survive only where the provider is not reproducible — a Kakao driving
+duration is a live estimate, so `trip_arrival_clock` still out-spaces the traffic and
+`trip_feasible_count` keeps only budgets whose answer holds at ±30% on every leg. Distances,
+bearings and DISTANCE-priority route lengths are facts about the road network and get none.
+
+`trip_feasible_count` additionally rejects any row whose answer is reachable **without the map**:
+v2's version was answerable 9/10 by assuming a constant 15 minutes a leg, because the budget sat an
+hour from the boundary. Here the stays-only count must differ from the true one, which it does on
+all 7 rows.
+
+### `dataset/seoul_kmapeval_v2_mcq_100.jsonl` — the first reproduction benchmark, superseded
+
+**Superseded by v4 for the reproduction question, and kept because its runs are on record.** It
+matched MapEval-API's class proportions and not its method, so its options are the candidate set
+and its margins are engineered; `docs/REFERENCE_MAPPING.md` carries the measurement. Read a v2
+accuracy as evidence handling and arithmetic over exact lookups, never as a reproduction of the
+paper. Built by
 `data/build_pool.py` + `data/build_benchmark.py` from Kakao Local and Kakao Mobility, seed
 `20260818`, and graded against the same provider the agents query, so a wrong answer is the agent's
 and never a disagreement between the evidence and the grader.

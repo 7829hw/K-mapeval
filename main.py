@@ -23,10 +23,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     result.add_argument(
         "--dataset",
-        default="dataset/seoul_kmapeval_v2_mcq_100.jsonl",
+        default="dataset/seoul_kmapeval_v4_mcq_100.jsonl",
         help=(
-            "Benchmark to evaluate. The default is the Kakao-grounded reproduction benchmark; "
-            "the context-cache benchmark is dataset/seoul_mapeval_v1_mcq_100.jsonl."
+            "Benchmark to evaluate. The default is the MapEval-method reproduction benchmark; "
+            "seoul_kmapeval_v3 is the compositional one, seoul_mapeval_v1 the context-cache one, "
+            "and seoul_kmapeval_v2 the superseded first reproduction benchmark."
         ),
     )
     result.add_argument(

@@ -424,3 +424,61 @@ Two consequences, applied together:
   baseline has it; *which* priority a question asks for is grounding, and grounding is a
   Spatial-Agent stage under measurement (`_extract_route_priority`). A write-up should report that
   asymmetry as architectural, which it is, rather than close it in the baseline's prose.
+
+
+## Why the v2 scores are high, measured rather than guessed
+
+ReAct 91 and Spatial-Agent 96 on `dataset/seoul_kmapeval_v2_mcq_100.jsonl` sit far above what
+MapEval reports for its API split, and a *baseline* at 91 from a 35B-A3B model is the part that
+cannot be right. Five candidate explanations were measured on the run behind
+`reports/test_20260819T224214Z.json` (ReAct) and `reports/test_20260819T225908Z.json`
+(Spatial-Agent). Four are refuted:
+
+| candidate | measurement | verdict |
+| --- | --- | --- |
+| the questions are answerable from the model's own knowledge | no-tool floor **31/100**, chosen-option histogram 29/26/23/22 against a 25% chance rate | refuted |
+| our place-matching stack carries the baseline | for the 247 option names Kakao returns candidates for, `_best_place_match` agrees with `candidates[0]` — upstream's `results[0]` — in **208**; the 7 overrides are all non-place option strings ("좌회전 (아차산로)", "7번") | refuted |
+| ReAct's 30-step budget against langchain's 15 | ReAct used at most 10 steps, and only **5/100** questions took more than 15 tool calls | refuted |
+| Spatial-Agent's score is our question-literal grounding | `_ground_graph_literals` replaced by a pass-through: **96 → 92**, and the loss is almost all `routing` (22 → 18, the priority binding) while `trip` rose 22 → 24 | refuted |
+| **the questions do not require the map to find anything** | **91/100** of Spatial-Agent's drafted graphs contain no retrieval operator at all; ReAct called `nearby_places` on **16/100** questions and `place_search` 480 times | **confirmed** |
+
+The shape of a v2 answer, from the trace of a radius question:
+
+```
+batch_geocode(["호스텔온기"])                     # the anchor, verbatim in the question
+batch_geocode([option0, option1, option2, option3])  # the four options *are* the candidate set
+within_radius(center, candidates, 800)               # the radius, verbatim in the question
+identity_measure -> ^^2^^
+```
+
+**The MCQ options are the candidate set, so retrieval never happens.** "Which 대형마트 is within
+800 m" becomes "geocode four names and test a predicate" — which is also exactly what
+`data/verify_benchmark.py` does, and why it re-derives 100/100. The hard part of a map agent,
+finding the places, is answered by the question paper.
+
+Three construction rules remove what is left:
+
+- `Builder.resolves_to` admits a place only if its bare name searches back to within 200 m, so
+  place resolution — the failure mode MapEval's baseline spends its budget on — cannot fail. That
+  is also why the naive `results[0]` and our matcher agree.
+- Ties are rejected with wide margins, and the recorded evidence shows how wide: a
+  `routing_via_compare` row offers detours of 1639 / 3406 / 3568 / 3868 s, a factor of two; a
+  `trip_feasible_count` row has a 4 h budget against best finishes of 1.3 / 3.1 / 5.2 h. Only
+  `trip_optimal_order` is close (194 s over ~2900 s). A constant "15 minutes per leg" and **no map
+  at all** answers `trip_feasible_count` 9/10.
+- No `unanswerable` class, where MapEval-API puts 20 of its 300 rows and where models lose most.
+
+And one thing no construction rule can fix: Kakao Local publishes no rating, no price level and no
+opening hours, so the whole attribute-reasoning half of MapEval-API — Place-Attribute-Query, and
+every question that turns on whether somewhere is open or well reviewed — has no Korean
+counterpart here. What remains is geometry and routing, which are exact.
+
+So v2 measures evidence handling and arithmetic over exact lookups, not map reasoning, and its
+numbers must never be presented as reproducing the paper's. `dataset/seoul_kmapeval_v3_mcq_100.jsonl`
+already carries the fix for the biggest of these: **six of its seven families answer with a value**
+(`오후 3시 07분`, `약 49.8km`, `약 86%`, `3번`, `동쪽, 약 6.9km`), which no amount of geocoding the
+options can shortcut. Only `nearby_from_need` still offers POI names, and it is the family whose
+plans do retrieve.
+
+Report the floor next to every accuracy (`data/measure_no_tool_floor.py`). Without it, 91 against
+96 is uninterpretable.

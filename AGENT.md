@@ -792,6 +792,25 @@ All 100 gold answers are derivable from the shipped context by deterministic com
 the provider. Its questions are single-hop by construction, so it measures evidence handling, not
 composition — do not read a tie on it as a finding about architecture.
 
+### An accuracy without its floor is not a number
+
+`data/measure_no_tool_floor.py` answers the benchmark with the same model and the same options and
+no tools at all. What the map explains is `accuracy - floor`, and a report that omits the floor
+cannot be compared with anyone's, including our own earlier runs. v2's floor is 31/100 against a
+25% chance rate, so its 91/96 buys 60 and 65 points of a 69-point headroom.
+
+**v2 is not difficulty-matched to MapEval-API, and its numbers must never be presented as
+reproducing the paper's.** Measured, not guessed: 91 of 100 Spatial-Agent graphs contain no
+retrieval operator, because the four MCQ options *are* the candidate set — a radius question is
+"geocode four given names and test a predicate", which is what `data/verify_benchmark.py` does too.
+Construction removes the rest: names must round-trip within 200 m (so resolution cannot fail),
+ties are rejected by factors rather than margins, and there is no `unanswerable` class. Kakao
+publishes no rating, price or opening hours, so MapEval's attribute half has no counterpart here at
+all. `docs/REFERENCE_MAPPING.md` carries the full measurement, including the four explanations it
+refutes — the no-tool floor, our matching stack, ReAct's step budget, and our own literal
+grounding (96 → 92 without it). When a score looks too high, measure which of those it is before
+changing code.
+
 ### Verifying a benchmark before trusting a run
 
 `data/verify_benchmark.py` re-derives every gold answer through `ToolRegistry` +

@@ -1,23 +1,29 @@
 # K-MapEval PRD
 
-## 1. 개요
+## 1. Overview
 
-**K-MapEval**은 한국 지리·POI 환경과 국내 지도 API를 기반으로 MapEval 계열의 공간 추론 평가 환경을 구축하고, 기존 Spatial-Agent의 성능 향상이 한국 지도 환경에서도 재현되는지 검증하기 위한 연구용 프로젝트다.
+**K-MapEval** is a research project that builds a MapEval-style spatial-reasoning evaluation
+environment for Korean geography, POIs, and domestic map APIs. It tests whether the performance
+improvements reported for Spatial-Agent can be reproduced in a Korean map environment.
 
-본 프로젝트의 목적은 다음과 같다.
+The project has three goals:
 
-1. 한국 지리·POI 환경과 Kakao Map API를 사용하는 **한국형 MapEval-API 실행 환경**을 구현한다.
-2. 동일한 한국 지도 환경에서 **MapEval 방식의 ReAct Agent와 Spatial-Agent를 비교**한다.
-3. 기존 Spatial-Agent의 성능 향상이 한국 지도 및 국내 POI 환경에서도 재현되는지 예비 검증한다.
+1. Build a **Korean MapEval-API-style execution environment** using Korean geographic/POI data and
+   the Kakao Map API.
+2. Compare a **MapEval-style ReAct Agent and Spatial-Agent** under the same Korean map conditions.
+3. Conduct a preliminary test of whether Spatial-Agent's reported gains generalize to Korean maps
+   and domestic POI data.
 
-> 본 단계의 주목적은 **benchmark dataset 자체를 완성하는 것이 아니라, MapEval과 Spatial-Agent를 참고하여 한국형 평가 시스템을 구현하는 것​**이다.  
-> 전체 Benchmark Dataset은 후속 단계에서 별도로 제작한다.
+> The primary goal of this phase is **not to complete the benchmark dataset itself, but to
+> implement a Korean evaluation system informed by MapEval and Spatial-Agent**.
+> The complete benchmark dataset will be created separately in a later phase.
 
 ---
 
 ## 2. Reference Implementations
 
-구현 시 기존 프로젝트의 구조와 코드를 적극적으로 참고한다.
+The structure and code of the existing projects should be consulted actively during
+implementation.
 
 ### MapEval-API
 
@@ -25,20 +31,21 @@ Repository:
 
 `https://github.com/MapEval/MapEval-API`
 
-주요 참고 대상:
+Primary references:
 
 - `Evaluator2.py`
-  - ReAct 기반 benchmark agent 구성
-  - question/options 입력 및 answer evaluation 방식
+  - ReAct-based benchmark-agent construction
+  - Question/options input and answer-evaluation flow
 - `FormattedTools.py`
-  - 지도 API를 LLM tool 형태로 제공하는 방식
-  - API response formatting 방식
+  - Exposing map APIs as LLM tools
+  - Formatting API responses
 - `Tools.py`
-  - Place Search, Nearby, Directions 등 지도 tool interface
+  - Map-tool interfaces such as Place Search, Nearby, and Directions
 - `dataset.json`
-  - MapEval benchmark 문항 구조 및 classification 참고
+  - MapEval benchmark item structure and classification vocabulary
 
-K-MapEval의 **ReAct baseline은 가능한 한 MapEval-API의 평가 구조를 유지**하면서 Google/MapQaTor 의존 부분을 Kakao 기반 tool layer로 교체한다.
+K-MapEval's **ReAct baseline should preserve the MapEval-API evaluation structure as closely as
+possible**, replacing its Google/MapQaTor dependencies with a Kakao-based tool layer.
 
 ### MapQaTor Backend
 
@@ -46,15 +53,15 @@ Repository:
 
 `https://github.com/MapQaTor/mapqator-backend`
 
-주요 참고 대상:
+Primary references:
 
-- MapEval-API가 지도 기능을 별도 backend로 추상화한 방식
-- Place Search / Nearby / Directions 등의 API 구조
-- benchmark와 지도 provider를 분리하는 설계
+- How MapEval-API abstracts map functionality behind a separate backend
+- API structures for Place Search, Nearby, and Directions
+- Separating the benchmark from the map provider
 
-단, K-MapEval MVP에서는 별도의 backend server를 구현하지 않는다.
+The K-MapEval MVP does not implement a separate backend server.
 
-MapQaTor의 역할은 Python 내부의 `KakaoMapProvider`가 담당한다.
+The Python `KakaoMapProvider` assumes the role that MapQaTor's backend would have provided.
 
 ### Spatial-Agent
 
@@ -62,28 +69,30 @@ Repository:
 
 `https://github.com/ecerybao/Spatial-Agent`
 
-주요 참고 대상:
+Primary references:
 
 - `src/agent/spatial_agent.py`
-  - `Route → Plan → Execute → Evaluate → Generate` workflow
+  - `Route -> Plan -> Execute -> Evaluate -> Generate` workflow
 - `src/agent/operators.py`
-  - spatial operator 구현 및 실행 구조
+  - Spatial-operator implementation and execution structure
 - `src/tools/google_maps.py`
   - Google Maps client abstraction
 - `src/tools/local_context_db.py`
-  - local spatial data interface
+  - Local spatial-data interface
 - `test_agent.py`
-  - MapEval-API dataset 평가 및 accuracy 계산 방식
+  - MapEval-API dataset evaluation and accuracy calculation
 
-K-MapEval의 Spatial-Agent 구현은 **원본 Spatial-Agent 코드를 최대한 유지**하면서 지도 provider 부분만 Kakao 기반으로 교체하는 것을 원칙으로 한다.
+The K-MapEval Spatial-Agent implementation should **preserve the original Spatial-Agent code as
+far as possible**, replacing only the map-provider layer with Kakao-based components.
 
 ---
 
-## 3. 핵심 연구 질문
+## 3. Core Research Question
 
-> 동일한 한국형 공간 질의와 동일한 Kakao 지도 정보를 사용할 때, Spatial-Agent가 MapEval의 ReAct Agent보다 높은 공간 추론 성능을 보이는가?
+> When both agents receive the same Korean spatial questions and the same Kakao map information,
+> does Spatial-Agent achieve higher spatial-reasoning performance than MapEval's ReAct Agent?
 
-주요 비교 조건:
+Primary comparison:
 
 ```text
 ReAct Agent
@@ -91,21 +100,21 @@ vs
 Spatial-Agent
 ```
 
-두 시스템에서 다음 조건은 가능한 한 동일하게 유지한다.
+The following conditions should be kept identical across both systems wherever possible:
 
 - LLM
-- benchmark questions
+- Benchmark questions
 - Kakao Map API
-- tool output schema
-- temperature
-- 최대 reasoning/tool-call 횟수
-- evaluation metric
+- Tool-output schema
+- Temperature
+- Maximum number of reasoning/tool-call steps
+- Evaluation metric
 
-즉 핵심 독립 변수는 **Agent Architecture**가 되도록 한다.
+The goal is therefore for **agent architecture** to be the primary independent variable.
 
 ---
 
-## 4. 시스템 구조
+## 4. System Structure
 
 ```text
              K-MapEval Sample Questions
@@ -129,15 +138,15 @@ Spatial-Agent
        POI / Geocode          Directions
 ```
 
-MVP에서는 별도의 MapQaTor 형태 backend server를 구축하지 않는다.
+The MVP does not build a separate MapQaTor-style backend server.
 
-두 Agent가 동일한 `KakaoMapProvider` Python implementation을 직접 호출하도록 한다.
+Both agents directly call the same Python `KakaoMapProvider` implementation.
 
 ---
 
 ## 5. Kakao Map Provider
 
-지도 provider와 Agent를 분리하기 위해 공통 interface를 정의한다.
+Define a common interface to separate the map provider from the agents.
 
 ```python
 class MapProvider:
@@ -148,30 +157,30 @@ class MapProvider:
     def directions(self, origin, destination, mode): ...
 ```
 
-Kakao 구현:
+Kakao implementation:
 
 ```python
 class KakaoMapProvider(MapProvider):
     ...
 ```
 
-주요 데이터 소스:
+Primary data sources:
 
 - Kakao Local REST API
-  - 키워드 장소 검색
-  - 카테고리 검색
-  - 주소 검색
-  - 좌표 관련 기능
+  - Keyword place search
+  - Category search
+  - Address search
+  - Coordinate-related functions
 - Kakao Mobility API
-  - 자동차 경로 탐색
+  - Automobile route planning
 
-Spatial-Agent 코드의 `GoogleMapsClient`가 담당하던 역할을 `KakaoMapProvider`가 대체한다.
+`KakaoMapProvider` replaces the role previously played by Spatial-Agent's `GoogleMapsClient`.
 
 ---
 
 ## 6. Canonical Tool Interface
 
-ReAct와 Spatial-Agent가 서로 다른 형태의 Kakao API 응답을 받는 것을 방지하기 위해 공통 schema를 사용한다.
+Use a common schema so ReAct and Spatial-Agent do not receive Kakao responses in different forms.
 
 ### Place
 
@@ -198,15 +207,16 @@ ReAct와 Spatial-Agent가 서로 다른 형태의 Kakao API 응답을 받는 것
 }
 ```
 
-Kakao raw JSON은 Agent에게 직접 제공하지 않고 `KakaoMapProvider`에서 정규화한다.
+Kakao raw JSON must be normalized by `KakaoMapProvider` before it reaches an agent.
 
 ---
 
 ## 7. MapEval-style ReAct Baseline
 
-MapEval-API의 `Evaluator2.py`, `FormattedTools.py`, `Tools.py`를 참고하여 ReAct baseline을 구현한다.
+Implement the ReAct baseline with `Evaluator2.py`, `FormattedTools.py`, and `Tools.py` from
+MapEval-API as references.
 
-주요 tool:
+Primary tools:
 
 ```text
 PlaceSearch
@@ -216,7 +226,7 @@ Directions
 TravelTime / Distance
 ```
 
-동작 구조:
+Execution flow:
 
 ```text
 Question
@@ -236,7 +246,7 @@ Observation
 Final Answer
 ```
 
-각 tool은 직접 Kakao API를 호출하지 않고 공통 `KakaoMapProvider`를 사용한다.
+Each tool uses the shared `KakaoMapProvider` rather than calling the Kakao API directly.
 
 ```python
 @tool
@@ -244,13 +254,13 @@ def place_search(query: str):
     return provider.search_place(query)
 ```
 
-이를 통해 ReAct와 Spatial-Agent가 동일한 지도 데이터 layer를 사용하도록 한다.
+This ensures that ReAct and Spatial-Agent use the same map-data layer.
 
 ---
 
 ## 8. Spatial-Agent Porting
 
-Spatial-Agent repository의 기존 architecture를 최대한 유지한다.
+Preserve the existing Spatial-Agent architecture as far as possible.
 
 ```text
 Question
@@ -266,9 +276,9 @@ Evaluate
 Generate
 ```
 
-주요 수정 대상은 **지도 provider dependency**다.
+The primary change is the **map-provider dependency**.
 
-기존:
+Before:
 
 ```text
 GoogleMapsClient
@@ -276,7 +286,7 @@ GoogleMapsClient
 Google Maps API
 ```
 
-변경:
+After:
 
 ```text
 KakaoMapProvider
@@ -284,15 +294,17 @@ KakaoMapProvider
 Kakao APIs
 ```
 
-Planner, workflow, state management, spatial operator 구조는 가능한 한 원본 코드와 동일하게 유지한다.
+The planner, workflow, state management, and spatial-operator structure should remain as close as
+possible to the original code.
 
-이를 통해 성능 차이가 Spatial-Agent 자체 변경이 아니라 **지도 환경 변화에 따른 generalization 결과**로 해석될 수 있도록 한다.
+This makes any performance difference interpretable as a **generalization result caused by the
+map environment**, rather than as a consequence of unrelated changes to Spatial-Agent itself.
 
 ---
 
 ## 9. Spatial Operators
 
-API retrieval과 deterministic spatial calculation을 분리한다.
+Separate API retrieval from deterministic spatial computation.
 
 ### Retrieval Tools
 
@@ -314,7 +326,7 @@ Route Comparison
 Travel-Time Comparison
 ```
 
-예:
+Example:
 
 ```text
 Kakao Place Search
@@ -328,44 +340,44 @@ Distance Comparison
 Answer
 ```
 
-Spatial-Agent의 기존 operator 구현을 우선 재사용하고, Kakao 데이터 형식과 호환되지 않는 부분만 수정한다.
+Reuse Spatial-Agent's existing operators where possible, modifying only the parts incompatible
+with Kakao's data format.
 
 ---
 
 ## 10. Benchmark Dataset
 
-### MVP 범위
+### MVP Scope
 
-**본 구현 단계에서는 전체 Benchmark Dataset을 제작하지 않는다.**
+**The complete benchmark dataset is not created during this implementation phase.**
 
-Dataset 구축은 별도의 후속 연구 단계로 분리한다.
+Dataset construction is a separate follow-up research phase.
 
-현재 단계에서는 시스템이 정상 작동하는지를 확인하기 위한 **소수의 sample questions만 작성한다.**
+At this stage, create only a **small number of sample questions** to verify that the system works.
 
-권장:
+Recommended coverage:
 
 ```text
-nearby / poi / routing / trip과 함께
-type / direction / distance / radius 유형을 지원한다.
+Support nearby / poi / routing / trip, together with
+type / direction / distance / radius question types.
 
-총 약 8~12문항
+Approximately 8–12 questions in total.
 ```
 
-이 sample dataset의 목적은:
+The sample dataset is intended to verify:
 
-- Kakao API integration 확인
-- ReAct tool-call 확인
-- Spatial-Agent workflow 확인
-- answer evaluation pipeline 확인
-- 두 Agent가 동일 문제를 처리할 수 있는지 확인
-
-이다.
+- Kakao API integration
+- ReAct tool calls
+- Spatial-Agent workflow
+- Answer-evaluation pipeline
+- Whether both agents can process the same questions
 
 ### Sample Schema
 
-MapEval-API 형식을 참고한다.
+Follow the MapEval-API format.
 
-`answer`는 `options`의 0-based index이며, 에이전트 출력과 로그·보고서도 같은 기준을 사용한다.
+`answer` is a 0-based index into `options`; agent outputs, logs, and reports use the same
+convention.
 
 ```json
 {
@@ -382,58 +394,58 @@ MapEval-API 형식을 참고한다.
 }
 ```
 
-필요한 경우 개발용 metadata를 추가할 수 있다.
+Development metadata may be added when needed.
 
 ```json
 {
-  "region": "서울",
+  "region": "Seoul",
   "difficulty": "easy",
   "verified_at": "YYYY-MM-DD"
 }
 ```
 
-단, 이러한 metadata는 Agent input에 포함하지 않는다.
+This metadata must not be included in the agent input.
 
 ---
 
-## 11. 향후 Benchmark Dataset 구축
+## 11. Future Benchmark Dataset
 
-전체 한국형 benchmark dataset 제작은 MVP 완료 후 별도 단계에서 수행한다.
+Build the complete Korean benchmark dataset in a separate phase after the MVP is complete.
 
-향후 고려 대상:
+Future considerations:
 
-- 전국 지역 분포
-- 서울 편중 방지
-- POI category diversity
-- `nearby / poi / routing / trip / type / direction / distance / radius` 균형
-- easy / medium / hard 난이도
-- single-hop / multi-hop reasoning
-- 정답 검증
-- API 변화에 대한 benchmark consistency
-- 데이터 저장 및 Kakao API 이용정책 검토
+- Geographic coverage across the country
+- Avoiding excessive concentration in Seoul
+- POI-category diversity
+- Balance across `nearby / poi / routing / trip / type / direction / distance / radius`
+- Easy / medium / hard difficulty
+- Single-hop / multi-hop reasoning
+- Answer verification
+- Benchmark consistency under API changes
+- Data storage and Kakao API usage-policy review
 
-최종 목표 규모는 별도 dataset design 단계에서 결정한다.
+The final dataset size will be decided during a separate dataset-design phase.
 
 ---
 
-## 12. 평가 기능
+## 12. Evaluation Features
 
-MVP evaluation에서는 다음을 기록한다.
+The MVP evaluation records the following.
 
 ### Primary Metric
 
-- Multiple-choice Accuracy
+- Multiple-choice accuracy
 
 ### Additional Metrics
 
-- classification별 Accuracy
-- tool-call 횟수
-- Kakao API 호출 횟수
-- reasoning step 수
-- execution failure
-- latency
+- Accuracy by classification
+- Number of tool calls
+- Number of Kakao API calls
+- Number of reasoning steps
+- Execution failures
+- Latency
 
-예:
+Example:
 
 ```text
 Question ID: routing_001
@@ -453,7 +465,7 @@ API Calls: 3
 
 ---
 
-## 13. Repository 구조
+## 13. Repository Structure
 
 ```text
 k-mapeval/
@@ -488,11 +500,11 @@ k-mapeval/
 
 ---
 
-## 14. 구현 단계
+## 14. Implementation Phases
 
 ### Phase 1 — Reference Code Analysis
 
-다음 repository의 코드를 분석하고 대응 관계를 정리한다.
+Analyze the following repositories and document their correspondence:
 
 ```text
 MapEval/MapEval-API
@@ -500,7 +512,7 @@ MapQaTor/mapqator-backend
 ecerybao/Spatial-Agent
 ```
 
-특히 다음 관계를 파악한다.
+In particular, identify these relationships:
 
 ```text
 MapEval Tool
@@ -518,39 +530,39 @@ K-MapEval Evaluator
 
 ### Phase 2 — KakaoMapProvider
 
-- `MapProvider` interface 구현
-- Kakao Local API 연결
-- Kakao Mobility API 연결
-- response normalization 구현
-- API error handling 구현
+- Implement the `MapProvider` interface
+- Connect to the Kakao Local API
+- Connect to the Kakao Mobility API
+- Normalize API responses
+- Implement API error handling
 
 ### Phase 3 — Sample Dataset
 
-- MapEval-API schema 참고
-- 4개 classification별 2~3개 sample 작성
-- 약 8~12문항만 구성
-- 사람이 직접 정답 검증
+- Follow the MapEval-API schema
+- Write 2–3 samples for each of four classifications
+- Build only approximately 8–12 questions
+- Verify answers manually
 
-**전체 benchmark dataset은 이 단계에서 제작하지 않는다.**
+**Do not build the complete benchmark dataset in this phase.**
 
 ### Phase 4 — ReAct Baseline
 
-- MapEval-API ReAct implementation 참고
-- 동일한 tool 구조 재현
-- KakaoMapProvider 연결
-- final answer parsing 구현
+- Use the MapEval-API ReAct implementation as a reference
+- Reproduce the same tool structure
+- Connect `KakaoMapProvider`
+- Implement final-answer parsing
 
 ### Phase 5 — Spatial-Agent Porting
 
-- Spatial-Agent repository fork 또는 code reuse
-- `GoogleMapsClient` dependency 제거
-- `KakaoMapProvider` 연결
-- 기존 spatial operators 호환
-- 기존 workflow 최대한 유지
+- Fork or reuse the Spatial-Agent repository
+- Remove the `GoogleMapsClient` dependency
+- Connect `KakaoMapProvider`
+- Make the existing spatial operators compatible
+- Preserve the existing workflow as far as possible
 
 ### Phase 6 — MVP Evaluation
 
-동일 sample question에 대해:
+Run both agents on the same sample questions:
 
 ```text
 ReAct + Kakao
@@ -558,55 +570,56 @@ vs
 Spatial-Agent + Kakao
 ```
 
-를 실행한다.
-
-이 단계의 목적은 통계적으로 유의한 성능 검증이 아니라 **전체 evaluation pipeline의 feasibility 확인**이다.
+This phase is intended to verify **the feasibility of the complete evaluation pipeline**, not to
+produce statistically significant performance results.
 
 ### Phase 7 — Full Benchmark
 
-MVP가 정상 동작한 이후 별도 dataset 구축 과정을 거쳐 본 실험을 수행한다.
+After the MVP works, build a separate dataset and conduct the main experiment.
 
 ---
 
-## 15. MVP 완료 조건
+## 15. MVP Completion Criteria
 
-다음을 만족하면 구현 MVP가 완료된 것으로 본다.
+The implementation MVP is complete when all of the following are satisfied:
 
-- MapEval 관련 코드 구조 분석 완료
-- Spatial-Agent 코드 구조 분석 완료
-- `KakaoMapProvider` 구현
-- Kakao Local API 호출 가능
-- Kakao Mobility API 호출 가능
-- canonical response schema 구현
-- MapEval-style ReAct Agent 실행 가능
-- Kakao 기반 Spatial-Agent 실행 가능
-- 8~12개의 sample questions 준비
-- 동일 sample에 대해 두 Agent 평가 가능
-- Accuracy / tool calls / API calls 기록 가능
+- MapEval-related code structure has been analyzed
+- Spatial-Agent code structure has been analyzed
+- `KakaoMapProvider` is implemented
+- Kakao Local API calls work
+- Kakao Mobility API calls work
+- A canonical response schema is implemented
+- The MapEval-style ReAct Agent runs
+- The Kakao-based Spatial-Agent runs
+- 8–12 sample questions are prepared
+- Both agents can be evaluated on the same samples
+- Accuracy, tool calls, and API calls are recorded
 
-**수백 문항 규모의 Benchmark Dataset 구축은 MVP 완료 조건에 포함하지 않는다.**
+**Building a benchmark dataset with hundreds of questions is not part of the MVP completion
+criteria.**
 
 ---
 
-## 16. 최종 산출물
+## 16. Final Deliverables
 
-MVP 단계의 최종 산출물은 다음과 같다.
+The MVP deliverables are:
 
 ```text
 1. KakaoMapProvider
-   Kakao 기반 공통 spatial data interface
+   A Kakao-based common spatial-data interface
 
 2. MapEval-style ReAct Baseline
-   기존 MapEval 코드를 참고한 한국형 baseline
+   A Korean baseline informed by the existing MapEval code
 
 3. Kakao Spatial-Agent
-   기존 Spatial-Agent를 Kakao 환경으로 porting
+   A port of Spatial-Agent to the Kakao environment
 
 4. Sample Evaluation Dataset
-   시스템 검증용 8~12개 문항
+   8–12 questions for system validation
 
 5. Common Evaluator
-   ReAct와 Spatial-Agent 비교 실행 환경
+   An execution environment for comparing ReAct and Spatial-Agent
 ```
 
-이후 별도의 Benchmark Dataset 구축 단계를 통해 한국형 MapEval benchmark를 확장하고 본격적인 성능 비교를 수행한다.
+The Korean MapEval benchmark will be expanded and evaluated in earnest through a separate
+benchmark-dataset construction phase.

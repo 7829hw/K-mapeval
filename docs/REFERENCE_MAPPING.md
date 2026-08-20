@@ -559,3 +559,52 @@ Two deviations, both because we have no annotators and one because upstream leak
 - `Evaluator2.py` prepends "Option0: Unanswerable" only when a row is unanswerable, which tells the
   model the answer before it reads the question. Here "주어진 지도 정보로는 알 수 없음" is an
   ordinary option: gold on the 7 unanswerable rows and a distractor on 22 answerable ones.
+
+## What v4 measured, including the part that refutes the diagnosis
+
+First paired run, `reports/test_20260820T011219Z.json` (ReAct) and `test_20260820T014038Z.json`
+(Spatial-Agent), prompting-only, `--react-tools mapeval`, provider kakao:
+
+```
+no-tool floor  35/100
+ReAct          89/100
+Spatial-Agent  91/100
+```
+
+**The option-set bypass was not what made v2 easy.** Closing it — 45 of 100 rows now answer with a
+value, and the constrained families punish both name-reading and proximity — moved the floor from
+31 to 35 and the accuracies from 91/96 to 89/91. The families with the lowest floors are the ones
+the agents score highest on: `routing_turn_count` floor 0/7 against 7/7 and 7/7,
+`trip_total_distance` floor 1/7 against 7/7 and 7/7. So the questions do require the map, the
+agents use it, and they are simply good at it. That correction stands against the hypothesis in the
+section above, which predicted a substantial drop.
+
+Two things it did establish:
+
+- **The architectures are indistinguishable here.** 83 questions both answer, 3 neither, 6 ReAct
+  only, 8 Spatial-Agent only — exact McNemar p = 0.79.
+- **A graph that must end in a Measure cannot refuse.** All three of Spatial-Agent's losses to
+  ReAct outside the noise are `unanswerable_*` rows: ReAct reads the options, finds the map silent
+  and picks the refusal; the GeoFlow pipeline composes a graph, executes it and reports a number.
+  That is an architectural property worth a line in a write-up, and it is the opposite of the
+  paper's direction.
+
+What is left to explain the gap with MapEval's reported numbers, in the order the evidence supports:
+
+1. **The evidence layer never fails at plumbing.** Upstream's agent threads `place_id` *strings*
+   parsed out of langchain's text protocol through a REST backend: `PlaceSearch` returns an id,
+   every other tool consumes one, and dropping or garbling it is a whole error class. Ours passes
+   normalized `Place` objects, accepts names and coordinates interchangeably, and normalizes every
+   place-typed argument. Measured on this run, only 5.9% of ReAct's tool calls and 1.1% of
+   Spatial-Agent's returned an error at all. That difference sits *below* both agents, which is
+   exactly why both land near 90 — and porting it faithfully (ids only, text returns) is the one
+   remaining change that would move these numbers.
+2. **The attribute half of MapEval-API cannot be ported.** "Can I visit at 5 PM Saturday?", "a
+   restaurant rated 4.8+", "does it serve dinner" — Kakao Local publishes no rating, price level or
+   opening hours. Those are where MapEval's models actually fail, and here they exist only as the
+   7 unanswerable rows.
+3. **The questions are templated.** No colloquial referring expressions ("the hospital", "the
+   lake"), no typos, and every place named as Kakao stores it, so the question text never makes
+   resolution hard.
+4. **The model is current.** `nvidia/Qwen3.6-35B-A3B-NVFP4` against the paper's 2024 frontier
+   models, on a benchmark whose measure is exact arithmetic over exact lookups.

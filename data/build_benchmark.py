@@ -31,7 +31,7 @@ from benchmark_core import (
     wa,
 )
 
-from src.tools.spatial import SpatialOperatorRegistry
+from data._toolkit.spatial import SpatialOperatorRegistry
 
 SEED = 20260818
 OUT_PATH = Path(__file__).resolve().parents[1] / "dataset" / "seoul_kmapeval_v2_mcq_100.jsonl"

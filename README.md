@@ -1,79 +1,57 @@
-# K-MapEval
+# K-MapEval — upstream 코드 그대로, API만 Kakao로
 
-MapEval 방식 ReAct와 Spatial-Agent의 공간 추론 성능을 같은 조건으로 비교하는 연구용 MVP입니다. 공통 provider·도구·평가 파이프라인을 제공하며, 독립변수는 에이전트 구조 하나뿐입니다.
+MapEval 방식 **ReAct** 베이스라인과 **Spatial-Agent(GeoFlow)** 를 한국어 지도 객관식 문항에서
+비교하는 연구용 MVP입니다.
 
-근거(evidence) 출처는 실행 단위로 하나만 선택되고 서로 섞이지 않습니다.
+이 브랜치(`upstream-kakao`)의 전제는 하나입니다. **두 에이전트는 원본 구현을 그대로 쓰고,
+바뀌는 것은 지도 API뿐입니다.**
 
-- `context` (기본값): 데이터셋 **전체**의 context로 만든 corpus 하나를 `ContextMapProvider`가 API 대신 제공합니다. 원본 Spatial-Agent의 local context cache(`data/build_cache.py` → `context_cache.db`)를 이식한 것입니다. context는 에이전트가 아니라 **provider**에 주입되므로 두 에이전트 모두 동일한 도구 호출을 통해서만 근거에 접근합니다.
-- `hybrid`: 위 corpus를 먼저 보고, 없는 것만 Kakao 실호출로 넘깁니다. 원본이 cache miss를 Google Maps로 넘기는 것과 같은 구성입니다.
-- `kakao`: Kakao Local / Kakao Mobility 실호출과 SQLite 캐시만 사용합니다.
+| | 원본 | 이 저장소 |
+| --- | --- | --- |
+| Spatial-Agent | [`ecerybao/Spatial-Agent`](https://github.com/ecerybao/Spatial-Agent) @ `6876bba` | `src/spatial_agent/` — 기계적 rename 외 byte-identical |
+| ReAct 베이스라인 | [`MapEval/MapEval-API`](https://github.com/MapEval/MapEval-API) @ `35d481a` | `src/mapeval_api/` — `Evaluator2.py`는 무수정 vendoring, `FormattedTools.py`가 이식분 |
+| 지도 API | Google Maps (Places / Directions / Distance Matrix / Geocoding / Time Zone) | Kakao Local + Kakao Mobility (`src/kakao_maps.py`) |
 
-지원 classification은 `nearby`, `poi`, `routing`, `trip`, `type`, `direction`,
-`distance`, `radius`입니다. `answer`와 에이전트의 선택지 번호는 모두 `options`의
-0-based index입니다.
+따라서 이 브랜치가 내는 수치는 **원본 아키텍처에 귀속됩니다**. 재구현의 성능이 아닙니다.
+
+> `main` 브랜치는 다른 실험입니다. 자체 tool registry·operator·grounding을 갖춘 처음부터의
+> 포팅이고, 두 브랜치의 수치는 서로 다른 질문에 답하므로 **합산하면 안 됩니다.**
+
+원본과의 **모든** 차이는 `docs/UPSTREAM_MAPPING.md`에 기록되어 있습니다. 거기에 없는 차이는
+버그입니다.
 
 ## 구조
 
 ```text
-K-MapEval/
-├── main.py              # 단일 실행 진입점
+k-mapeval/
+├── main.py                  # 단일 실행 진입점
 ├── src/
-│   ├── agent/           # ReAct / Spatial-Agent
-│   ├── tools/           # context/Kakao provider, SQLite cache, 공간 연산
-│   ├── config.py        # .env 설정
-│   ├── dataset.py       # JSONL 로더
-│   ├── evaluator.py     # 평가 및 결과 기록
-│   └── models.py        # Place / Route 스키마
-├── dataset/             # 평가 데이터셋
-├── tests/               # 단위 테스트
-├── logs/                # 문항별 실행 로그(자동 생성)
-└── reports/             # 배치 평가 보고서(자동 생성)
+│   ├── kakao_maps.py        # Google Maps 클라이언트 형태를 유지한 Kakao 클라이언트 (교체의 전부)
+│   ├── spatial_agent/       # ecerybao/Spatial-Agent @ 6876bba (vendoring)
+│   │   ├── agent/           #   operators / executors / planner / nodes / state — 무수정
+│   │   ├── tools/kakao_maps.py  #   google_maps.py 자리, src/kakao_maps.py 재수출
+│   │   └── utils/           #   optimization(TSP-TW) / logging — 무수정
+│   ├── mapeval_api/         # MapEval/MapEval-API @ 35d481a
+│   │   ├── Evaluator2.py    #   무수정 vendoring (참조용, 실행되지 않음)
+│   │   └── FormattedTools.py#   5개 도구 — 포맷터는 그대로, 호출부만 Kakao로
+│   ├── agent/               # 위 둘을 Evaluator에 물리는 얇은 어댑터
+│   ├── evaluator.py         # 4-worker 동시 실행, 문항 단위 재시도, 보고서
+│   ├── config.py / dataset.py / logging.py / metrics.py / parsing.py
+├── data/_toolkit/           # 데이터셋 빌더/검증기 전용. src/에서 import 금지
+├── dataset/                 # 평가 데이터셋 (main에서 생성·검증됨)
+├── tests/                   # Kakao·LLM 모두 stub
+├── logs/  reports/          # 자동 생성, gitignored
 ```
 
-두 에이전트 모두 `Place`와 `Route` 정규화 스키마만 봅니다. 정답, classification, region, difficulty, verified_at, 그리고 **context**는 에이전트 입력에 포함되지 않습니다. `BenchmarkItem.agent_input()`은 `(question, options)`만 반환하고, context는 실행 시작 시 provider의 corpus로만 적재됩니다. 원본 Spatial-Agent도 context 없는 MapEval-API로 평가하고 context는 캐시 구축에만 씁니다.
+두 에이전트는 **worker마다 하나씩의 동일한 `KakaoMapsClient`** 를 읽습니다. 두 구조 간 정확도
+차이가 "본 증거가 달라서" 생기는 일이 없도록 하는 것이 이 배치의 목적입니다.
 
-Spatial-Agent는 `공간 개념/기능 역할 분석 → 매크로 검색 → ConceptGraph 구성 →
-operator-concept hypergraph factorization → 5개 제약 검증 → 위상순 실행 → 근거 기반 선택`
-순서로 동작합니다. 실행 결과 개념은 operator output에, 반경·방향·카테고리 같은 보조
-상수 개념은 논문의 factor node에 해당하는 hyperedge parameter/input에 바인딩됩니다.
-G5는 모든 노드에 대해 `EXTENT/TEXTENT → node → MEASURE` 양쪽 도달성을 검사합니다.
-LLM이 부여한 절차 역할은 실제 데이터 의존 순서를 위반하지 않도록 정규화합니다.
-그래프가 잘못되면 한 번 수리한 뒤 다시 factorization·검증합니다. Routing/Trip은
-`distance_matrix`, `aggregate_route_groups`를 사용해
-선택지별 경로와 다중 구간 합계를 보존하므로 단계 상한 때문에 계획 뒷부분이 잘리지
-않습니다. EVENT/NETWORK/PROPORTION 및 시간/TSP-TW 연산도 실행 계층에 포함되지만 현재
-100문항 MCQ가 모두 이를 직접 평가하지는 않습니다. 논문의 SFT+DPO와 임베딩 검색은
-구현하지 않았으며, Kakao 데이터로 평가하므로 논문 수치 재현을 주장하지 않습니다.
-
-## SQLite 캐시
-
-두 에이전트는 동일한 `KakaoMapProvider`와 SQLite 캐시를 사용합니다.
-
-```text
-ReAct ───────┐
-             ├─→ KakaoMapProvider → SQLite cache
-Spatial ─────┘                         │
-                                   cache miss
-                                       ▼
-                                   Kakao API
-```
-
-`search_place`, `geocode`, `reverse_geocode`, `nearby_search`, `place_details`, `directions` 및 이를 사용하는 `travel_time`은 항상 캐시를 먼저 조회합니다. 경유지 경로와 turn-by-turn guide도 같은 SQLite 캐시에 저장됩니다. 기본 DB는 `data/kakao_cache.db`, 기본 TTL은 24시간입니다. `.env`에서 다음 값을 바꿀 수 있습니다.
-
-장소/반경 검색은 Kakao Maps Local의 공식 `keyword.json`·`category.json`을 사용합니다.
-자동차 경로는 Kakao Maps의 도보·대중교통 API가 아니라 Kakao Mobility의 공식
-`/v1/directions`를 사용하며, 벤치마크에 필요한 거리·시간 요약만 요청합니다.
-
-```ini
-KAKAO_CACHE_DB_PATH=data/kakao_cache.db
-KAKAO_CACHE_TTL_SECONDS=86400
-```
-
-TTL을 `0`으로 설정하면 만료하지 않습니다. DB에는 정규화된 `Place`/`Route`와 캐시 키 생성용 요청 인자만 저장하며 Kakao API 키, 원본 응답, LLM 프롬프트는 저장하지 않습니다. 평가 결과에는 `cache_hits`, `cache_misses`, 실제 `api_calls`가 별도로 기록됩니다.
+정답·classification·region·difficulty·verified_at은 에이전트 입력에 포함되지 않습니다.
+`BenchmarkItem.agent_input()`은 `(question, options)`만 반환합니다.
 
 ## 설치
 
-Python 3.11 이상을 권장합니다.
+Python 3.11 이상.
 
 ```bash
 python -m venv .venv
@@ -82,61 +60,76 @@ pip install -e '.[dev]'
 cp example.env .env
 ```
 
-`.env`에 LLM과 `KAKAO_REST_API_KEY`를 입력합니다. 하나의 Kakao REST API 키를 Local API와 Mobility API에 함께 사용합니다. `LLM_BASE_URL`을 비워두면 OpenAI 기본 endpoint를 사용하고, 입력하면 OpenAI 호환 Chat Completions endpoint를 사용합니다. Temperature, 출력 토큰 수, 요청 timeout은 별도로 전달하지 않고 연결된 LLM/API의 기본값을 사용합니다. `MAX_REASONING_STEPS`로 문항당 reasoning/tool-call 단계 상한을 설정할 수 있습니다. `BENCHMARK_CONCURRENCY`의 기본값은 `4`이며, 각 worker가 독립 LLM 클라이언트·에이전트·Kakao provider를 사용해 네 문항을 동시에 처리합니다.
+`.env`에 LLM 설정과 `KAKAO_REST_API_KEY`를 넣습니다. Kakao REST API 키 하나를 Local API와
+Mobility API에 함께 씁니다. `LLM_BASE_URL`을 비우면 OpenAI 기본 endpoint, 채우면 OpenAI 호환
+Chat Completions endpoint를 씁니다.
+
+원본 두 스택이 같이 설치됩니다. MapEval-API는 langchain 0.3의 고전 agent API
+(`initialize_agent` + `STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION`)를, Spatial-Agent는
+`langgraph` StateGraph와 `ortools`를 씁니다.
 
 ## 실행
 
 ```bash
-python main.py --agent react       # dataset/seoul_mapeval_v1_mcq_100.jsonl, context 근거
-python main.py --agent spatial
-python main.py --agent both
+python main.py --agent both                   # dataset/seoul_kmapeval_v4_mcq_100.jsonl
+python main.py --agent react
 python main.py --agent spatial --concurrency 4
+python main.py --agent both --ids seoul_kmapeval_v4_000 seoul_kmapeval_v4_024
+python main.py --agent react --verbose-agent  # 원본 Evaluator2와 같은 chain-of-thought 출력
 ```
 
-일부 문항만 실행할 수 있습니다.
+실행은 실제 LLM 토큰과 Kakao 쿼터를 씁니다. 문항별 trace는
+`logs/<UTC>_id<문항ID>_<질문-slug>.log`, 배치 보고서는 `reports/test_<UTC>.json`
+(`metadata` / `statistics` / `results`)에 남습니다. `correct_answer`/`predicted_option`은
+모두 0-based이고, 로그에는 API 키가 들어가지 않습니다.
 
-```bash
-python main.py --agent both --ids seoul_mapqa_v0_000907 seoul_mapqa_v0_000009
+보고서 `metadata`에는 `agent_type`, `llm_model`, `llm_base_url`, `code_revision`과 두 원본
+리비전이 기록됩니다.
+
+## 캐시
+
+`src/kakao_maps.py`가 Kakao 응답과, `get_place_details`가 읽는 place 테이블을 SQLite에
+저장합니다. Kakao Local에는 **place details endpoint가 없어서** 검색 응답이 곧 그 장소에 대한
+Kakao의 전부이고, 그래서 검색이 돌려준 장소를 직접 보관합니다.
+
+```ini
+KAKAO_CACHE_DB_PATH=data/kakao_cache.db   # 비우면 캐시 비활성화
+KAKAO_CACHE_TTL_SECONDS=86400             # 0이면 만료 없음
 ```
 
-근거 출처는 `--provider`로 고릅니다. 기본값 `auto`는 모든 행이 context를 가지면 `context`를,
-아니면 `kakao`를 씁니다. `kakao`와 `hybrid`에만 `KAKAO_REST_API_KEY`가 필요합니다.
+테이블 이름은 `kakao_responses` / `kakao_places`로, `main` 브랜치가 만든 같은 경로의 DB를
+잘못 읽지 않도록 분리되어 있습니다. 평가 결과에는 `cache_hits`, `cache_misses`, 실제
+`api_calls`가 따로 기록됩니다.
 
-```bash
-python main.py --agent both --provider hybrid
-python main.py --agent both --provider kakao
-```
+## 이 브랜치가 측정할 수 없는 것
 
-로그 생성 방식은 Spatial-Agent 원본과 같습니다. 각 문항의 실행 trace는
-`logs/<UTC>_id<문항ID>_<질문-slug>.log`에 기록되고, 배치가 끝나면
-`reports/test_<UTC>.json` 보고서 하나가 생성됩니다. 보고서는 `metadata`, `statistics`,
-`results`로 구성됩니다. 입력 JSONL, 에이전트 출력, 문항 로그와 보고서의
-`correct_answer`/`predicted_option`은 모두 0-based입니다. 로그에는 API 키가 들어가지
-않습니다.
+수치를 아키텍처 결과로 읽기 전에 확인해야 합니다.
 
-## 평가 항목
+- **평점 / 가격대 / 영업시간.** Kakao Local이 제공하지 않습니다. MapEval의 attribute 계열
+  문항은 여기서는 어려운 게 아니라 **답이 없습니다**. 그래서 `min_rating`·`open_now`는 받되
+  무시합니다 — 적용하면 후보가 전부 삭제되고, 빈 목록은 생성 단계가 추측하는 대상이 됩니다.
+- **도보 / 자전거 / 대중교통 경로.** Kakao Mobility는 자동차만 제공하므로, 해당 모드는 자동차
+  경로로 답하지 않고 말로 거절합니다.
+- **한국 밖.**
+- **Spatial-Agent 쪽 LLM 장애.** 원본 `process_question`이 모든 예외를 삼키므로 그쪽
+  `llm_unavailable_count`는 과소 집계됩니다. ReAct 쪽에는 이 공백이 없습니다.
 
-- 전체 및 classification별 multiple-choice accuracy
-- tool-call, Kakao API-call, reasoning-step 수
-- SQLite cache hit/miss 수
-- latency와 failure 수
-- 문항별 normalized arguments, 실행 상태, 예측값
-
-`dataset/seoul_mapeval_v1_mcq_100.jsonl`이 평가 데이터셋입니다. OSM 기반 서울 pool인
-`dataset/seoul_mapeval_v1.json`에서 seed `20260818`으로 template별 quota를 두고 100문항을 뽑았고,
-행마다 anchor가 서로 다르며 선택지는 문항 id로 시드된 순서로 섞여 있습니다(원본 생성기가 거리
-선택지를 오름차순 고정으로 만들어 `distance_between` 전체 정답이 index 2였습니다).
-100문항 전부 정답이 context만으로 결정론적으로 유도되는 것을 확인했으므로, 오답은 근거가 아니라
-에이전트의 결과입니다. 보고서 `metadata.provider`에 근거 출처가 기록되며, 출처가 다른 실행 결과는
-합산하지 않습니다.
+SFT+DPO와 임베딩 검색은 구현하지 않은 prompting-only 경로이며, Kakao 데이터로 평가하므로
+어느 논문의 headline 수치 재현도 주장하지 않습니다.
 
 ## 테스트
 
-일반 테스트는 Kakao API를 mock하므로 키나 네트워크가 필요 없습니다.
+Kakao(`httpx.MockTransport`)와 LLM(`FakeListChatModel`)을 모두 stub하므로 키도 네트워크도
+필요 없습니다.
 
 ```bash
 pytest
 ruff check .
+
+# vendoring된 트리가 원본에서 벗어나지 않았는지 확인
+diff -r ~/spatial-agent/src/agent src/spatial_agent/agent   # rename만 나와야 함
+diff ~/mapeval-api/Evaluator2.py src/mapeval_api/Evaluator2.py
 ```
 
-원본 코드와의 대응 및 의도적인 차이는 `docs/REFERENCE_MAPPING.md`에 정리되어 있습니다.
+작업 지침은 `AGENT.md`, 원본과의 대응·차이는 `docs/UPSTREAM_MAPPING.md`,
+데이터셋의 출처와 구축 규칙은 `docs/REFERENCE_MAPPING.md`에 있습니다.

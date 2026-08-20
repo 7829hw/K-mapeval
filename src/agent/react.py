@@ -1,143 +1,203 @@
+"""The MapEval-API ReAct baseline, driven by this repository's Evaluator.
+
+The agent itself is upstream's. `mapeval-api/Evaluator2.py` (35d481a) builds it in nine lines
+and this adapter reproduces those nine, element by element, so a difference in the score is a
+difference in the map and not in the harness:
+
+- line 33, the five tools it instantiates
+      -> `BASELINE_TOOL_TYPES`
+- `initialize_agent(..., STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION)`, with
+  `handle_parsing_errors=True` and `return_intermediate_steps=True`
+      -> `ReactAgent.__init__`
+- lines 58-76, the "Choose the answer ... (1/2/3/4)" prompt and its one-based option list
+      -> `build_prompt`
+- line 132's caret span, then line 14's first digit
+      -> `parse_upstream_answer`
+- `ground_truth = item["answer"]["correct"] + 1`
+      -> the one-based conversion in `answer`
+
+Two things upstream's loop does are the harness's job here and are not reproduced: it posts
+each verdict to `http://localhost:5000/api/evaluation/`, and it sleeps 60 s between questions.
+`src/evaluator.py` writes the report and paces the run instead.
+
+One deliberate index change. Upstream numbers its options from 1 and stores gold as
+`correct + 1`; this repository is 0-based everywhere (`AGENT.md`). The prompt the model sees
+is still upstream's one-based text — changing it would change the task — and the conversion
+happens once, on the way out, in `answer`.
+
+`Option0: Unanswerable` is not prepended. Upstream adds it only on rows whose classification
+is None, which announces the answer before the question is read; the benchmarks here carry
+their refusal as an ordinary option instead.
+"""
+
 from __future__ import annotations
 
-import json
+import re
 import time
 from typing import Any
 
-from src.agent.base import (
-    AgentResult,
-    BenchmarkAgent,
-    find_provider_failure,
-    format_question,
-)
-from src.llm import ChatClient, LLMUnavailableError
-from src.parsing import parse_answer
-from src.tools import ToolRegistry
+from langchain.agents import AgentType, initialize_agent
+from openai import APIConnectionError, APIStatusError, APITimeoutError
 
-# This agent is a *port* of MapEval-API's baseline, and it is finished. Upstream is
-# `mapeval-api/Evaluator2.py` (35d481a): a stock langchain
-# `initialize_agent(tools, llm, AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION,
-# handle_parsing_errors=True, return_intermediate_steps=True)` over the five tools
-# `FormattedTools.py` defines, prompted with the question, the options, and the answer format.
-# Element by element:
-#
-#   upstream                                   | here
-#   -------------------------------------------|--------------------------------------------
-#   five tools, constructed in `evaluate()`    | `ToolRegistry.MAPEVAL_BASELINE_TOOLS`
-#   structured-chat JSON action blob in text   | the provider's native tool-call channel
-#   `handle_tool_error=True` on every tool     | `ToolRegistry.invoke` returns errors as
-#                                              |   observations, never as exceptions
-#   `handle_parsing_errors=True`               | an unparsed final answer is a recorded
-#                                              |   `answer_parse_failure`, not a crash
-#   `max_iterations=15` (langchain default)    | `MAX_REASONING_STEPS` (30 in the run env)
-#   1-based options, `^^Option_Number^^`       | 0-based options, `^^N^^` (repo-wide invariant)
-#   question + options + answer format         | `REACT_SYSTEM_PROMPT` + `format_question`
-#
-# **Do not tune it against benchmark results.** Every accuracy gap this agent shows is the
-# finding; closing one by editing its prompt, its budget, or the description of a parameter it
-# reaches would make the baseline a function of the test set. The two places that stay live are
-# the ones shared with the other architecture — the provider below the tools, and the tool
-# contracts both agents read — and a change there has to be argued from the provider, never from
-# a question ReAct got wrong. Anything MapEval's own baseline does not do belongs on the
-# Spatial-Agent side, where it is an architectural stage under measurement.
-#
-# The prompt itself carries what MapEval's carries and nothing more: role, evidence discipline,
-# and the wire format. An earlier revision named the benchmark's question taxonomy and told the
-# agent which tool each shape wants, which is planning handed to the baseline in prose — the same
-# mistake as handing it the aggregation tools, in another currency. Tool contracts live in the
-# tool descriptions, where both agents read them.
-REACT_SYSTEM_PROMPT = """You are the MapEval-style ReAct baseline for Korean spatial questions.
-Use the map tools to gather evidence and reason over only the question and candidate options.
-Select one 0-based option. Never invent a place ID. When you have enough evidence, answer exactly as
-^^Option_Number^^. You are not given and must not ask for the gold answer."""
+from src.agent.base import AgentResult, BenchmarkAgent
+from src.kakao_maps import KakaoMapsClient
+from src.llm import LLMUnavailableError
+from src.mapeval_api.FormattedTools import (
+    DirectionsTool,
+    NearbyPlacesTool,
+    PlaceDetailsTool,
+    PlaceSearchTool,
+    TravelTimeTool,
+    set_client,
+)
+
+# The five tools `Evaluator2.py` instantiates, in its order. `Tools.py` also defines a
+# `PlaceIdTool` the evaluator never constructs, and `PlaceSearchTool` is itself documented as
+# "Get place ID for a given location" — the two are one primitive under two names, not a
+# sixth tool. Read `Evaluator2.py`, not `Tools.py`, before adding to this list.
+BASELINE_TOOL_TYPES = (
+    PlaceSearchTool,
+    PlaceDetailsTool,
+    NearbyPlacesTool,
+    TravelTimeTool,
+    DirectionsTool,
+)
+
+# Upstream's own request codes stay the agent's problem; everything else is the endpoint
+# saying "not now", which the Evaluator retries as a whole question.
+REQUEST_STATUS_CODES = frozenset({400, 413, 422})
+
+
+def build_prompt(question: str, options: list[str]) -> str:
+    """`Evaluator2.py` lines 58-76, verbatim, including its one-based option numbers."""
+
+    prompt = (
+        question
+        + "Choose the answer from the following options (1/2/3/4). So, the output format will be "
+        '"^^Option_Number^^". Choose the correct answer from the following options: '
+    )
+    for i in range(len(options)):
+        if options[i] == "":
+            break
+        prompt = prompt + "Option" + str(i + 1) + ": " + options[i] + ", "
+    return prompt
+
+
+def parse_upstream_answer(output: str) -> int | None:
+    """`Evaluator2.py` lines 132 and 14: the `^^...^^` span, then its first digit."""
+
+    match = re.search(r"\^\^(.*?)\^\^", output or "")
+    if not match:
+        return None
+    for char in match.group(1):
+        if char.isdigit():
+            return int(char)
+    return None
 
 
 class ReactAgent(BenchmarkAgent):
+    """MapEval-API's structured-chat ReAct agent over the five Kakao-backed primitives."""
+
     agent_type = "react"
 
-    def __init__(self, llm: ChatClient, tools: ToolRegistry, *, max_steps: int = 8) -> None:
+    def __init__(
+        self,
+        llm: Any,
+        kakao_client: KakaoMapsClient,
+        *,
+        verbose: bool = False,
+        max_iterations: int = 30,
+    ) -> None:
         self.llm = llm
-        self.tools = tools
-        self.max_steps = max_steps
+        self.kakao_client = kakao_client
+        self.tools = [tool_type() for tool_type in BASELINE_TOOL_TYPES]
+        # `initialize_agent`'s own default is 15. Thirty is what this repository has always
+        # given the baseline: on five primitives a four-stop itinerary needs four PlaceSearch
+        # turns plus four TravelTime turns before any arithmetic, and being generous to the
+        # baseline is the conservative direction for the claim under test.
+        self._agent = initialize_agent(
+            self.tools,
+            llm=llm,
+            agent=AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION,
+            verbose=verbose,
+            handle_parsing_errors=True,
+            return_intermediate_steps=True,
+            max_iterations=max_iterations,
+        )
 
     def answer(self, question: str, options: list[str]) -> AgentResult:
-        started = time.perf_counter()
-        api_before = self.tools.provider.api_call_count
-        cache_hits_before = self.tools.provider.cache_hit_count
-        cache_misses_before = self.tools.provider.cache_miss_count
-        tools_before = self.tools.tool_call_count
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": REACT_SYSTEM_PROMPT},
-            {"role": "user", "content": format_question(question, options)},
-        ]
-        trace: list[dict[str, Any]] = []
-        final_text = ""
-        failure_type: str | None = None
-        failure_message: str | None = None
-        reasoning_steps = 0
+        # The tools are pydantic models shared across threads, so the client they read is
+        # bound per thread rather than held on them.
+        set_client(self.kakao_client)
+        self.kakao_client.reset_counters()
+
+        prompt = build_prompt(question, options)
+        started = time.time()
         try:
-            for _ in range(self.max_steps):
-                reasoning_steps += 1
-                response = self.llm.chat(messages, tools=self.tools.schemas())
-                messages.append(response.assistant_message())
-                if not response.tool_calls:
-                    final_text = response.content
-                    break
-                for call in response.tool_calls:
-                    execution = self.tools.invoke(call.name, call.arguments)
-                    observation = execution.observation()
-                    trace.append(
-                        {
-                            "stage": "act",
-                            "tool": call.name,
-                            "arguments": execution.arguments,
-                            **observation,
-                        }
-                    )
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": call.id,
-                            "content": json.dumps(observation, ensure_ascii=False),
-                        }
-                    )
-            if not final_text:
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "Tool budget is exhausted. Select the best-supported option now."
-                        ),
-                    }
-                )
-                reasoning_steps += 1
-                final_text = self.llm.chat(messages).content
-        except LLMUnavailableError as exc:
-            failure_type = "llm_unavailable"
-            failure_message = f"{type(exc).__name__}: {exc}"
-        except Exception as exc:
-            failure_type = "agent_reasoning_failure"
-            failure_message = f"{type(exc).__name__}: {exc}"
-        predicted = parse_answer(final_text, option_count=len(options))
-        if predicted is None and failure_type is None:
-            provider_failure = find_provider_failure(trace)
-            if provider_failure:
-                failure_type = "provider_failure"
-                failure_message = provider_failure
-            else:
-                failure_type = "answer_parse_failure"
-                failure_message = "No valid 0-based option found in the final response"
+            result = self._agent.invoke({"input": prompt})
+        except (APIConnectionError, APITimeoutError) as exc:
+            raise LLMUnavailableError(f"{type(exc).__name__}: {exc}") from exc
+        except APIStatusError as exc:
+            if exc.status_code in REQUEST_STATUS_CODES:
+                raise
+            raise LLMUnavailableError(f"{type(exc).__name__}: {exc}") from exc
+        latency_ms = (time.time() - started) * 1000
+
+        output = str(result.get("output", ""))
+        steps = result.get("intermediate_steps", []) or []
+
+        one_based = parse_upstream_answer(output)
+        predicted_answer = None
+        failure_type = None
+        failure_message = None
+        if one_based is None:
+            failure_type = "answer_parse_failure"
+            failure_message = "No ^^N^^ selection in the final answer"
+        elif 1 <= one_based <= len(options):
+            predicted_answer = one_based - 1
+        else:
+            # Upstream records this as `verdict: invalid`, including its `^^0^^` refusal,
+            # which these benchmarks have no index for.
+            failure_type = "answer_parse_failure"
+            failure_message = f"Selection ^^{one_based}^^ is outside 1..{len(options)}"
+
         return AgentResult(
             agent_type=self.agent_type,
-            predicted_answer=predicted,
-            response=final_text,
-            tool_calls=self.tools.tool_call_count - tools_before,
-            api_calls=self.tools.provider.api_call_count - api_before,
-            cache_hits=self.tools.provider.cache_hit_count - cache_hits_before,
-            cache_misses=self.tools.provider.cache_miss_count - cache_misses_before,
-            reasoning_steps=reasoning_steps,
-            latency_ms=(time.perf_counter() - started) * 1000,
+            # ReAct has no classification stage, so nothing is predicted here. The intent
+            # metric counts only questions an intent was predicted for.
+            predicted_intent=None,
+            predicted_answer=predicted_answer,
+            response=output,
+            tool_calls=len(steps),
+            api_calls=self.kakao_client.api_call_count,
+            cache_hits=self.kakao_client.cache_hit_count,
+            cache_misses=self.kakao_client.cache_miss_count,
+            reasoning_steps=len(steps) + 1,
+            latency_ms=latency_ms,
             failure_type=failure_type,
             failure_message=failure_message,
-            trace=trace,
+            trace=_trace(prompt, steps, output),
         )
+
+
+def _trace(prompt: str, steps: list[Any], output: str) -> list[dict[str, Any]]:
+    """Every tool the run reached, with its normalized arguments and its observation."""
+
+    entries: list[dict[str, Any]] = [{"stage": "prompt", "input": prompt}]
+    for index, step in enumerate(steps):
+        try:
+            action, observation = step
+        except (TypeError, ValueError):
+            entries.append({"stage": "step", "index": index, "raw": str(step)})
+            continue
+        entries.append(
+            {
+                "stage": "tool",
+                "index": index,
+                "tool": getattr(action, "tool", None),
+                "arguments": getattr(action, "tool_input", None),
+                "observation": str(observation),
+            }
+        )
+    entries.append({"stage": "final", "output": output})
+    return entries

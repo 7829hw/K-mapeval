@@ -506,7 +506,7 @@ def poi_bearing_and_distance(
 ) -> list[dict]:
     """Direction *and* straight-line distance in one answer, so one right half is not enough."""
 
-    from src.tools.spatial import SpatialOperatorRegistry
+    from data._toolkit.spatial import SpatialOperatorRegistry
 
     ops = SpatialOperatorRegistry()
     landmarks = pool.of("AT4", "CT1", "SW8")

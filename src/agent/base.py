@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
-
-if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to type checkers
-    from src.tools import ToolRegistry
 
 
 class AgentResult(BaseModel):
@@ -29,44 +26,6 @@ class AgentResult(BaseModel):
 
 class BenchmarkAgent(ABC):
     agent_type: str
-    # Every benchmarked agent owns one; a test double answering from a script owns none.
-    tools: ToolRegistry | None = None
 
     @abstractmethod
     def answer(self, question: str, options: list[str]) -> AgentResult: ...
-
-
-def format_question(question: str, options: list[str]) -> str:
-    rendered = "\n".join(f"Option {index}: {option}" for index, option in enumerate(options))
-    return (
-        f"Question:\n{question}\n\nCandidate options:\n{rendered}\n\n"
-        "Option numbers are 0-based. Return the final selection exactly as "
-        '"^^Option_Number^^", for example ^^1^^.'
-    )
-
-
-def find_provider_failure(value: Any) -> str | None:
-    """Find a serialized provider failure in a nested trace without using tracebacks."""
-
-    provider_error_names = (
-        "ProviderError",
-        "ProviderAuthError",
-        "ProviderRateLimitError",
-        "ProviderTimeoutError",
-        "PlaceNotFoundError",
-        "RouteNotFoundError",
-        "UnsupportedTravelModeError",
-    )
-    if isinstance(value, str) and value.startswith(provider_error_names):
-        return value
-    if isinstance(value, dict):
-        for item in value.values():
-            found = find_provider_failure(item)
-            if found:
-                return found
-    if isinstance(value, list):
-        for item in value:
-            found = find_provider_failure(item)
-            if found:
-                return found
-    return None

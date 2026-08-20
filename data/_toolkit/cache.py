@@ -9,7 +9,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from src.models import Place, Route
+from data._toolkit.models import Place, Route
 
 SCHEMA_VERSION = 1
 _SCHEMA_LOCK = Lock()

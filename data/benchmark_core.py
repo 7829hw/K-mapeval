@@ -16,10 +16,10 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from data._toolkit.kakao import KakaoMapProvider  # noqa: E402
+from data._toolkit.models import Place, Route, RouteStep  # noqa: E402
+from data._toolkit.spatial import haversine_meters  # noqa: E402
 from src.config import Settings  # noqa: E402
-from src.models import Place, Route, RouteStep  # noqa: E402
-from src.tools.kakao import KakaoMapProvider  # noqa: E402
-from src.tools.spatial import haversine_meters  # noqa: E402
 
 __all__ = [  # re-exported so the generator imports one module
     "CATEGORY_NOUNS",

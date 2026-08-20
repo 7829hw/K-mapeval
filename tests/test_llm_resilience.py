@@ -6,14 +6,11 @@ import httpx
 import pytest
 from openai import APIConnectionError, APIStatusError, BadRequestError
 
-from src.agent import ReactAgent, SpatialAgent
 from src.agent.base import AgentResult, BenchmarkAgent
 from src.config import Settings
 from src.dataset import BenchmarkItem
 from src.evaluator import Evaluator
 from src.llm import LLMUnavailableError, OpenAIChatClient
-from src.tools import ToolRegistry
-from tests.test_tools_and_agents import FakeProvider
 
 
 def build_client(**overrides: Any) -> OpenAIChatClient:
@@ -121,23 +118,27 @@ def test_a_request_we_malformed_is_not_retried_and_stays_the_agent_s_problem() -
     assert script.calls == 1
 
 
-class DownEndpointLLM:
-    def chat(self, messages: list[dict[str, Any]], *, tools: Any = None) -> Any:
-        raise LLMUnavailableError("LLM endpoint failed after 5 attempts: APIStatusError: 502")
+def test_a_dead_endpoint_reaches_the_evaluator_as_infrastructure_not_reasoning() -> None:
+    """An outage says nothing about an architecture, so it must not be scored as one.
 
+    The ReAct baseline raises `LLMUnavailableError` out of `answer` (see
+    `tests/test_react_baseline.py`); the Evaluator turns any escaping one into
+    `llm_unavailable` rather than `agent_reasoning_failure`.
+    """
 
-@pytest.mark.parametrize("agent_name", ["react", "spatial"])
-def test_both_agents_report_a_dead_endpoint_as_infrastructure_not_reasoning(
-    agent_name: str,
-) -> None:
-    tools = ToolRegistry(FakeProvider())
-    agent_class = ReactAgent if agent_name == "react" else SpatialAgent
-    agent = agent_class(DownEndpointLLM(), tools, max_steps=3)
+    class DownEndpointAgent(BenchmarkAgent):
+        agent_type = "down"
 
-    result = agent.answer("질문", ["A", "B"])
+        def answer(self, question: str, options: list[str]) -> AgentResult:
+            raise LLMUnavailableError("LLM endpoint failed after 5 attempts: APIStatusError: 502")
 
-    assert result.failure_type == "llm_unavailable"
-    assert result.predicted_answer is None
+    items = [
+        BenchmarkItem(id="a", question="q", options=["x", "y"], answer=0, classification="poi")
+    ]
+    report = Evaluator(DownEndpointAgent(), items, output_dir=None, log_dir="/tmp").run()
+
+    assert report.results[0]["failure_type"] == "llm_unavailable"
+    assert report.results[0]["predicted_option"] is None
 
 
 class DownEndpointAgent(BenchmarkAgent):
@@ -313,19 +314,19 @@ def test_a_missing_place_is_evidence_and_a_timed_out_provider_is_not(tmp_path) -
     from src.evaluator import is_transient_failure
 
     assert is_transient_failure(
-        {"failure_type": "provider_failure", "error": "ProviderTimeoutError: Kakao timed out"}
+        {"failure_type": "provider_failure", "error": "KakaoTimeoutError: Kakao timed out"}
     )
     assert is_transient_failure(
-        {"failure_type": "provider_failure", "error": "ProviderRateLimitError: slow down"}
+        {"failure_type": "provider_failure", "error": "KakaoRateLimitError: slow down"}
     )
     assert not is_transient_failure(
         {
             "failure_type": "provider_failure",
-            "error": "PlaceNotFoundError: No place matched '만화시장'",
+            "error": "KakaoError: No place matched '만화시장'",
         }
     )
     assert not is_transient_failure(
-        {"failure_type": "provider_failure", "error": "ProviderAuthError: bad key"}
+        {"failure_type": "provider_failure", "error": "KakaoAuthError: bad key"}
     )
     assert not is_transient_failure({"failure_type": "agent_reasoning_failure", "error": "boom"})
 
@@ -343,7 +344,7 @@ def test_a_transient_provider_failure_is_asked_again(tmp_path) -> None:
                 return AgentResult(
                     agent_type=self.agent_type,
                     failure_type="provider_failure",
-                    failure_message="ProviderRateLimitError: Kakao rate limit",
+                    failure_message="KakaoRateLimitError: Kakao rate limit",
                 )
             return AgentResult(
                 agent_type=self.agent_type,

@@ -20,10 +20,10 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from data._toolkit.kakao import KakaoMapProvider  # noqa: E402
+from data._toolkit.registry import ToolRegistry  # noqa: E402
+from data._toolkit.spatial import SpatialOperatorRegistry, haversine_meters  # noqa: E402
 from src.config import Settings  # noqa: E402
-from src.tools.kakao import KakaoMapProvider  # noqa: E402
-from src.tools.registry import ToolRegistry  # noqa: E402
-from src.tools.spatial import SpatialOperatorRegistry, haversine_meters  # noqa: E402
 
 DATASET = Path(__file__).resolve().parents[1] / "dataset" / "seoul_kmapeval_v4_mcq_100.jsonl"
 

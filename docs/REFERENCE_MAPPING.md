@@ -1,5 +1,16 @@
 # Reference implementation mapping
 
+> **This document describes the `main` branch**, which is a from-scratch port of both
+> architectures with its own tool registry, operator library and grounding stage. On the
+> `upstream-kakao` branch the agents are upstream's own code with only the map API swapped, and
+> its deviations are recorded in `UPSTREAM_MAPPING.md` instead. Paths named below
+> (`src/agent/react.py`, `src/tools/registry.py`, `src/agent/geoflow.py`, …) refer to `main`.
+>
+> It is kept on this branch for one reason: it is the **provenance of the datasets**. The four
+> benchmarks in `dataset/` were built and verified by the code documented here, and the
+> construction rules, quotas, margins and no-tool floors recorded below are what a write-up has
+> to cite about them. `data/_toolkit/` is that code, moved out of the agent path.
+
 | Upstream concept | K-MapEval implementation | Deliberate deviation |
 |---|---|---|
 | MapEval `Evaluator2.py` structured ReAct loop | `src/agent/react.py` | Removes the localhost backend, sleeps, and remote writes. Uses user-requested 0-based `^^N^^` answers. |

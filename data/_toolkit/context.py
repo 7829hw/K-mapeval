@@ -26,14 +26,14 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 
-from src.models import Place, Route
-from src.tools.map import (
+from data._toolkit.map import (
     MapProvider,
     PlaceNotFoundError,
     RouteNotFoundError,
     UnsupportedTravelModeError,
 )
-from src.tools.spatial import (
+from data._toolkit.models import Place, Route
+from data._toolkit.spatial import (
     distinguishing_similarity,
     haversine_meters,
     parse_coordinate_literal,

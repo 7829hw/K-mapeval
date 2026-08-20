@@ -152,7 +152,7 @@ def _subtype(place: Place, token: str) -> bool:
     to be what decides the question.
     """
 
-    from src.tools.spatial import matches_required_type
+    from data._toolkit.spatial import matches_required_type
 
     return matches_required_type(place.model_dump(), token)
 
@@ -291,7 +291,7 @@ def poi_direction_distance(
 ) -> list[dict]:
     """Upstream's `['South, 13.45 kilometers', 'East, 13.56 kilometers', ...]`, in Korean."""
 
-    from src.tools.spatial import SpatialOperatorRegistry
+    from data._toolkit.spatial import SpatialOperatorRegistry
 
     ops = SpatialOperatorRegistry()
     opposite = {
@@ -456,7 +456,7 @@ def routing_turn_count(
 ) -> list[dict]:
     """Upstream's "How many times do I need to merge onto a toll road?" -- a count."""
 
-    from src.tools.spatial import SpatialOperatorRegistry
+    from data._toolkit.spatial import SpatialOperatorRegistry
 
     ops = SpatialOperatorRegistry()
     places = pool.of("SW8", "AT4", "CT1")

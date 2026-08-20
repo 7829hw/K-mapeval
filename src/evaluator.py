@@ -22,8 +22,9 @@ from src.logging import log_agent_result, query_log
 INFRASTRUCTURE_FAILURE = "llm_unavailable"
 PROVIDER_FAILURE = "provider_failure"
 # Provider errors that say the API could not answer right now, as opposed to answering that the
-# place does not exist. Only these are worth asking again for; a PlaceNotFoundError is evidence.
-TRANSIENT_PROVIDER_ERRORS = ("ProviderTimeoutError", "ProviderRateLimitError")
+# place does not exist. Only these are worth asking again for; a place Kakao does not carry is
+# evidence, and a rejected key is a configuration error that another attempt cannot fix.
+TRANSIENT_PROVIDER_ERRORS = ("KakaoTimeoutError", "KakaoRateLimitError")
 
 
 def is_transient_failure(row: dict[str, Any]) -> bool:

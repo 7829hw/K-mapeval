@@ -25,7 +25,11 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = Field(default=1800.0, gt=0)
     llm_max_retries: int = Field(default=8, ge=0, le=20)
     llm_retry_backoff_seconds: float = Field(default=5.0, gt=0)
-    max_reasoning_steps: int = Field(default=8, ge=1, le=30)
+    # The ReAct baseline's step budget, passed to `initialize_agent` as `max_iterations`.
+    # Langchain's own default is 15; 30 is deliberate. On five primitives a four-stop itinerary
+    # needs four PlaceSearch turns plus four TravelTime turns before any arithmetic, and being
+    # generous to the baseline is the conservative direction for the claim under test.
+    max_reasoning_steps: int = Field(default=30, ge=1, le=60)
     benchmark_concurrency: int = Field(default=4, ge=1, le=32)
     # Extra attempts for a single question the endpoint failed to serve. The client already retries
     # each request; this catches the case where the endpoint stayed down for a whole question, so

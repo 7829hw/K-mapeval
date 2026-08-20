@@ -1,20 +1,34 @@
+"""Run the K-MapEval benchmark over the two upstream agents on Kakao Map.
+
+Both architectures are vendored, not reimplemented: `src/spatial_agent/` is
+`ecerybao/Spatial-Agent@6876bba` and the ReAct baseline is `MapEval/MapEval-API@35d481a`'s
+five tools driven by its own `initialize_agent` call. The only thing swapped underneath them
+is the map API — `src/kakao_maps.py` puts Kakao Local and Kakao Mobility behind Google Maps'
+client surface, and both agents read that one client, so a difference between them cannot
+come from having been shown different evidence.
+
+`docs/UPSTREAM_MAPPING.md` records every deviation from the two upstreams.
+"""
+
 from __future__ import annotations
 
 import argparse
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+
+from langchain_openai import ChatOpenAI
 
 from src.agent import ReactAgent, SpatialAgent
 from src.config import Settings
 from src.dataset import load_dataset
 from src.evaluator import Evaluator
-from src.llm import OpenAIChatClient
-from src.tools import ContextMapProvider, KakaoMapProvider, MapProvider, ToolRegistry
+from src.kakao_maps import KakaoMapsClient
 
 
 def build_parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(description="Run the K-MapEval benchmark")
+    result = argparse.ArgumentParser(description="Run the K-MapEval benchmark on Kakao Map")
     result.add_argument(
         "--agent",
         choices=("react", "spatial", "both"),
@@ -26,31 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
         default="dataset/seoul_kmapeval_v4_mcq_100.jsonl",
         help=(
             "Benchmark to evaluate. The default is the MapEval-method reproduction benchmark; "
-            "seoul_kmapeval_v3 is the compositional one, seoul_mapeval_v1 the context-cache one, "
-            "and seoul_kmapeval_v2 the superseded first reproduction benchmark."
-        ),
-    )
-    result.add_argument(
-        "--provider",
-        choices=("auto", "context", "hybrid", "kakao"),
-        default="auto",
-        help=(
-            "Where tools get their evidence: the corpus built from the dataset's contexts, that "
-            "corpus with a live Kakao fallback for what it does not hold (hybrid, upstream "
-            "Spatial-Agent's arrangement), or Kakao alone (default: auto, which picks context "
-            "when every row carries one)"
-        ),
-    )
-    result.add_argument(
-        "--react-tools",
-        choices=("mapeval", "full"),
-        default="mapeval",
-        help=(
-            "Tool surface for the ReAct baseline. 'mapeval' (default) gives ReAct the five "
-            "primitives MapEval's own baseline has, which is the comparison the paper reports. "
-            "'full' shares this repository's whole registry with Spatial-Agent — an ablation "
-            "asking whether the graph adds anything on top of strong aggregation tools, not the "
-            "paper's question. Recorded in the report metadata either way."
+            "seoul_kmapeval_v3 is the compositional one and seoul_kmapeval_v2 the superseded "
+            "first reproduction benchmark."
         ),
     )
     result.add_argument("--output-dir", default="reports")
@@ -61,21 +52,72 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Concurrent question/LLM sessions (default: BENCHMARK_CONCURRENCY or 4)",
     )
+    result.add_argument(
+        "--verbose-agent",
+        action="store_true",
+        help="Print the ReAct baseline's chain of thought, as upstream's evaluator does",
+    )
     return result
 
 
-def build_provider(
-    provider_kind: str, settings: Settings, contexts: list[str]
-) -> MapProvider:
-    """Build the evidence source both architectures share for this run.
+def build_llm(settings: Settings) -> ChatOpenAI:
+    """The chat model both architectures use.
 
-    `context` answers from the benchmark's own corpus alone; `hybrid` adds the Kakao fallback
-    upstream Spatial-Agent uses for what its cache does not hold.
+    Upstream Spatial-Agent constructs `ChatOpenAI(temperature=0)` from `OPENAI_*`, and the
+    MapEval-API baseline takes whatever `LLM.load_model` built. Building one here from this
+    repository's `LLM_*` settings is what lets a single run configure both, so an accuracy
+    difference is not a difference in decoding.
+
+    The retry budget is deliberately generous. The endpoint is a self-hosted deployment
+    behind a reverse proxy: it answers 502/503 while it reloads and takes minutes to answer a
+    ReAct call carrying a long trace. Waiting is the only thing that makes an answer arrive.
     """
 
-    if provider_kind == "context":
-        return ContextMapProvider(contexts)
-    kakao = KakaoMapProvider(
+    return ChatOpenAI(
+        api_key=settings.llm_api_key,
+        base_url=settings.llm_base_url,
+        model=settings.llm_model,
+        temperature=0,
+        timeout=settings.llm_timeout_seconds,
+        max_retries=settings.llm_max_retries,
+    )
+
+
+def export_upstream_environment(settings: Settings) -> None:
+    """Give the vendored code the environment variable names it reads.
+
+    `spatial_agent/agent/spatial_agent.py` reads `OPENAI_MODEL` at construction time and
+    `kakao_maps.py` reads `KAKAO_REST_API_KEY` and the region prior. Exporting this
+    repository's settings under those names is how the vendored files stay unmodified.
+    """
+
+    os.environ.setdefault("OPENAI_API_KEY", settings.llm_api_key)
+    os.environ["OPENAI_MODEL"] = settings.llm_model
+    if settings.llm_base_url:
+        os.environ["OPENAI_BASE_URL"] = settings.llm_base_url
+    os.environ["KAKAO_REST_API_KEY"] = settings.kakao_rest_api_key
+    os.environ["KAKAO_SEARCH_CENTER"] = settings.kakao_search_center
+    os.environ["KAKAO_SEARCH_RADIUS_M"] = str(settings.kakao_search_radius_m)
+    os.environ["KAKAO_CACHE_DB_PATH"] = settings.kakao_cache_db_path
+    os.environ["KAKAO_CACHE_TTL_SECONDS"] = str(settings.kakao_cache_ttl_seconds)
+    os.environ["KAKAO_TIMEOUT_SECONDS"] = str(settings.kakao_timeout_seconds)
+
+
+@contextmanager
+def create_agent_session(
+    agent_type: str,
+    settings: Settings,
+    *,
+    verbose: bool = False,
+) -> Iterator[ReactAgent | SpatialAgent]:
+    """Create the resources owned by exactly one benchmark worker thread.
+
+    Each worker gets its own Kakao client and its own agent, so the per-question API and
+    cache counters are that worker's and two workers never share an HTTP connection. The
+    SQLite response cache underneath is shared and safe to share.
+    """
+
+    client = KakaoMapsClient(
         settings.kakao_rest_api_key,
         timeout=settings.kakao_timeout_seconds,
         cache_path=settings.kakao_cache_db_path,
@@ -83,91 +125,43 @@ def build_provider(
         search_center=settings.search_center(),
         search_radius_m=settings.kakao_search_radius_m,
     )
-    if provider_kind == "hybrid":
-        return ContextMapProvider(contexts, fallback=kakao)
-    return kakao
-
-
-@contextmanager
-def create_agent_session(
-    agent_type: str,
-    settings: Settings,
-    provider_kind: str,
-    contexts: list[str],
-    react_tools: str = "mapeval",
-) -> Iterator[ReactAgent | SpatialAgent]:
-    """Create resources owned by exactly one benchmark worker thread.
-
-    The two agents get different tool surfaces, because the tool surface is part of the
-    architecture under test. ReAct gets the five primitives MapEval's own baseline is given;
-    Spatial-Agent gets this registry's aggregations and its local operators, which is the
-    arrangement upstream has (`spatial-agent/src/tools/google_maps.py` carries a distance matrix
-    that `mapeval-api/Evaluator2.py` never hands its baseline). `react_tools="full"` restores the
-    shared surface as an ablation. Report which was used.
-    """
-
-    provider = build_provider(provider_kind, settings, contexts)
-    llm: OpenAIChatClient | None = None
     try:
-        llm = OpenAIChatClient(settings)
-        allowed = (
-            ToolRegistry.MAPEVAL_BASELINE_TOOLS
-            if agent_type == "react" and react_tools != "full"
-            else None
-        )
-        tools = ToolRegistry(provider, allowed=allowed)
-        agent = (
-            ReactAgent(llm, tools, max_steps=settings.max_reasoning_steps)
-            if agent_type == "react"
-            else SpatialAgent(llm, tools, max_steps=settings.max_reasoning_steps)
-        )
-        yield agent
-    finally:
-        try:
-            if llm is not None:
-                llm.close()
-        finally:
-            provider.close()
-
-
-def resolve_provider_kind(requested: str, dataset: list) -> str:
-    """Choose the evidence source, and refuse to silently answer from the wrong one."""
-
-    with_context = sum(1 for item in dataset if item.context)
-    if requested in ("context", "hybrid"):
-        if with_context != len(dataset):
-            raise ValueError(
-                f"--provider {requested} needs a context on every row; "
-                f"{with_context}/{len(dataset)} have one"
+        llm = build_llm(settings)
+        if agent_type == "react":
+            yield ReactAgent(
+                llm,
+                client,
+                verbose=verbose,
+                max_iterations=settings.max_reasoning_steps,
             )
-        return requested
-    if requested == "kakao":
-        return "kakao"
-    return "context" if with_context == len(dataset) else "kakao"
+        else:
+            yield SpatialAgent(client, llm=llm)
+    finally:
+        client.close()
 
 
 def run(agent_type: str, args: argparse.Namespace) -> dict:
     settings = Settings()
     settings.require_llm()
+    settings.require_kakao()
+    export_upstream_environment(settings)
+
     dataset = load_dataset(args.dataset)
     if args.ids:
         wanted = set(args.ids)
         dataset = [item for item in dataset if item.id in wanted]
         if not dataset:
             raise ValueError("None of --ids were found in the dataset")
-    provider_kind = resolve_provider_kind(args.provider, dataset)
-    if provider_kind in ("kakao", "hybrid"):
-        settings.require_kakao()
-    contexts = [item.context for item in dataset if item.context]
-    print(f"Evidence source: {provider_kind} ({len(contexts)} contexts in the corpus)")
+
     concurrency = settings.benchmark_concurrency if args.concurrency is None else args.concurrency
     if not 1 <= concurrency <= 32:
         raise ValueError("--concurrency must be between 1 and 32")
+
     report = Evaluator(
         None,
         dataset,
         agent_factory=lambda: create_agent_session(
-            agent_type, settings, provider_kind, contexts, args.react_tools
+            agent_type, settings, verbose=args.verbose_agent
         ),
         max_workers=concurrency,
         output_dir=Path(args.output_dir),
@@ -177,16 +171,15 @@ def run(agent_type: str, args: argparse.Namespace) -> dict:
         llm_profile={
             "llm_model": settings.llm_model,
             "llm_base_url": settings.llm_base_url,
-            "provider": provider_kind,
-            # Which tool surface the ReAct baseline had. A run is only comparable to the paper
-            # when this says "mapeval", and only comparable across our own agents when "full".
-            "react_tools": args.react_tools,
-            # Which code answered. A night of fixes produces a shelf of reports whose accuracies
-            # differ for reasons no field records, and "which commit was this?" is not
-            # reconstructable from the timestamp once two runs overlap. Read once at import, not
-            # per run: the process holds the code it loaded at startup, and a commit landing
-            # while `--agent both` is halfway through would otherwise be recorded as the code
-            # that answered the second half.
+            "provider": "kakao",
+            # Which upstream each side of the run came from, so a report stays attributable
+            # after the vendored trees are updated.
+            "upstream_spatial_agent": "ecerybao/Spatial-Agent@6876bba",
+            "upstream_mapeval_api": "MapEval/MapEval-API@35d481a",
+            # Which code answered. A night of fixes produces a shelf of reports whose
+            # accuracies differ for reasons no field records, and "which commit was this?" is
+            # not reconstructable from the timestamp once two runs overlap. Read once at
+            # import, not per run.
             "code_revision": CODE_REVISION,
         },
         question_retries=settings.benchmark_question_retries,
@@ -230,9 +223,9 @@ CODE_REVISION = _code_revision()
 def main() -> None:
     args = build_parser().parse_args()
     agent_types = (
-        ("react", "spatial_agent")
+        ("react", "spatial")
         if args.agent == "both"
-        else ("spatial_agent" if args.agent == "spatial" else "react",)
+        else ("spatial" if args.agent == "spatial" else "react",)
     )
     summaries: dict[str, dict] = {agent_type: run(agent_type, args) for agent_type in agent_types}
     if len(summaries) == 2:
@@ -240,7 +233,7 @@ def main() -> None:
             "ReAct accuracy="
             f"{summaries['react']['overall_answer_accuracy']['accuracy']:.3f} | "
             "Spatial-Agent accuracy="
-            f"{summaries['spatial_agent']['overall_answer_accuracy']['accuracy']:.3f}"
+            f"{summaries['spatial']['overall_answer_accuracy']['accuracy']:.3f}"
         )
 
 

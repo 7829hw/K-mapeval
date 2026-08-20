@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from src.models import Place, Route
-from src.tools.spatial import parse_coordinate_literal
+from data._toolkit.models import Place, Route
+from data._toolkit.spatial import parse_coordinate_literal
 
 
 class ProviderError(RuntimeError):

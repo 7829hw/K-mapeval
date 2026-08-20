@@ -13,8 +13,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from data._toolkit.kakao import KakaoMapProvider  # noqa: E402
 from src.config import Settings  # noqa: E402
-from src.tools.kakao import KakaoMapProvider  # noqa: E402
 
 # Seoul's 25 district offices, used only as search centers so the pool covers the whole city
 # rather than clustering on one downtown query.

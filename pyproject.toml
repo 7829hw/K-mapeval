@@ -14,6 +14,18 @@ dependencies = [
   "pydantic>=2.7,<3",
   "pydantic-settings>=2.3,<3",
   "python-dotenv>=1.0,<2",
+  # The two vendored agents' own stacks. MapEval-API drives `langchain.agents.initialize_agent`
+  # with `STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION`, which is the classic 0.3 agent API and
+  # is not in langchain 1.x; Spatial-Agent builds a `langgraph` StateGraph. Pinning both to the
+  # 0.3 generation is what lets one environment run both architectures unmodified.
+  "langchain>=0.3,<0.4",
+  "langchain-core>=0.3,<0.4",
+  "langchain-openai>=0.2,<0.4",
+  "langgraph>=0.2,<0.7",
+  # `spatial_agent/utils/optimization.py` solves its TSP-TW with OR-Tools.
+  "ortools>=9.8",
+  # `mapeval_api/FormattedTools.py` pluralizes a place type in `nearby_to_context`.
+  "inflect>=7,<8",
 ]
 
 [project.optional-dependencies]
@@ -33,6 +45,10 @@ addopts = "-q"
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Vendored upstream code. It is kept byte-for-byte apart from the API swap recorded in
+# `docs/UPSTREAM_MAPPING.md`, so restyling it to this repository's rules would destroy the
+# property that makes it evidence: that it is upstream's implementation and not a rewrite.
+extend-exclude = ["src/spatial_agent", "src/mapeval_api"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

@@ -45,9 +45,23 @@ class FakeProvider(MapProvider):
         return self._api_calls
 
     def _named(self, query: str) -> Place:
-        """A geocoder answers with a place that carries the name it was asked for."""
+        """A geocoder answers with a place that carries the name it was asked for.
 
-        return self.place.model_copy(update={"place_id": query, "name": query})
+        Distinct names stand on distinct spots. They used to share one coordinate, which was
+        harmless while the tools passed names through to the provider — once the aggregations
+        resolve a name before routing, two names on the same spot are one place, and every leg of
+        a matrix became a zero-cost self-route.
+        """
+
+        offset = (sum(ord(character) for character in query) % 97) * 0.0011
+        return self.place.model_copy(
+            update={
+                "place_id": query,
+                "name": query,
+                "latitude": round(self.place.latitude + offset, 6),
+                "longitude": round(self.place.longitude + offset / 2, 6),
+            }
+        )
 
     def search_place(self, query: str, *, limit: int = 5) -> list[Place]:
         self._api_calls += 1
@@ -142,7 +156,12 @@ def test_registry_clamps_llm_generated_kakao_limits() -> None:
     search = registry.invoke("place_search", {"query": "경복궁", "limit": 20})
     nearby = registry.invoke(
         "nearby_places",
-        {"center": "경복궁", "query": "식당", "radius_m": 50_000, "limit": 50},
+        {
+            "center": search.output[0],
+            "query": "식당",
+            "radius_m": 50_000,
+            "limit": 50,
+        },
     )
     assert search.status == "ok"
     assert search.arguments["limit"] == 15
@@ -152,8 +171,10 @@ def test_registry_clamps_llm_generated_kakao_limits() -> None:
 
 
 def test_registry_infers_exact_kakao_category_for_station_search() -> None:
-    execution = ToolRegistry(FakeProvider()).invoke(
-        "nearby_places", {"center": "경복궁", "query": "역", "radius_m": 300}
+    registry = ToolRegistry(FakeProvider())
+    centre = registry.invoke("place_search", {"query": "경복궁"}).output[0]
+    execution = registry.invoke(
+        "nearby_places", {"center": centre, "query": "역", "radius_m": 300}
     )
     assert execution.status == "ok"
     assert execution.arguments["category_code"] == "SW8"
@@ -1278,9 +1299,10 @@ def test_a_leg_from_a_place_to_itself_is_answered_for_both_architectures() -> No
 
     provider = FakeProvider()
     registry = ToolRegistry(provider)
+    palace = registry.invoke("place_search", {"query": "경복궁"}).output[0]
     before = provider.api_call_count
     for tool in ("travel_time", "directions"):
-        execution = registry.invoke(tool, {"origin": "경복궁", "destination": "경복궁"})
+        execution = registry.invoke(tool, {"origin": palace, "destination": palace})
         assert execution.status == "ok"
         assert execution.output["distance_m"] == 0
         assert execution.output["duration_s"] == 0
@@ -1914,6 +1936,51 @@ def test_the_react_prompt_carries_no_tool_strategy() -> None:
     # What MapEval's own prompt does carry stays.
     assert "^^Option_Number^^" in REACT_SYSTEM_PROMPT
     assert "0-based" in REACT_SYSTEM_PROMPT
+
+
+def test_a_place_argument_is_a_reference_the_provider_issued() -> None:
+    """A name is not a place, and the baseline tools no longer search behind the call.
+
+    `mapeval-api/FormattedTools.py` gives its baseline one way to turn a name into a place —
+    `PlaceSearchTool`, which returns a `place_id` — and `PlaceDetails`, `NearbyPlaces`, `TravelTime`
+    and `Directions` all consume that id. Threading it is part of the task upstream measures.
+    Resolving names inside `nearby_search` and `directions` excused our port from it: on the v4
+    run ReAct passed a bare name in about two thirds of its place arguments (`travel_time` 123
+    against 53 ids) while Spatial-Agent passed none, so the convenience was worth nothing to the
+    architecture under test and a whole error class to the baseline.
+    """
+
+    provider = FakeProvider()
+    registry = ToolRegistry(provider, allowed=ToolRegistry.MAPEVAL_BASELINE_TOOLS)
+
+    named = registry.invoke("travel_time", {"origin": "서울역", "destination": "경복궁"})
+    assert named.status == "error"
+    assert "place_search" in (named.error or "")
+
+    # What the tool does accept is what `place_search` handed back.
+    found = registry.invoke("place_search", {"query": "서울역"})
+    assert found.status == "ok"
+    threaded = registry.invoke(
+        "travel_time",
+        {"origin": found.output[0], "destination": found.output[0]},
+    )
+    assert threaded.status == "ok"
+
+
+def test_an_aggregation_tool_still_resolves_the_names_a_plan_holds() -> None:
+    """The discipline is the baseline's surface, not a rule about evidence.
+
+    `batch_geocode`, `distance_matrix` and `calculate_finish_time` exist to take the names a plan
+    is holding and resolve them in one step — that is what makes them aggregations over
+    PlaceSearch. They are Spatial-Agent's tools and they keep doing it, through the same matcher.
+    """
+
+    registry = ToolRegistry(FakeProvider())
+    matrix = registry.invoke(
+        "distance_matrix", {"pairs": [{"origin": "서울역", "destination": "경복궁"}]}
+    )
+    assert matrix.status == "ok"
+    assert matrix.output["routes"][0]["status"] == "ok"
 
 
 def test_the_react_baseline_is_the_upstream_port_and_stays_frozen() -> None:

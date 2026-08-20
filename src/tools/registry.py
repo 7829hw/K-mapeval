@@ -602,7 +602,7 @@ class ToolRegistry:
                     "category_code as a filter.",
                     NearbyPlacesArgs,
                     lambda args: self.provider.nearby_search(
-                        args.center,
+                        self._reference(args.center),
                         query=args.query,
                         category_code=args.category_code,
                         radius_m=args.radius_m,
@@ -803,7 +803,7 @@ class ToolRegistry:
             self.provider.search_place(str(args.query), limit=args.limit)
             if args.center is None
             else self.provider.nearby_search(
-                args.center,
+                self._reference(args.center),
                 query=args.query,
                 category_code=args.category_code,
                 radius_m=args.radius_m,
@@ -824,11 +824,50 @@ class ToolRegistry:
             places = [place for place in places if place.is_open is args.open_now]
         return places
 
+    def _reference(self, value: Any) -> Any:
+        """A place argument on a baseline tool must be something the provider handed out.
+
+        The rule is upstream's tool surface, so it belongs on the tool rather than inside one
+        provider: `mapeval-api/FormattedTools.py` gives its baseline `PlaceSearchTool` to turn a
+        name into a `place_id` and every other tool consumes that id. Reading a name here would
+        run the search behind the call and delete the id-threading the paper's baseline is
+        measured doing.
+        """
+
+        if not isinstance(value, str):
+            return value
+        found = self.provider.dereference(value)
+        if found is not None:
+            return found
+        raise PlaceNotFoundError(
+            f"{value!r} is a place name, not a place reference. Call place_search with it first "
+            "and pass the place_id it returns."
+        )
+
+    def _resolved(self, value: Any) -> Any:
+        """Turn a name into a place for the aggregation tools, which are name resolvers.
+
+        The five baseline tools no longer do this: a place argument there must be a reference the
+        provider issued, exactly as `mapeval-api/FormattedTools.py` requires. That rule is about
+        the *baseline's* surface. `batch_geocode`, `distance_matrix` and `calculate_finish_time`
+        exist to take the names a plan is holding and resolve them in one step — that is what makes
+        them aggregations over PlaceSearch rather than new evidence — so they resolve here, once,
+        through the same matcher `batch_geocode` uses.
+        """
+
+        if not isinstance(value, str):
+            return value
+        found = self.provider.dereference(value)
+        if found is not None:
+            return found
+        return _best_place_match(value, _search_place_candidates(self.provider, value, limit=15))
+
     def _calculate_finish_time(self, args: CalculateFinishTimeArgs) -> dict[str, Any]:
         stays = args.stay_durations_s or [0.0] * len(args.locations)
         route_evidence: list[dict[str, Any]] = []
         travel_seconds = 0
-        for origin, destination in zip(args.locations, args.locations[1:], strict=False):
+        locations = [self._resolved(value) for value in args.locations]
+        for origin, destination in zip(locations, locations[1:], strict=False):
             route = self.provider.directions(
                 origin, destination, mode=args.mode, priority=args.priority
             )
@@ -880,24 +919,36 @@ class ToolRegistry:
     def _route(self, args: DirectionsArgs) -> Route:
         """One route, with the leg from a place to itself answered rather than asked for."""
 
-        if not args.waypoints and _same_endpoint(args.origin, args.destination):
-            return _self_route(args.origin, args.destination)
+        origin = self._reference(args.origin)
+        destination = self._reference(args.destination)
+        waypoints = [self._reference(value) for value in args.waypoints]
+        if not waypoints and _same_endpoint(origin, destination):
+            return _self_route(origin, destination)
         return self.provider.directions(
-            args.origin,
-            args.destination,
+            origin,
+            destination,
             mode=args.mode,
             priority=args.priority,
-            waypoints=args.waypoints,
+            waypoints=waypoints,
             include_steps=args.include_steps,
         )
 
     def _distance_matrix(self, args: DistanceMatrixArgs) -> dict[str, Any]:
-        pairs = list(args.pairs or [])
+        pairs = [
+            RoutePair(
+                origin=self._resolved(pair.origin),
+                destination=self._resolved(pair.destination),
+                label=pair.label,
+            )
+            for pair in (args.pairs or [])
+        ]
         if not pairs:
+            origins = [self._resolved(value) for value in args.origins or []]
+            destinations = [self._resolved(value) for value in args.destinations or []]
             pairs = [
                 RoutePair(origin=origin, destination=destination)
-                for origin in args.origins or []
-                for destination in args.destinations or []
+                for origin in origins
+                for destination in destinations
             ]
         routes: list[dict[str, Any]] = []
         for index, pair in enumerate(pairs):

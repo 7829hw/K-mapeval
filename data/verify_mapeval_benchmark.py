@@ -146,9 +146,9 @@ def verify(row: dict[str, Any], registry: ToolRegistry, ops: SpatialOperatorRegi
         route = call(
             registry,
             "directions",
-            origin=evidence["origin"],
-            destination=evidence["destination"],
-            waypoints=[evidence["via"]],
+            origin=_place(registry, evidence["origin"]),
+            destination=_place(registry, evidence["destination"]),
+            waypoints=[_place(registry, evidence["via"])],
             priority="DISTANCE",
         )
         kilometres = route["distance_m"] / 1000
@@ -159,8 +159,8 @@ def verify(row: dict[str, Any], registry: ToolRegistry, ops: SpatialOperatorRegi
         route = call(
             registry,
             "directions",
-            origin=evidence["origin"],
-            destination=evidence["destination"],
+            origin=_place(registry, evidence["origin"]),
+            destination=_place(registry, evidence["destination"]),
             priority="DISTANCE",
         )
         analysis = ops.invoke("steps_analysis", {"route": route})
@@ -172,8 +172,8 @@ def verify(row: dict[str, Any], registry: ToolRegistry, ops: SpatialOperatorRegi
         route = call(
             registry,
             "directions",
-            origin=evidence["origin"],
-            destination=evidence["destination"],
+            origin=_place(registry, evidence["origin"]),
+            destination=_place(registry, evidence["destination"]),
             priority="DISTANCE",
         )
         steps = route.get("steps") or []
@@ -209,8 +209,8 @@ def verify(row: dict[str, Any], registry: ToolRegistry, ops: SpatialOperatorRegi
             route = call(
                 registry,
                 "directions",
-                origin=origin,
-                destination=destination,
+                origin=_place(registry, origin),
+                destination=_place(registry, destination),
                 priority="DISTANCE",
             )
             total += route["distance_m"]
@@ -227,8 +227,8 @@ def verify(row: dict[str, Any], registry: ToolRegistry, ops: SpatialOperatorRegi
             route = call(
                 registry,
                 "directions",
-                origin=origin,
-                destination=destination,
+                origin=_place(registry, origin),
+                destination=_place(registry, destination),
                 priority="DISTANCE",
             )
             spent += route["duration_s"] + evidence["stay_s"][index]

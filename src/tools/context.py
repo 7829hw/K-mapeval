@@ -404,6 +404,11 @@ class ContextMapProvider(MapProvider):
         scored.sort(key=lambda pair: (-pair[0], pair[1].name))
         return [place for _, place in scored[: max(1, limit)]]
 
+    def dereference(self, value: str | Place) -> Place | None:
+        if isinstance(value, Place):
+            return value
+        return self._dereference(value)
+
     def _dereference(self, value: str) -> Place | None:
         """A place the agent is already holding, addressed by id or by its coordinates.
 
@@ -496,19 +501,17 @@ class ContextMapProvider(MapProvider):
         return self._fallback.place_details(place_id)
 
     def _resolve_center(self, center: str | Place) -> Place:
-        if isinstance(center, Place):
-            return center
-        referenced = self._dereference(center)
+        """Dereference a place the caller already holds. A name is not one — see
+        `KakaoMapProvider._resolve_place`, which this mirrors so the two evidence sources impose
+        the same discipline on the agents above them."""
+
+        referenced = self.dereference(center)
         if referenced is not None:
             return referenced
-        matches = self._ranked(center, self._corpus.all_places(), 1)
-        if matches:
-            self._cache_hits += 1
-            return matches[0]
-        found = self._miss(lambda provider: provider.search_place(center, limit=1))
-        if not found:
-            raise PlaceNotFoundError(f"The corpus has no place named {center!r}")
-        return found[0]
+        raise PlaceNotFoundError(
+            f"{center!r} is a place name, not a place reference. Call place_search with it first "
+            "and pass the place_id it returns."
+        )
 
     def nearby_search(
         self,

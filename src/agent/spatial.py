@@ -433,16 +433,17 @@ class SpatialAgent(BenchmarkAgent):
                 raw_arguments = step.get("arguments") or {}
                 try:
                     arguments = _resolve_references(raw_arguments, results)
+                    # A place written as a name is the place this plan already resolved. The
+                    # local operators spend no API call, so a name they are handed is only a
+                    # place if the plan resolved it — and since the five baseline tools stopped
+                    # resolving names behind the tool call, the same now holds for a `directions`
+                    # or `nearby_places` node. Binding grants no evidence the run had not already
+                    # gathered; a name the plan never resolved is left alone and still fails.
+                    arguments = _bind_named_pairs(
+                        _bind_named_places(arguments, results), results
+                    )
                     if operator not in tool_names:
-                        # Local operators spend no API call, so a place they are handed as a
-                        # name is only a place if the plan already resolved it. The tools do
-                        # their own name resolution through the provider.
-                        arguments = _bind_step_references(
-                            _bind_named_pairs(
-                                _bind_named_places(arguments, results), results
-                            ),
-                            results,
-                        )
+                        arguments = _bind_step_references(arguments, results)
                     if operator in tool_names:
                         execution = self.tools.invoke(operator, arguments)
                         if execution.status == "ok":
@@ -685,7 +686,20 @@ def _resolve_references(value: Any, results: dict[str, Any]) -> Any:
 # Every operator argument that means a place, in the local operator registry's own spelling.
 # `batch_geocode`'s `place_names` is deliberately absent: names are what it is asked to resolve.
 PLACE_VALUED_ARGUMENTS = frozenset(
-    {"anchor", "candidates", "center", "locations", "place_a", "place_b", "places"}
+    {
+        "anchor",
+        "candidates",
+        "center",
+        "destination",
+        "destinations",
+        "locations",
+        "origin",
+        "origins",
+        "place_a",
+        "place_b",
+        "places",
+        "waypoints",
+    }
 )
 # The endpoint keys inside a `pairs` entry, which is where the pairwise operators keep theirs.
 PLACE_VALUED_PAIR_KEYS = frozenset({"place_a", "place_b", "origin", "destination"})

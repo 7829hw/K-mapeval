@@ -50,6 +50,16 @@ Route from 회기버거 to GS25 서대문남가좌점 by 자동차:
 """
 
 
+def _ref(provider, name: str):
+    """Resolve a name the way an agent must: search first, then pass what came back.
+
+    A place argument is a reference the provider issued — `mapeval-api/FormattedTools.py` gives
+    its baseline no other way — so these tests thread the resolved place rather than the name.
+    """
+
+    return provider.search_place(name, limit=1)[0]
+
+
 def test_a_context_block_becomes_places_a_retrieval_and_a_route() -> None:
     nearby = parse_context(NEARBY_CONTEXT)
     anchor = nearby.places[0]
@@ -88,9 +98,11 @@ def test_a_place_the_context_does_not_hold_is_not_found() -> None:
     provider = ContextMapProvider([RADIUS_CONTEXT])
 
     assert provider.search_place("IBK기업은행") == []
+    # And a name is not a reference: the retrieval refuses it rather than searching behind the
+    # tool call, the same way `KakaoMapProvider` does.
     with pytest.raises(PlaceNotFoundError):
         provider.nearby_search("IBK기업은행")
-    assert provider.cache_miss_count == 2
+    assert provider.cache_miss_count == 1
 
 
 def test_the_corpus_is_shared_by_every_question_the_way_upstreams_cache_is() -> None:
@@ -106,7 +118,8 @@ def test_the_corpus_is_shared_by_every_question_the_way_upstreams_cache_is() -> 
 
     assert [place.name for place in provider.search_place("어라운드북")] == ["어라운드북"]
     assert [place.name for place in provider.search_place("우리은행")] == ["우리은행"]
-    assert provider.directions("회기버거", "GS25 서대문남가좌점").distance_m == 4994
+    burger, store = _ref(provider, "회기버거"), _ref(provider, "GS25 서대문남가좌점")
+    assert provider.directions(burger, store).distance_m == 4994
 
 
 def test_a_retrieval_is_computed_over_the_corpus_not_replayed_from_a_block() -> None:
@@ -121,16 +134,18 @@ def test_a_retrieval_is_computed_over_the_corpus_not_replayed_from_a_block() -> 
     provider = ContextMapProvider([NEARBY_CONTEXT, RADIUS_CONTEXT])
 
     # The radius applies to every retrieval, because it is applied rather than looked up.
-    near = provider.nearby_search("평화시장", query="서점", radius_m=190)
+    market = _ref(provider, "평화시장")
+    near = provider.nearby_search(market, query="서점", radius_m=190)
     assert [place.name for place in near] == ["어라운드북"]
-    assert [place.name for place in provider.nearby_search("평화시장", query="서점")] == [
+    assert [place.name for place in provider.nearby_search(market, query="서점")] == [
         "어라운드북",
         "교보문고",
         "소요서가",
     ]
 
     # A place from another question's context is a neighbour like any other when it is one.
-    assert [place.name for place in provider.nearby_search("미소의집", query="은행")] == [
+    house = _ref(provider, "미소의집")
+    assert [place.name for place in provider.nearby_search(house, query="은행")] == [
         "우리은행"
     ]
 
@@ -138,15 +153,16 @@ def test_a_retrieval_is_computed_over_the_corpus_not_replayed_from_a_block() -> 
 def test_a_retrieval_filters_by_type_in_whichever_vocabulary_the_caller_speaks() -> None:
     provider = ContextMapProvider([NEARBY_CONTEXT, RADIUS_CONTEXT])
 
-    by_noun = provider.nearby_search("평화시장", query="서점", radius_m=20000)
-    by_code = provider.nearby_search("평화시장", category_code="BK9", radius_m=20000)
-    by_token = provider.nearby_search("평화시장", query="book_store", radius_m=20000)
+    market = _ref(provider, "평화시장")
+    by_noun = provider.nearby_search(market, query="서점", radius_m=20000)
+    by_code = provider.nearby_search(market, category_code="BK9", radius_m=20000)
+    by_token = provider.nearby_search(market, query="book_store", radius_m=20000)
     assert [place.name for place in by_noun] == [place.name for place in by_token]
     assert "우리은행" in [place.name for place in by_code]
     assert "어라운드북" not in [place.name for place in by_code]
 
     # A type this corpus does not record is not evidence of absence, so the neighbourhood answers.
-    unknown = provider.nearby_search("평화시장", query="병원", radius_m=20000)
+    unknown = provider.nearby_search(_ref(provider, "평화시장"), query="병원", radius_m=20000)
     assert [place.name for place in unknown][0] == "어라운드북"
 
 
@@ -154,7 +170,7 @@ def test_a_place_is_not_among_its_own_neighbours() -> None:
     """The anchor stands at zero metres from itself and would head every ranking it appears in."""
 
     provider = ContextMapProvider([NEARBY_CONTEXT])
-    found = provider.nearby_search("평화시장", query="서점", radius_m=20000)
+    found = provider.nearby_search(_ref(provider, "평화시장"), query="서점", radius_m=20000)
     assert "평화시장" not in [place.name for place in found]
 
 
@@ -203,12 +219,14 @@ def test_a_branch_name_does_not_resolve_to_the_bare_brand_the_context_stores() -
 def test_a_recorded_route_is_returned_and_an_unrecorded_one_fails() -> None:
     provider = ContextMapProvider([ROUTE_CONTEXT])
 
-    route = provider.directions("회기버거", "GS25 서대문남가좌점")
+    route = provider.directions(_ref(provider, "회기버거"), _ref(provider, "GS25 서대문남가좌점"))
     assert (route.distance_m, route.duration_s) == (4994, 420)
     with pytest.raises(RouteNotFoundError):
-        provider.directions("GS25 서대문남가좌점", "회기버거")
+        provider.directions(_ref(provider, "GS25 서대문남가좌점"), _ref(provider, "회기버거"))
     with pytest.raises(UnsupportedTravelModeError):
-        provider.directions("회기버거", "GS25 서대문남가좌점", mode="walking")
+        provider.directions(
+            _ref(provider, "회기버거"), _ref(provider, "GS25 서대문남가좌점"), mode="walking"
+        )
     assert provider.api_call_count == 0
 
 
@@ -228,7 +246,12 @@ def test_the_shared_tool_layer_reads_the_context_like_any_other_provider() -> No
 
     # The block was retrieved by type, so a Korean keyword none of its names contains still
     # answers with it: the context recorded one retrieval for this anchor and that is the answer.
-    nearby = registry.invoke("nearby_places", {"center": "평화시장", "query": "서점"})
+    # The centre is the place id `batch_geocode` just handed back, not the name again: a place
+    # argument is a reference the provider issued.
+    nearby = registry.invoke(
+        "nearby_places",
+        {"center": execution.output[0]["place"]["place_id"], "query": "서점"},
+    )
     assert nearby.status == "ok"
     assert [place["name"] for place in nearby.output] == ["어라운드북", "교보문고", "소요서가"]
     assert provider.api_call_count == 0

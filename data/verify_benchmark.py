@@ -131,6 +131,20 @@ def _verify_feasible_count(
 # tool's own RECOMMEND default asked about a different route, one that re-optimizes against live
 # traffic — so eleven rows drifted out of agreement the first time traffic moved, none of them
 # because an answer had changed. Ask for the route the gold was built on.
+def _ref(registry: ToolRegistry, name: str) -> Any:
+    """Resolve a name the way an agent must: `place_search` first, then pass what came back.
+
+    A place argument on a baseline tool is a reference the provider issued, so the verifier
+    threads the resolved place rather than the name — the same discipline
+    `mapeval-api/FormattedTools.py` imposes on its own tools.
+    """
+
+    found = call(registry, "place_search", query=name.strip(), limit=1)
+    if not found:
+        raise RuntimeError(f"unresolved: {name}")
+    return found[0]
+
+
 def verify(row: dict[str, Any], registry: ToolRegistry, ops: SpatialOperatorRegistry) -> str:
     template = row["template_id"]
     options = row["options"]
@@ -225,9 +239,9 @@ def verify(row: dict[str, Any], registry: ToolRegistry, ops: SpatialOperatorRegi
             route = call(
                 registry,
                 "directions",
-                origin=origin,
-                destination=destination,
-                waypoints=[via],
+                origin=_ref(registry, origin),
+                destination=_ref(registry, destination),
+                waypoints=[_ref(registry, via)],
                 priority="TIME",
             )
             durations.append(route["duration_s"])
@@ -240,8 +254,8 @@ def verify(row: dict[str, Any], registry: ToolRegistry, ops: SpatialOperatorRegi
         route = call(
             registry,
             "directions",
-            origin=origin,
-            destination=destination,
+            origin=_ref(registry, origin),
+            destination=_ref(registry, destination),
             include_steps=True,
             priority="DISTANCE",
         )
@@ -262,9 +276,9 @@ def verify(row: dict[str, Any], registry: ToolRegistry, ops: SpatialOperatorRegi
         route = call(
             registry,
             "directions",
-            origin=origin,
-            destination=destination,
-            waypoints=[via],
+            origin=_ref(registry, origin),
+            destination=_ref(registry, destination),
+            waypoints=[_ref(registry, via)],
             include_steps=True,
             priority="DISTANCE",
         )

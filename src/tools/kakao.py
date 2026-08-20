@@ -437,6 +437,30 @@ class KakaoMapProvider(MapProvider):
         return route
 
     def _resolve_place(self, value: str | Place) -> Place:
+        """Dereference a place the caller is already holding. A name is not one.
+
+        `mapeval-api/FormattedTools.py` gives its baseline exactly one way to turn a name into a
+        place — `PlaceSearchTool`, which returns a `place_id` — and every other tool consumes that
+        id. Threading it is a real part of the task, and this method used to do it for the caller:
+        a name that reached `nearby_search` or `directions` was keyword-searched behind the tool.
+        Measured on the v4 run, ReAct passed a bare name in about two thirds of its place
+        arguments (`travel_time` 123 against 53 ids) while Spatial-Agent passed none, so the
+        convenience was worth roughly nothing to the architecture under test and a whole error
+        class to the baseline it is measured against.
+
+        The error says what to do instead, the way upstream's tools answer "Incorrect place name.
+        Please use the same name as in the question."
+        """
+
+        found = self.dereference(value)
+        if found is not None:
+            return found
+        raise PlaceNotFoundError(
+            f"{value!r} is a place name, not a place reference. Call place_search with it first "
+            "and pass the place_id it returns."
+        )
+
+    def dereference(self, value: str | Place) -> Place | None:
         if isinstance(value, Place):
             self._places[value.place_id] = value
             return value
@@ -458,10 +482,7 @@ class KakaoMapProvider(MapProvider):
             self._cache_hit_count += 1
             self._places[cached_place.place_id] = cached_place
             return cached_place
-        matches = self.search_place(value, limit=1)
-        if not matches:
-            raise PlaceNotFoundError(f"Place not found: {value}")
-        return matches[0]
+        return None
 
     def _get_local(self, path: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
         return self._request(f"{LOCAL_BASE_URL}{path}", api_key=self._rest_api_key, params=params)

@@ -73,6 +73,18 @@ class MapProvider(ABC):
     @abstractmethod
     def place_details(self, place_id: str) -> Place: ...
 
+    def dereference(self, value: str | Place) -> Place | None:
+        """The place this provider already handed out under that reference, or None.
+
+        A `place_id` it minted, coordinates it printed, or the place itself. A *name* is not a
+        reference: turning one into a place is what `search_place` is for, and doing it silently
+        inside `nearby_search` and `directions` excused the ReAct baseline from the id-threading
+        that `mapeval-api/FormattedTools.py` makes unavoidable. Adding a provider means
+        implementing this alongside the searches.
+        """
+
+        return value if isinstance(value, Place) else None
+
     @abstractmethod
     def directions(
         self,

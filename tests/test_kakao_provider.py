@@ -88,7 +88,9 @@ def test_search_nearby_details_and_route_are_normalized() -> None:
     assert provider.place_details("1") == palace
     nearby = provider.nearby_search(palace, query="지하철역", limit=1)
     assert nearby[0].name == "경복궁역"
-    route = provider.directions("서울역", palace)
+    # A place argument is a reference the provider issued, so the origin is searched first.
+    station = provider.search_place("서울역", limit=1)[0]
+    route = provider.directions(station, palace)
     assert route.origin == "서울역"
     assert route.destination == "경복궁"
     assert route.distance_m == 4100
@@ -341,7 +343,9 @@ def test_directions_uses_cached_places_and_route_after_restart(tmp_path) -> None
 
     first_client = httpx.Client(transport=httpx.MockTransport(handler))
     first = KakaoMapProvider("test-key", cache_path=str(cache_path), client=first_client)
-    assert first.directions("서울역", "경복궁").distance_m == 4100
+    origin = first.search_place("서울역", limit=1)[0]
+    destination = first.search_place("경복궁", limit=1)[0]
+    assert first.directions(origin, destination).distance_m == 4100
     assert first.api_call_count == 3
     first.close()
 
@@ -350,7 +354,9 @@ def test_directions_uses_cached_places_and_route_after_restart(tmp_path) -> None
 
     second_client = httpx.Client(transport=httpx.MockTransport(fail_if_called))
     second = KakaoMapProvider("test-key", cache_path=str(cache_path), client=second_client)
-    assert second.directions("서울역", "경복궁").duration_s == 900
+    # Across a restart the ids still dereference out of the place cache, which is what makes them
+    # references rather than names.
+    assert second.directions(origin.place_id, destination.place_id).duration_s == 900
     assert second.api_call_count == 0
     assert second.cache_hit_count == 3
     second.close()

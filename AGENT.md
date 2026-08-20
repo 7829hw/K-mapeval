@@ -184,13 +184,30 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   is left alone. `_names_the_same_place` applies the same test, which is what stops the
   brand-only retry in `_query_variants` — `CU` for `CU 구로소담점` — from resolving to whichever
   branch of the brand sits nearest the region prior's centre.
-- **A reference the provider handed out is a reference it must take back.**
-  `parse_coordinate_literal` (`src/tools/spatial.py`, shared by every provider) lets a `"lat,lng"`
-  string stand where a place is expected, and `ContextMapProvider._dereference` accepts a
-  `place_id` it minted as well. An agent that already holds a POI's coordinates or id is asking
-  what is near *them*; sending either through the keyword search raised `PlaceNotFoundError`, and
-  a ReAct run then burned its remaining steps re-searching a name that was never a name. Adding a
-  provider means implementing both.
+- **A place argument is a reference the provider issued, and a name is not one.**
+  `mapeval-api/FormattedTools.py` gives its baseline exactly one way to turn a name into a place —
+  `PlaceSearchTool`, which returns a `place_id` — and `PlaceDetails`, `NearbyPlaces`, `TravelTime`
+  and `Directions` all consume that id. Threading it is part of what the paper measures, and our
+  port used to do it for the caller: a name reaching `nearby_search` or `directions` was
+  keyword-searched behind the tool call. Measured on the v4 run, ReAct passed a bare name in about
+  two thirds of its place arguments (`travel_time` 123 against 53 ids) while Spatial-Agent passed
+  none, so the convenience was worth nothing to the architecture under test and a whole error class
+  to the baseline it is measured against. `ToolRegistry._reference` now refuses a name on the five
+  baseline tools, with an error that says to call `place_search` first, and both providers refuse
+  it too — the discipline has to be the same whichever evidence source a run uses.
+- **A reference the provider handed out is a reference it must take back.** The converse of the
+  rule above, and the reason it is safe. `MapProvider.dereference` accepts the place itself, a
+  `place_id` the provider minted, or coordinates it printed (`parse_coordinate_literal`,
+  `src/tools/spatial.py`, shared by every provider). An agent holding a POI's coordinates or id is
+  asking what is near *them*; sending either through the keyword search raised
+  `PlaceNotFoundError`, and a ReAct run then burned its remaining steps re-searching a name that
+  was never a name. Adding a provider means implementing `dereference` alongside the searches.
+- **The aggregation tools still resolve names, because that is what they are.** `batch_geocode`,
+  `distance_matrix` and `calculate_finish_time` exist to take the names a plan is holding and
+  resolve them in one step — that is exactly what makes them aggregations over PlaceSearch rather
+  than new evidence — so `ToolRegistry._resolved` does it for them, through the same matcher
+  `batch_geocode` uses. They are Spatial-Agent's tools, and the reference discipline is a
+  statement about the *baseline's* surface, which is upstream's.
 - **A ranking never invents evidence.** `max` always yields a candidate, so `_best_place_match`
   applies `NAME_EVIDENCE_FLOOR` and returns `None` when the winner shares no containment and too
   little similarity with the query — a name Kakao does not have must fail as `PlaceNotFoundError`,
@@ -253,7 +270,10 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   (`src/agent/spatial.py`) substitutes, for the place-valued operator arguments only, the place the
   plan itself resolved under that name — by the query text or by the name Kakao stores. It grants
   no evidence the run had not already gathered, and a name the plan never resolved is left alone so
-  it still fails as a missing place. The tools keep resolving names through the provider.
+  it still fails as a missing place. Since the baseline tools stopped resolving names behind the
+  call, this binding runs for tool nodes as well: a `directions` node written with the anchor's
+  name is the place the plan geocoded a step earlier, and the graph is where Spatial-Agent keeps
+  its references.
 - **A place is no distance from itself, and both architectures are told so identically.** Kakao
   refuses that leg — "출발지와 도착지가 5 m 이내로 설정된 경우 경로를 탐색할 수 없음" — and a trip
   matrix asks for its own diagonal, so one run spent 750 matrix calls plus 64 baseline

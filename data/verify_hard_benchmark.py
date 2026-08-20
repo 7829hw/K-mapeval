@@ -71,6 +71,20 @@ def _clock(moment: datetime) -> str:
     return f"{period} {hour if hour <= 12 else hour - 12}시 {minute:02d}분"
 
 
+def _ref(registry: ToolRegistry, name: str) -> Any:
+    """Resolve a name the way an agent must: `place_search` first, then pass what came back.
+
+    A place argument on a baseline tool is a reference the provider issued, so the verifier
+    threads the resolved place rather than the name — the same discipline
+    `mapeval-api/FormattedTools.py` imposes on its own tools.
+    """
+
+    found = call(registry, "place_search", query=name.strip(), limit=1)
+    if not found:
+        raise RuntimeError(f"unresolved: {name}")
+    return found[0]
+
+
 def verify(row: dict[str, Any], registry: ToolRegistry, ops: SpatialOperatorRegistry) -> str:
     from src.agent.spatial import _extract_route_priority
 
@@ -173,8 +187,8 @@ def verify(row: dict[str, Any], registry: ToolRegistry, ops: SpatialOperatorRegi
         route = call(
             registry,
             "directions",
-            origin=origin,
-            destination=destination,
+            origin=_ref(registry, origin),
+            destination=_ref(registry, destination),
             include_steps=True,
             priority=priority,
         )

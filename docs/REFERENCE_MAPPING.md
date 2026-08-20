@@ -527,6 +527,30 @@ is where its retrieval bypass comes from — geocode the four options and the qu
   leg. `trip_feasible_count` additionally rejects any row a constant travel assumption answers —
   the flaw measured on v2, where "15 minutes a leg" and no map scored 9/10.
 
+### The floor is part of the build loop, not a report afterwards
+
+The first cut of v4 measured **52/100** with no tools, which is not a benchmark. The leaks were in
+the option sets and the fix came from upstream's own data:
+
+| family | first floor | leak | fix | floor now |
+| --- | --- | --- | --- | --- |
+| `nearby_clinic_subtype` | 15/16 | the gold was the only option carrying 정형외과 in its name | three options of the requested subtype plus one *nearer* place of another — upstream's "nearest Mosque among four mosques" beside its "orthopedic hospital among several specialties" | 4/16 |
+| `nearby_cuisine_subtype` | 8/12 | same, weaker | same | 5/12 |
+| `poi_which_is_closer` | 6/7 | two options over a city the model knows | dropped; its rows went to `poi_straight_distance` | — |
+
+**35/100 overall**, against a 25% chance rate, with every measured family at or near chance:
+`routing_turn_count` 0/7, `trip_feasible_count` 1/7, `trip_total_distance` 1/7,
+`routing_distance_via` 2/8. The 7 `unanswerable_*` rows score 5/7 without tools, and that is
+correct rather than a leak — recognising that a question has no answer is a knowledge task, which
+is why MapEval includes the class at all.
+
+Building v4 also surfaced a construction bug the other benchmarks may share: a question was asked
+about the *pool's* copy of its anchor while an agent reaches the anchor through `place_search`, and
+the two sit up to `ROUND_TRIP_TOLERANCE_M` apart. One 피부과 question put its gold at 153 m from
+the pool's 신사동가로수길 while the resolved anchor had a different clinic at 93 m — a gold no
+agent could reach. `Builder.as_resolved` returns the resolved place, and the same tolerance is why
+a same-subtype option must sit at least 60 m farther than the gold.
+
 Two deviations, both because we have no annotators and one because upstream leaks:
 
 - The questions are templated. The *shape* of every family is upstream's; the phrasing is

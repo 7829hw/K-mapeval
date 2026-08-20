@@ -608,3 +608,45 @@ What is left to explain the gap with MapEval's reported numbers, in the order th
    resolution hard.
 4. **The model is current.** `nvidia/Qwen3.6-35B-A3B-NVFP4` against the paper's 2024 frontier
    models, on a benchmark whose measure is exact arithmetic over exact lookups.
+
+## Porting the id-threading, and what it cost
+
+The section above named the plumbing as the last untested explanation for the gap with MapEval's
+reported numbers, so it was ported: a place argument on the five baseline tools is now a reference
+the provider issued, and a name is refused with an error saying to call `place_search` first
+(`ToolRegistry._reference`, `MapProvider.dereference`, and the same refusal inside both providers).
+The aggregations keep resolving names, because resolving the names a plan holds is what makes them
+aggregations over PlaceSearch.
+
+Same benchmark, same model, before and after:
+
+| | tool calls | error rate | "not a reference" errors | accuracy |
+| --- | --- | --- | --- | --- |
+| ReAct, names accepted | 579 | 5.9% | — | 89/100 |
+| ReAct, references only | 784 | **25.5%** | 159 | 87/100 |
+| Spatial-Agent, names accepted | 1080 | 1.1% | — | 91/100 |
+| Spatial-Agent, references only | 1082 | 0.7% | 0 | 91/100 |
+
+The burden is real and it is asymmetric exactly as upstream's design implies: a quarter of ReAct's
+tool calls now fail, 159 of them on the id-threading MapEval's baseline does by hand, while
+Spatial-Agent never hits it — its planner resolves names in one `batch_geocode` and carries
+references through the graph, which is the architectural claim the paper makes.
+
+**It moved the accuracy by two points.** ReAct 89 → 87, Spatial-Agent 91 → 91, exact McNemar
+p = 0.50 — still indistinguishable. The reason is visible in the same table: ReAct *recovers*. It
+reads the error, calls `place_search`, and retries, spending 784 calls and 550 reasoning steps over
+100 questions — an average of 5.5 against a budget of 30. The plumbing costs it turns, not answers,
+because the budget absorbs them and the error message says what to do. Upstream's 15-iteration
+default and its silent "Incorrect place name" would absorb fewer.
+
+So the ledger on this benchmark now reads: floor 35, ReAct 87, Spatial-Agent 91, and the
+architectures separated by 4 points that a paired test does not distinguish. What remains
+unported is not plumbing but evidence — Kakao publishes no rating, price level or opening hours,
+so the half of MapEval-API that turns on reading an attribute table cannot be asked here at all,
+and the questions are templated rather than written by a person. A write-up should say that the
+comparison reproduces MapEval's *method* and not its *difficulty*.
+
+One family keeps pointing the other way, and it is the one worth reporting: Spatial-Agent scores
+3/7 on the `unanswerable_*` rows against ReAct's 7/7. A graph that must terminate in a Measure
+composes, executes and reports a number; ReAct reads the options, finds the map silent and picks
+the refusal.

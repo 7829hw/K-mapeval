@@ -722,6 +722,23 @@ v2's version was answerable 9/10 by assuming a constant 15 minutes a leg, becaus
 hour from the boundary. Here the stays-only count must differ from the true one, which it does on
 all 7 rows.
 
+**Build the floor into the family, not into an apology afterwards.** The first cut of this
+benchmark measured 52/100 with no tools, and the leaks were in the option sets:
+`nearby_clinic_subtype` scored 15/16 because the gold was the only option with 정형외과 in its
+name, and `poi_which_is_closer` scored 6/7 because two options over a city the model knows is not a
+question. So the constrained families now carry **three** options of the requested subtype plus one
+*nearer* place of another — reading the names narrows it to three and proximity alone picks the
+wrong one — and the two-option family is gone. Run `data/measure_no_tool_floor.py` after any change
+to a family's options; a family whose floor is near its accuracy is not measuring the map.
+
+**A question about an anchor is a question about whatever that name resolves to.**
+`Builder.as_resolved` returns the place `place_search` answers with, not the pool's copy, and the
+two sit up to `ROUND_TRIP_TOLERANCE_M` apart. Built from the pool's copy, one 피부과 question put
+its gold at 153 m while the resolved anchor had a different clinic at 93 m — a gold no agent could
+reach. The same tolerance is why a same-subtype option must be at least 60 m farther than the gold:
+that margin is the provider's, not a difficulty knob, which is why it survives the removal of v2's
+engineered margins.
+
 ### `dataset/seoul_kmapeval_v2_mcq_100.jsonl` — the first reproduction benchmark, superseded
 
 **Superseded by v4 for the reproduction question, and kept because its runs are on record.** It

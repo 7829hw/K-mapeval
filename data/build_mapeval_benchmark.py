@@ -173,20 +173,25 @@ def _constrained_nearby(
 ) -> list[dict]:
     """The nearest place *of a named subtype*, with nearer places of sibling subtypes offered.
 
-    Upstream's shape: "Suggest me an orthopedic hospital near ICT tower" against a nearby list
-    that holds every kind of hospital. Proximity alone answers it wrong, which is the point --
-    and unlike v2, the option set is not the candidate set, because the agent has to retrieve the
-    neighbourhood to know which of these is nearest at all.
+    Upstream has both halves of this. "Suggest me an orthopedic hospital near ICT tower" offers
+    hospitals of several specialties, so the *type* decides; "What is the nearest Mosque to me?"
+    offers four mosques, so the *distance* decides. One option of the requested subtype against
+    three of other subtypes gives the answer away in the option text -- measured, the no-tool floor
+    on that arrangement was 15/16, because `연세견우정형외과의원` was the only option carrying
+    정형외과 in its name. So the set holds three of the requested subtype and one nearer place of
+    another: reading the names narrows it to three, proximity alone picks the wrong one, and only
+    both together answer it.
     """
 
     anchors = pool.of("AT4", "CT1", "SW8", "AD5")
     rng.shuffle(anchors)
     made: list[dict] = []
     used: set[str] = set()
-    for anchor in anchors:
+    for pooled in anchors:
         if len(made) >= count:
             break
-        if anchor.place_id in used or not builder.resolves_to(anchor):
+        anchor = builder.as_resolved(pooled)
+        if pooled.place_id in used or anchor is None:
             continue
         prompt, token = prompts[len(made) % len(prompts)]
         try:
@@ -200,22 +205,37 @@ def _constrained_nearby(
         except Exception:  # noqa: BLE001 - an empty neighbourhood is simply not usable
             continue
         wanted = [place for place in found if _subtype(place, token)]
-        if not wanted:
+        if len(wanted) < 3:
             continue
         gold = wanted[0]
-        # Strictly nearer, with a metre to spare: a decoy that rounds to the same distance as the
+        if not builder.resolves_to(gold):
+            continue
+        # Far enough that name resolution cannot flip it. `Builder.resolves_to` accepts a name
+        # landing within 200 m, so two same-subtype options 2 m apart are not reliably ordered by
+        # any agent that reaches them through a keyword search -- this is the provider's tolerance,
+        # not a difficulty knob, which is why it survives the removal of v2's engineered margins.
+        farther = take_resolvable(
+            builder,
+            [
+                place
+                for place in wanted[1:]
+                if distance_m(anchor, place) > distance_m(anchor, gold) + 60
+            ],
+            2,
+        )
+        # Strictly nearer, with a metre to spare: a trap that rounds to the same distance as the
         # gold makes the recorded evidence say two places are equally near, and the invariant this
         # family rests on is that proximity alone never selects the gold.
-        nearer_siblings = [
+        nearer_other = [
             place
             for place in found
             if not _subtype(place, token)
             and distance_m(anchor, place) < distance_m(anchor, gold) - 5
         ]
-        decoys = take_resolvable(builder, nearer_siblings, 3)
-        if len(decoys) < 3 or not builder.resolves_to(gold):
+        trap = take_resolvable(builder, nearer_other, 1)
+        if len(farther) < 2 or not trap:
             continue
-        options = [gold, *decoys]
+        options = [gold, *farther, *trap]
         if len({place.name for place in options}) < 4:
             continue
         made.append(
@@ -234,13 +254,16 @@ def _constrained_nearby(
                     "required_subtype": token,
                     "category_code": code,
                     "gold_distance_m": round(distance_m(anchor, gold)),
+                    "farther_same_subtype_m": [
+                        round(distance_m(anchor, place)) for place in farther
+                    ],
                     "nearer_wrong_subtype_m": [
-                        round(distance_m(anchor, place)) for place in decoys
+                        round(distance_m(anchor, place)) for place in trap
                     ],
                 },
             }
         )
-        used.add(anchor.place_id)
+        used.add(pooled.place_id)
     return made
 
 
@@ -321,56 +344,6 @@ def poi_direction_distance(
             }
         )
         used.update((a.place_id, b.place_id))
-    return made
-
-
-def poi_which_is_closer(
-    builder: Builder, pool: Pool, rng: random.Random, count: int
-) -> list[dict]:
-    """A two-option question, the shape 16 of upstream's 300 rows use."""
-
-    anchors = pool.of("AD5", "SW8", "AT4")
-    rivals = pool.of("CT1", "AT4", "MT1")
-    rng.shuffle(anchors)
-    rng.shuffle(rivals)
-    made: list[dict] = []
-    used: set[str] = set()
-    for anchor in anchors:
-        if len(made) >= count:
-            break
-        if anchor.place_id in used or not builder.resolves_to(anchor):
-            continue
-        ranked = sorted(
-            (place for place in rivals if 800 <= distance_m(anchor, place) <= 15000),
-            key=lambda place: distance_m(anchor, place),
-        )
-        if len(ranked) < 8:
-            continue
-        near, far = ranked[1], ranked[6]
-        # No engineered margin: whatever the map says is the answer, as upstream has it.
-        if not (builder.resolves_to(near) and builder.resolves_to(far)):
-            continue
-        made.append(
-            {
-                "question": (
-                    f"{anchor.name}에서 {wa(near.name)} {far.name} 중 "
-                    "직선거리로 더 가까운 곳은 어디인가요?"
-                ),
-                "options": [near.name, far.name],
-                "answer": 0,
-                "classification": "distance",
-                "mapeval_class": "poi",
-                "template_id": "poi_which_is_closer",
-                "gold_evidence": {
-                    "anchor": anchor.name,
-                    "near": near.name,
-                    "far": far.name,
-                    "near_m": round(distance_m(anchor, near)),
-                    "far_m": round(distance_m(anchor, far)),
-                },
-            }
-        )
-        used.add(anchor.place_id)
     return made
 
 
@@ -907,8 +880,9 @@ FAMILIES: list[tuple[str, Callable[..., list[dict]], int]] = [
     ("nearby_clinic_subtype", nearby_clinic, 16),
     ("nearby_cuisine_subtype", nearby_cuisine, 12),
     ("poi_direction_distance", poi_direction_distance, 8),
-    ("poi_which_is_closer", poi_which_is_closer, 7),
-    ("poi_straight_distance", poi_straight_distance, 6),
+    # `poi_which_is_closer` is gone: two options over a city the model knows gave a no-tool floor
+    # of 6/7. Its rows went to the straight-line family, whose floor is 1/6.
+    ("poi_straight_distance", poi_straight_distance, 13),
     ("routing_distance_via", routing_distance_via, 8),
     ("routing_turn_count", routing_turn_count, 7),
     ("routing_next_turn", routing_next_turn, 7),

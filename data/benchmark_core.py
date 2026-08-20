@@ -199,6 +199,19 @@ class Builder:
             return False
         return distance_m(cached, place) <= ROUND_TRIP_TOLERANCE_M
 
+    def as_resolved(self, place: Place) -> Place | None:
+        """The place an agent gets when it searches this name, not the one the pool holds.
+
+        The two may sit up to `ROUND_TRIP_TOLERANCE_M` apart, and a question asked about the pool's
+        copy is then measured from a point no agent stands on: one 피부과 question put its gold at
+        153 m from the pool's 신사동가로수길 while the resolved anchor had another clinic at 93 m.
+        A question about an anchor is a question about whatever that name resolves to.
+        """
+
+        if not self.resolves_to(place):
+            return None
+        return self._resolved.get(place.name)
+
     def route(
         self,
         origin: Place,

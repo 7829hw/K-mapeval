@@ -214,8 +214,15 @@ def test_the_refusal_option_is_not_a_signal() -> None:
     assert len(gold_on_it) / len(carrying) < 0.3
 
 
-def test_a_named_option_family_is_decided_by_the_constraint_not_by_proximity() -> None:
-    """Upstream asks for an *orthopedic* hospital. The nearest hospital is a wrong answer."""
+def test_a_named_option_family_needs_both_the_constraint_and_the_distance() -> None:
+    """Neither reading the names nor ranking by distance answers these on its own.
+
+    Upstream has both halves: an *orthopedic* hospital among several specialties, and the nearest
+    *mosque* among four mosques. One option of the requested subtype against three others gives
+    the answer away in the option text — the no-tool floor on that arrangement was 15/16. So three
+    options carry the subtype, which leaves distance to decide, and one nearer place of another
+    subtype punishes ranking without the filter.
+    """
 
     items = load_dataset(MAPEVAL_METHOD_BENCHMARK)
     constrained = [
@@ -227,9 +234,12 @@ def test_a_named_option_family_is_decided_by_the_constraint_not_by_proximity() -
     for item in constrained:
         evidence = item.gold_evidence
         assert evidence["required_subtype"] in item.question
+        farther = evidence["farther_same_subtype_m"]
+        assert len(farther) == 2
+        # Far enough that the 200 m round-trip tolerance cannot reorder them.
+        assert min(farther) > evidence["gold_distance_m"] + 50
         nearer = evidence["nearer_wrong_subtype_m"]
-        assert len(nearer) == 3
-        assert max(nearer) < evidence["gold_distance_m"]
+        assert nearer and max(nearer) < evidence["gold_distance_m"]
 
 
 def test_the_feasible_count_family_cannot_be_answered_without_the_map() -> None:

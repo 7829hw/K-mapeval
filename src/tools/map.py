@@ -3,6 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 from src.models import Place, Route
+from src.tools.spatial import parse_coordinate_literal
 
 
 class ProviderError(RuntimeError):
@@ -83,7 +84,22 @@ class MapProvider(ABC):
         implementing this alongside the searches.
         """
 
-        return value if isinstance(value, Place) else None
+        if isinstance(value, Place):
+            return value
+        # A provider that keeps no index of what it handed out still recognises the coordinates it
+        # printed; a name falls through to None, which is the whole point of the contract.
+        coordinates = parse_coordinate_literal(value)
+        if coordinates is None:
+            return None
+        latitude, longitude = coordinates
+        return Place(
+            place_id=f"{latitude},{longitude}",
+            name=str(value),
+            address="",
+            latitude=latitude,
+            longitude=longitude,
+            category="COORDINATE",
+        )
 
     @abstractmethod
     def directions(

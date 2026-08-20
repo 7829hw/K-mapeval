@@ -82,7 +82,8 @@ def _ref(registry: ToolRegistry, name: str) -> Any:
     found = call(registry, "place_search", query=name.strip(), limit=1)
     if not found:
         raise RuntimeError(f"unresolved: {name}")
-    return found[0]
+    # `place_search` hands back a reference, as upstream's PlaceSearchTool does.
+    return found[0]["place_id"]
 
 
 def verify(row: dict[str, Any], registry: ToolRegistry, ops: SpatialOperatorRegistry) -> str:

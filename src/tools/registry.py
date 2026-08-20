@@ -555,7 +555,8 @@ class ToolRegistry:
             for tool in (
                 ToolDefinition(
                     "place_search",
-                    "Search by keyword, or around center with radius/type/rating/open filters.",
+                    "Find the place_id for a name. Returns place_id and name only; call "
+                    "place_details with the id for coordinates, address and category.",
                     PlaceSearchArgs,
                     self._place_search,
                 ),
@@ -798,7 +799,24 @@ class ToolRegistry:
                 )
         return results
 
-    def _place_search(self, args: PlaceSearchArgs) -> list[Place]:
+    @staticmethod
+    def _search_view(places: list[Place]) -> list[dict[str, str]]:
+        """What `mapeval-api`'s PlaceSearchTool returns: a reference, not a place.
+
+        Upstream is `return data['results'][0]['place_id']` — an id and nothing else, so a baseline
+        that wants coordinates calls `PlaceDetails` for them and pays a second round trip per
+        place. Upstream *Spatial-Agent* is the opposite: `google_maps.nearby_search` and
+        `get_place_details` both carry `lat`/`lng`, which is the tool-surface asymmetry the paper
+        is built on. Ours handed the full normalized `Place` to whoever asked, and since
+        Spatial-Agent never calls `place_search` at all (0 of 100 plans in the v4 run) every bit of
+        that generosity went to the baseline: one call answered "how far apart are A and B".
+        The name rides along because a nationwide keyword search needs to be checkable; the
+        geometry does not.
+        """
+
+        return [{"place_id": place.place_id, "name": place.name} for place in places]
+
+    def _place_search(self, args: PlaceSearchArgs) -> list[dict[str, str]]:
         places = (
             self.provider.search_place(str(args.query), limit=args.limit)
             if args.center is None
@@ -822,7 +840,7 @@ class ToolRegistry:
             ]
         if args.open_now is not None and any(place.is_open is not None for place in places):
             places = [place for place in places if place.is_open is args.open_now]
-        return places
+        return self._search_view(places)
 
     def _reference(self, value: Any) -> Any:
         """A place argument on a baseline tool must be something the provider handed out.

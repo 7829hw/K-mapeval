@@ -36,10 +36,12 @@ def call(registry: ToolRegistry, name: str, **arguments: Any) -> Any:
 
 
 def _place(registry: ToolRegistry, name: str) -> dict[str, Any]:
+    """The full place: `place_search` returns a reference, `place_details` returns the place."""
+
     found = call(registry, "place_search", query=name, limit=1)
     if not found:
         raise RuntimeError(f"unresolved: {name}")
-    return found[0]
+    return call(registry, "place_details", place_id=found[0]["place_id"])
 
 
 def _number(text: str) -> float:

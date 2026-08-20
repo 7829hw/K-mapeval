@@ -31,6 +31,7 @@ from src.tools import MapProvider, SpatialOperatorRegistry, ToolRegistry
 class FakeProvider(MapProvider):
     def __init__(self) -> None:
         self._api_calls = 0
+        self._issued: dict[str, Place] = {}
         self.place = Place(
             place_id="1",
             name="경복궁",
@@ -44,6 +45,13 @@ class FakeProvider(MapProvider):
     def api_call_count(self) -> int:
         return self._api_calls
 
+    def dereference(self, value: str | Place) -> Place | None:
+        """A fake provider still has to take back what it handed out."""
+
+        if isinstance(value, Place):
+            return value
+        return self._issued.get(value) or super().dereference(value)
+
     def _named(self, query: str) -> Place:
         """A geocoder answers with a place that carries the name it was asked for.
 
@@ -54,7 +62,7 @@ class FakeProvider(MapProvider):
         """
 
         offset = (sum(ord(character) for character in query) % 97) * 0.0011
-        return self.place.model_copy(
+        place = self.place.model_copy(
             update={
                 "place_id": query,
                 "name": query,
@@ -62,6 +70,8 @@ class FakeProvider(MapProvider):
                 "longitude": round(self.place.longitude + offset / 2, 6),
             }
         )
+        self._issued[place.place_id] = place
+        return place
 
     def search_place(self, query: str, *, limit: int = 5) -> list[Place]:
         self._api_calls += 1
@@ -77,7 +87,7 @@ class FakeProvider(MapProvider):
         return [self._named(query) if query else self.place]
 
     def place_details(self, place_id: str) -> Place:
-        return self.place
+        return self._issued.get(place_id, self.place)
 
     def directions(self, origin: str | Place, destination: str | Place, **_: Any) -> Route:
         self._api_calls += 1
@@ -157,7 +167,7 @@ def test_registry_clamps_llm_generated_kakao_limits() -> None:
     nearby = registry.invoke(
         "nearby_places",
         {
-            "center": search.output[0],
+            "center": search.output[0]["place_id"],
             "query": "식당",
             "radius_m": 50_000,
             "limit": 50,
@@ -172,7 +182,7 @@ def test_registry_clamps_llm_generated_kakao_limits() -> None:
 
 def test_registry_infers_exact_kakao_category_for_station_search() -> None:
     registry = ToolRegistry(FakeProvider())
-    centre = registry.invoke("place_search", {"query": "경복궁"}).output[0]
+    centre = registry.invoke("place_search", {"query": "경복궁"}).output[0]["place_id"]
     execution = registry.invoke(
         "nearby_places", {"center": centre, "query": "역", "radius_m": 300}
     )
@@ -1299,7 +1309,7 @@ def test_a_leg_from_a_place_to_itself_is_answered_for_both_architectures() -> No
 
     provider = FakeProvider()
     registry = ToolRegistry(provider)
-    palace = registry.invoke("place_search", {"query": "경복궁"}).output[0]
+    palace = registry.invoke("place_search", {"query": "경복궁"}).output[0]["place_id"]
     before = provider.api_call_count
     for tool in ("travel_time", "directions"):
         execution = registry.invoke(tool, {"origin": palace, "destination": palace})
@@ -1315,14 +1325,13 @@ def test_spatial_agent_handles_google_style_references_without_aborting() -> Non
             LLMResponse('{"intent":"nearby"}'),
             LLMResponse(
                 '{"steps":['
-                '{"id":"s1","operator":"place_search",'
-                '"arguments":{"query":"경복궁","limit":1}},'
-                '{"id":"s2","operator":"place_search",'
-                '"arguments":{"query":"광화문","limit":1}},'
+                '{"id":"s1","operator":"batch_geocode",'
+                '"arguments":{"place_names":["경복궁"],"limit":1}},'
+                '{"id":"s2","operator":"batch_geocode",'
+                '"arguments":{"place_names":["광화문"],"limit":1}},'
                 '{"id":"s3","operator":"haversine_distance",'
-                '"arguments":{"lat1":"$s1.0.geometry.lat",'
-                '"lng1":"$s1.0.geometry.lng","lat2":"$s2.0.lat",'
-                '"lng2":"$s2.0.lng"}}]}'
+                '"arguments":{"place_a":"$s1.0.geometry.location",'
+                '"place_b":"$s2.0.geometry.location"}}]}'
             ),
             LLMResponse('{"predicted_option":1,"confidence":0.9,"reason":"distance"}'),
         ]
@@ -1341,8 +1350,8 @@ def test_overspecified_plan_reference_degrades_to_the_closest_resolvable_object(
             LLMResponse('{"intent":"poi"}'),
             LLMResponse(
                 '{"steps":['
-                '{"id":"s1","operator":"place_search",'
-                '"arguments":{"query":"경복궁","limit":1}},'
+                '{"id":"s1","operator":"batch_geocode",'
+                '"arguments":{"place_names":["경복궁"],"limit":1}},'
                 '{"id":"s2","operator":"haversine_distance",'
                 '"arguments":{"place_a":"$s1.0.place",'
                 '"place_b":"$s1.0"}}]}'
@@ -1960,9 +1969,11 @@ def test_a_place_argument_is_a_reference_the_provider_issued() -> None:
     # What the tool does accept is what `place_search` handed back.
     found = registry.invoke("place_search", {"query": "서울역"})
     assert found.status == "ok"
+    reference = found.output[0]["place_id"]
+    assert "latitude" not in found.output[0]  # upstream returns an id, not a place
     threaded = registry.invoke(
         "travel_time",
-        {"origin": found.output[0], "destination": found.output[0]},
+        {"origin": reference, "destination": reference},
     )
     assert threaded.status == "ok"
 

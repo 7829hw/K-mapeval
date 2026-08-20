@@ -195,6 +195,17 @@ Spatial-Agent additionally → SpatialOperatorRegistry (pure local computation, 
   to the baseline it is measured against. `ToolRegistry._reference` now refuses a name on the five
   baseline tools, with an error that says to call `place_search` first, and both providers refuse
   it too — the discipline has to be the same whichever evidence source a run uses.
+- **A baseline tool reports what its upstream counterpart reports, and `place_search` reports a
+  reference.** `mapeval-api/FormattedTools.py` is `return data['results'][0]['place_id']` — an id
+  and nothing else, so a baseline that wants coordinates pays a second round trip through
+  `PlaceDetails`. Upstream *Spatial-Agent* is the opposite: `google_maps.nearby_search` and
+  `get_place_details` both carry `lat`/`lng`. That asymmetry is the paper's own arrangement, and
+  ours had erased it by handing the full normalized `Place` to whoever asked. Since Spatial-Agent
+  never calls `place_search` at all — 0 of 100 plans in the v4 run — every bit of the generosity
+  went to the baseline: one call answered "how far apart are A and B", where upstream needs a
+  search and a details call per place. `ToolRegistry._search_view` projects to `{place_id, name}`;
+  the name rides along because a nationwide keyword search has to be checkable, the geometry does
+  not.
 - **A reference the provider handed out is a reference it must take back.** The converse of the
   rule above, and the reason it is safe. `MapProvider.dereference` accepts the place itself, a
   `place_id` the provider minted, or coordinates it printed (`parse_coordinate_literal`,

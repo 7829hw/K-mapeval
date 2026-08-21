@@ -59,6 +59,8 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   measurable.
 - Do not pool results across datasets, provider modes, or ReAct tool surfaces. Label reports as
   prompting-only, and include the no-tool floor when interpreting accuracy.
+- Decode at `temperature=0`, which is what both upstreams do. Sending no temperature leaves the
+  endpoint's default in force, and two floor runs over one benchmark then differed by 11 points.
 - Run `python data/audit_dataset.py <dataset>` after every build and before the floor. It exits
   non-zero on a second answer key: a gold sitting at a fixed rank once the options are sorted, an
   option that can never be the answer, a gold whose text appears in its own question, duplicate

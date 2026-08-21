@@ -84,6 +84,7 @@ class OpenAIChatClient:
             kwargs["base_url"] = settings.llm_base_url
         self._client = OpenAI(**kwargs)
         self._model = settings.llm_model
+        self._temperature = settings.llm_temperature
         self._max_retries = settings.llm_max_retries
         self._backoff = settings.llm_retry_backoff_seconds
 
@@ -96,6 +97,7 @@ class OpenAIChatClient:
         kwargs: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
+            "temperature": self._temperature,
         }
         if tools:
             kwargs["tools"] = tools

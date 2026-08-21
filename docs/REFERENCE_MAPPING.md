@@ -799,3 +799,21 @@ ordinary Seoul address sits in. Its function stays in the file as the record of 
 not survive its own floor. `trip_optimal_order` drew its stops from attractions and cultural venues
 only, which a model can order from memory of the city; marts are in the pool now.
 
+### Every number this repository has published is one sample from a temperature-1 decoder
+
+Re-measuring the floor after the fixes gave **27/100**, then **38/100**. Families the rebuild did
+not touch moved as much as the ones it did: `routing_next_turn` 2/7 then 6/7, `trip_feasible_count`
+1/7 then 5/7. That is not a benchmark property.
+
+`OpenAIChatClient.chat` sent no `temperature`, so the endpoint's own default decided it — 1.0 on a
+vLLM deployment. **Both upstreams decode greedily**: `mapeval-api/GPT_4o_mini.py:10` and
+`spatial-agent/src/agent/spatial_agent.py:215` each construct their client with `temperature=0`.
+So every accuracy in the sections above — the v2, v3 and v4 runs, both floors, the id-threading
+before-and-after table, the McNemar tests — is a single draw from a sampler the reference
+implementations do not use, and the two-point and four-point differences those sections reason
+about are inside the spread just measured.
+
+`Settings.llm_temperature` now exists and defaults to `0.0`, which is the upstream setting;
+`LLM_TEMPERATURE` overrides it. Anything quoted from before this change should be re-run, and a
+report that compares two architectures should say which temperature produced it.
+

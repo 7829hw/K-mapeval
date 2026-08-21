@@ -19,6 +19,13 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = ""
     llm_base_url: str | None = None
+    # Both upstreams decode greedily -- `mapeval-api/GPT_4o_mini.py:10` and
+    # `spatial-agent/src/agent/spatial_agent.py:215` both construct their client with
+    # `temperature=0`. Sending no temperature at all leaves the server's default in force, which on
+    # a vLLM deployment is 1.0: measured here, two no-tool floor runs over the same benchmark came
+    # back 27/100 and 38/100, and single families swung 2/7 to 6/7 between them. An accuracy
+    # sampled that way is one draw, not a measurement.
+    llm_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     # A ReAct question carries its whole growing trace into every call, and a busy self-hosted
     # endpoint can take minutes to answer one. A short timeout does not make the answer arrive
     # sooner; it only turns a slow answer into a lost question.

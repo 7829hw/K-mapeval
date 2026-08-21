@@ -190,6 +190,7 @@ def run(agent_type: str, args: argparse.Namespace) -> dict:
             # Which tool surface the ReAct baseline had. A run is only comparable to the paper
             # when this says "mapeval", and only comparable across our own agents when "full".
             "react_tools": args.react_tools,
+            "llm_temperature": settings.llm_temperature,
             # Which code answered. A night of fixes produces a shelf of reports whose accuracies
             # differ for reasons no field records, and "which commit was this?" is not
             # reconstructable from the timestamp once two runs overlap. Read once at import, not

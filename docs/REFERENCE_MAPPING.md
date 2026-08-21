@@ -678,3 +678,33 @@ One family keeps pointing the other way, and it is the one worth reporting: Spat
 composes, executes and reports a number; ReAct reads the options, finds the map silent and picks
 the refusal.
 
+### The floor found a second answer key, and v4 has it too
+
+v5's first floor came back **36/100**, and three families sat well above the 25% chance rate:
+`poi_straight_distance_tight` 6/8, `trip_optimal_order` 5/8, `poi_address_district` 3/5. The first
+was not the model knowing Seoul. `_distance_options` was called with a fixed multiplier set on
+every row, so once the four printed lengths are sorted **the gold sits at a constant index**, and
+"take the second smallest" answers the family with no map at all.
+
+The shipped v4 file has the same tell in four families, three of them deterministic:
+
+| family | multipliers | gold's rank among the sorted options |
+| --- | --- | --- |
+| `poi_straight_distance` | `(1.28, 1.75, 0.62)` | second-smallest, 10 of 10 parsed rows |
+| `routing_distance_via` | `(0.78, 1.42, 1.9)` | second-smallest, 6 of 6 |
+| `trip_total_distance` | `(0.78, 1.45, 0.55)` | third-smallest, 5 of 5 |
+| `poi_direction_distance` | `1.28` against the true length | one of the two smallest, 6 of 6 |
+
+That is **28 of v4's 100 rows answerable by sorting the options and taking a constant index**. The
+closed-book model did not find the rule — v4's measured floor of 35/100 stands as a floor, and the
+87/91 pair was not produced this way — but a benchmark with a second answer key is unsound
+regardless of whether a particular model used it, and any accuracy quoted from that file has to
+carry this paragraph. `straddling_multipliers` draws how many wrong lengths fall below the gold,
+per row, and is now used at every call site in both builders; the shipped v4 file predates it and
+should be rebuilt before it is quoted again.
+
+`poi_address_district` was dropped outright: floor 3/5, because the model knows which 구 an
+ordinary Seoul address sits in. Its function stays in the file as the record of a family that did
+not survive its own floor. `trip_optimal_order` drew its stops from attractions and cultural venues
+only, which a model can order from memory of the city; marts are in the pool now.
+

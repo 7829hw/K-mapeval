@@ -129,6 +129,36 @@ def _distance_options(metres: float, multipliers: tuple[float, ...]) -> list[str
     return options if len(set(options)) == len(options) else None
 
 
+def straddling_multipliers(
+    rng: random.Random,
+    below: tuple[float, ...],
+    above: tuple[float, ...],
+    count: int = 3,
+) -> tuple[float, ...]:
+    """Wrong lengths whose count below the gold is drawn per row, not fixed.
+
+    A fixed multiplier set puts the gold at a fixed position once the four printed numbers are
+    sorted, and that position *is* the answer. Measured on the shipped v4 file:
+    `poi_straight_distance` `(1.28, 1.75, 0.62)` -> gold second-smallest on 10 of 10 parsed rows,
+    `routing_distance_via` `(0.78, 1.42, 1.9)` -> second-smallest on 6 of 6, `trip_total_distance`
+    `(0.78, 1.45, 0.55)` -> third-smallest on 5 of 5. Twenty-eight of that file's hundred rows are
+    answerable by sorting the options and taking a constant index, with no map involved. The
+    closed-book floor did not find the rule, so v4's measured 35/100 stands as a floor; the
+    benchmark is unsound all the same, and any accuracy quoted from that file has to say so.
+
+    Each family keeps its own spread and passes its own pools; only which side each wrong length
+    falls on is drawn.
+    """
+
+    low = max(0, count - len(above))
+    high = min(count, len(below))
+    picked = rng.randint(low, high)
+    return (
+        *rng.sample(below, picked),
+        *rng.sample(above, count - picked),
+    )
+
+
 def _clock(moment: datetime) -> str:
     hour, minute = moment.hour, moment.minute
     period = "오전" if hour < 12 else "오후"
@@ -366,7 +396,9 @@ def poi_straight_distance(
             continue
         if not (builder.resolves_to(a) and builder.resolves_to(b)):
             continue
-        options = _distance_options(metres, (1.28, 1.75, 0.62))
+        options = _distance_options(
+            metres, straddling_multipliers(rng, (0.62, 0.78, 0.86), (1.28, 1.42, 1.75))
+        )
         if options is None:
             continue
         made.append(
@@ -425,7 +457,10 @@ def routing_distance_via(
         route = builder.route(origin, destination, waypoints=[via], priority="DISTANCE")
         if route is None or route.distance_m <= 0:
             continue
-        options = _distance_options(route.distance_m, (0.78, 1.42, 1.9))
+        options = _distance_options(
+            route.distance_m,
+            straddling_multipliers(rng, (0.62, 0.78, 0.88), (1.20, 1.42, 1.90)),
+        )
         if options is None:
             continue
         made.append(
@@ -686,7 +721,9 @@ def trip_total_distance(
         if any(route is None for route in legs):
             continue
         total = sum(route.distance_m for route in legs)
-        options = _distance_options(total, (0.78, 1.45, 0.55))
+        options = _distance_options(
+            total, straddling_multipliers(rng, (0.55, 0.78, 0.88), (1.20, 1.45, 1.75))
+        )
         if options is None:
             continue
         order = " → ".join(place.name for place in chain)
@@ -898,13 +935,23 @@ FAMILIES: list[tuple[str, Callable[..., list[dict]], int]] = [
 DECOY_REFUSAL_EVERY = 4
 
 
-def finalize(rows: list[dict]) -> list[dict]:
+# Families whose options are a ladder rather than a set, so their positions carry meaning and
+# must not be shuffled. A benchmark that extends this file passes its own through `finalize`.
+ORDERED_FAMILIES = frozenset({"trip_feasible_count"})
+
+
+def finalize(
+    rows: list[dict],
+    seed: int = SEED,
+    prefix: str = "seoul_kmapeval_v4",
+    ordered: frozenset[str] = ORDERED_FAMILIES,
+) -> list[dict]:
     """Assign gold positions per family, and plant the refusal distractor.
 
     Ordinal option sets keep their order: "한 곳"…"네 곳" carries meaning in its position.
     """
 
-    ordered_families = {"trip_feasible_count"}
+    ordered_families = ordered
     slots: dict[str, list[int]] = {}
     for row in rows:
         family = row["template_id"]
@@ -914,15 +961,15 @@ def finalize(rows: list[dict]) -> list[dict]:
         width = len(row["options"])
         # Start each family's cycle at its own offset: a family of 7 over 4 positions leaves a
         # remainder, and every family leaving it at index 0 skewed the whole set toward option 0.
-        offset = random.Random(f"offset:{family}:{SEED}").randrange(width)
+        offset = random.Random(f"offset:{family}:{seed}").randrange(width)
         positions = [(index + offset) % width for index in range(size)]
-        random.Random(f"{family}:{SEED}").shuffle(positions)
+        random.Random(f"{family}:{seed}").shuffle(positions)
         slots[family] = positions
 
     finished: list[dict] = []
     answerable = 0
     for index, row in enumerate(rows):
-        question_id = f"seoul_kmapeval_v4_{index:03d}"
+        question_id = f"{prefix}_{index:03d}"
         options = list(row["options"])
         answer = row["answer"]
         if row["mapeval_class"] != "unanswerable":
@@ -939,7 +986,7 @@ def finalize(rows: list[dict]) -> list[dict]:
             remaining = [
                 position for position in range(len(options)) if position != answer
             ]
-            random.Random(f"{question_id}:{SEED}").shuffle(remaining)
+            random.Random(f"{question_id}:{seed}").shuffle(remaining)
             order = list(remaining)
             order.insert(target, answer)
         finished.append(
@@ -964,6 +1011,21 @@ def main() -> None:
     parser.add_argument("--families", nargs="*", default=None)
     parser.add_argument("--scale", type=float, default=1.0)
     parser.add_argument("--out", default=str(OUT_PATH))
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=SEED,
+        help=(
+            "Generation seed. A seed other than the default draws a different sample from the "
+            "same pool, which is how a held-out set is built: nothing in src/ has been tuned "
+            "against it, so an accuracy measured there is not an accuracy on the training set."
+        ),
+    )
+    parser.add_argument(
+        "--id-prefix",
+        default="seoul_kmapeval_v4",
+        help="Question id prefix, so a held-out build cannot collide with the tuned set's ids",
+    )
     args = parser.parse_args()
 
     builder = Builder.open()
@@ -974,7 +1036,7 @@ def main() -> None:
             if args.families and name not in args.families:
                 continue
             wanted = max(1, round(quota * args.scale))
-            rng = random.Random(f"{SEED}:{name}")
+            rng = random.Random(f"{args.seed}:{name}")
             produced = function(builder, pool, rng, wanted)
             print(
                 f"{name}: {len(produced)}/{wanted} (api={builder.provider.api_call_count})",
@@ -984,7 +1046,7 @@ def main() -> None:
     finally:
         builder.close()
 
-    finished = finalize(rows)
+    finished = finalize(rows, seed=args.seed, prefix=args.id_prefix)
     Path(args.out).write_text(
         "\n".join(json.dumps(row, ensure_ascii=False) for row in finished) + "\n",
         encoding="utf-8",

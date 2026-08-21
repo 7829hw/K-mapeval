@@ -59,6 +59,16 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   measurable.
 - Do not pool results across datasets, provider modes, or ReAct tool surfaces. Label reports as
   prompting-only, and include the no-tool floor when interpreting accuracy.
+- Run `python data/audit_dataset.py <dataset>` after every build and before the floor. It exits
+  non-zero on a second answer key: a gold sitting at a fixed rank once the options are sorted, an
+  option that can never be the answer, a gold whose text appears in its own question, duplicate
+  options. Every one of those shipped in a benchmark here before the script existed.
+- A numeric option set must not put the gold at a fixed rank once the options are sorted. Use
+  `straddling_multipliers`; a fixed multiplier tuple is a second answer key.
+- Every rung a question offers has to be reachable *and* reached. A family whose options are a
+  fixed ladder must be able to answer each rung, and should spend its rows across them the way
+  `trip_feasible_count` does — keying the answer on a loop index spends them wherever the loop
+  happened to succeed.
 
 ## Benchmarks
 

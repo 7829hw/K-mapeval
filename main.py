@@ -44,14 +44,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     result.add_argument(
         "--react-tools",
-        choices=("mapeval", "full"),
-        default="mapeval",
+        choices=("reference", "native", "mapeval", "full"),
+        default="reference",
         help=(
-            "Tool surface for the ReAct baseline. 'mapeval' (default) gives ReAct the five "
-            "primitives MapEval's own baseline has, which is the comparison the paper reports. "
-            "'full' shares this repository's whole registry with Spatial-Agent — an ablation "
-            "asking whether the graph adds anything on top of strong aggregation tools, not the "
-            "paper's question. Recorded in the report metadata either way."
+            "Tool surface for the ReAct baseline. 'reference' (default) is mapeval-api's five "
+            "tools with its argument contracts: PlaceSearch(placeName) returns one id, "
+            "NearbyPlaces refuses a radius when it ranks by distance, and neither routing tool "
+            "takes a waypoint or a priority. 'native' ('mapeval' is the old name for it) keeps "
+            "the same five names with this registry's richer arguments, which is a stronger "
+            "baseline than the paper's and an ablation. 'full' shares the whole registry, "
+            "aggregations included. Recorded in the report metadata; the three are not poolable."
         ),
     )
     result.add_argument("--output-dir", default="reports")
@@ -105,7 +107,7 @@ def create_agent_session(
     settings: Settings,
     provider_kind: str,
     contexts: list[str],
-    react_tools: str = "mapeval",
+    react_tools: str = "reference",
 ) -> Iterator[ReactAgent | SpatialAgent]:
     """Create resources owned by exactly one benchmark worker thread.
 
@@ -113,20 +115,34 @@ def create_agent_session(
     architecture under test. ReAct gets the five primitives MapEval's own baseline is given;
     Spatial-Agent gets this registry's aggregations and its local operators, which is the
     arrangement upstream has (`spatial-agent/src/tools/google_maps.py` carries a distance matrix
-    that `mapeval-api/Evaluator2.py` never hands its baseline). `react_tools="full"` restores the
-    shared surface as an ablation. Report which was used.
+    that `mapeval-api/Evaluator2.py` never hands its baseline).
+
+    Three ReAct surfaces, and the difference between the first two is *arguments*, not names:
+
+    - `reference` (default) is `mapeval-api`'s contract field for field — `PlaceSearch(placeName)`
+      returning one id, `NearbyPlaces` refusing radius when it ranks by distance, `Directions` and
+      `TravelTime` taking an origin, a destination and a mode and nothing else.
+    - `native` is the same five names with this registry's own arguments: waypoints, a route
+      priority, a centre and category and rating filter on the search, both nearby modes at once.
+      Restricting the *names* was never enough — an argument is a capability, and on the v5 run
+      ReAct issued a waypointed `directions` call on all 8 `routing_distance_via` rows. Keep it as
+      the labelled ablation it is.
+    - `full` restores the shared surface, aggregations included.
+
+    Report which was used; the three are not poolable.
     """
 
     provider = build_provider(provider_kind, settings, contexts)
     llm: OpenAIChatClient | None = None
     try:
         llm = OpenAIChatClient(settings)
-        allowed = (
-            ToolRegistry.MAPEVAL_BASELINE_TOOLS
-            if agent_type == "react" and react_tools != "full"
-            else None
+        baseline = agent_type == "react" and react_tools != "full"
+        upstream = baseline and react_tools == "reference"
+        tools = ToolRegistry(
+            provider,
+            allowed=ToolRegistry.MAPEVAL_BASELINE_TOOLS if baseline else None,
+            contract="reference" if upstream else "native",
         )
-        tools = ToolRegistry(provider, allowed=allowed)
         agent = (
             ReactAgent(llm, tools, max_steps=settings.max_reasoning_steps)
             if agent_type == "react"
@@ -291,6 +307,10 @@ def main() -> None:
     )
     if args.repeats < 1:
         raise ValueError("--repeats must be at least 1")
+    if args.react_tools == "mapeval":
+        # The old name for the native-argument surface, kept working so a saved command still
+        # runs. Reports record the resolved name, so nothing quotes "mapeval" going forward.
+        args.react_tools = "native"
     passes: dict[str, list[float]] = {agent_type: [] for agent_type in agent_types}
     for repeat in range(1, args.repeats + 1):
         for agent_type in agent_types:

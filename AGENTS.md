@@ -36,7 +36,14 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
 
 ## Experiment invariants
 
-- ReAct's default MapEval surface is exactly `place_search`, `place_details`, `nearby_places`,
+- ReAct's default surface is `--react-tools reference`: the five names *and* `mapeval-api`'s
+  argument contracts — `PlaceSearch(placeName)` returning one id, `NearbyPlaces` refusing a radius
+  when it ranks by distance, `Directions`/`TravelTime` taking an origin, a destination and a mode
+  and nothing else. Restricting the names alone is not restricting the surface: an argument is a
+  capability. `native` (formerly `mapeval`) is the same five names with this registry's richer
+  arguments and is a stronger-than-paper ablation. Pin any change to both contracts' argument
+  sets in `tests/test_tools_and_agents.py`.
+- ReAct's five tool names are exactly `place_search`, `place_details`, `nearby_places`,
   `travel_time`, and `directions`. Adding a `ToolRegistry` tool makes it available to
   Spatial-Agent, not automatically to ReAct. Add a baseline tool only with upstream evidence and
   update the pinned tests.

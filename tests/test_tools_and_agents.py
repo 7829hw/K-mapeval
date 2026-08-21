@@ -1927,8 +1927,69 @@ def test_the_baseline_gets_the_papers_tool_surface_by_default() -> None:
     from main import build_parser
 
     parser = build_parser()
-    assert parser.parse_args([]).react_tools == "mapeval"
+    assert parser.parse_args([]).react_tools == "reference"
+    assert parser.parse_args(["--react-tools", "native"]).react_tools == "native"
     assert parser.parse_args(["--react-tools", "full"]).react_tools == "full"
+
+
+def test_the_reference_surface_carries_upstreams_argument_contracts() -> None:
+    """Restricting the tool *names* is not restricting the tool surface.
+
+    Our five accepted arguments upstream's five do not, and an argument is a capability:
+    `directions` took up to 30 waypoints where `mapeval-api/Tools.py` has
+    `Directions(originId, destinationId, travelMode)`, so a detour upstream must assemble from two
+    routes and an addition was one call here. Measured on the v5 run, ReAct issued a waypointed
+    call on all 8 `routing_distance_via` rows. This pins the contract, not the roster.
+    """
+
+    reference = ToolRegistry(
+        FakeProvider(), allowed=ToolRegistry.MAPEVAL_BASELINE_TOOLS, contract="reference"
+    )
+    fields = {
+        schema["function"]["name"]: set(schema["function"]["parameters"]["properties"])
+        for schema in reference.schemas()
+    }
+    assert fields["place_search"] == {"place_name"}
+    assert fields["place_details"] == {"place_id"}
+    assert fields["nearby_places"] == {"place_id", "type", "rankby", "radius"}
+    assert fields["travel_time"] == {"origin_id", "destination_id", "travel_mode"}
+    assert fields["directions"] == {"origin_id", "destination_id", "travel_mode"}
+    for name in ("directions", "travel_time"):
+        assert "waypoints" not in fields[name]
+        assert "priority" not in fields[name]
+
+    native = ToolRegistry(
+        FakeProvider(), allowed=ToolRegistry.MAPEVAL_BASELINE_TOOLS, contract="native"
+    )
+    native_fields = {
+        schema["function"]["name"]: set(schema["function"]["parameters"]["properties"])
+        for schema in native.schemas()
+    }
+    assert "waypoints" in native_fields["directions"]
+    assert fields.keys() == native_fields.keys()
+
+
+def test_the_reference_nearby_refuses_a_radius_when_it_ranks_by_distance() -> None:
+    """Upstream will not do both in one call, and that refusal is what costs its baseline a turn.
+
+    "The nearest pharmacy within 500 m" is two calls and a comparison for MapEval's agent. Our
+    `nearby_places` answered it in one, which is a capability the paper's baseline never had.
+    """
+
+    registry = ToolRegistry(
+        FakeProvider(), allowed=ToolRegistry.MAPEVAL_BASELINE_TOOLS, contract="reference"
+    )
+    refused = registry.invoke(
+        "nearby_places",
+        {"place_id": "p1", "type": "pharmacy", "rankby": "distance", "radius": 500},
+    )
+    assert refused.status == "ok"
+    assert "radius is disallowed" in str(refused.output)
+
+    needs_radius = registry.invoke(
+        "nearby_places", {"place_id": "p1", "type": "pharmacy", "rankby": "prominence"}
+    )
+    assert "radius parameter is required" in str(needs_radius.output)
 
 
 def test_the_react_prompt_carries_no_tool_strategy() -> None:

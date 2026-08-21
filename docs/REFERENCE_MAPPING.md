@@ -944,3 +944,50 @@ drawing from three values. `dataset/seoul_kmapeval_v6_mcq_100.jsonl` passes
 `data/audit_dataset.py`. **No agent has been run against it yet**, and its no-tool floor is not
 measured either; both have to happen before any v6 accuracy means anything.
 
+## The baseline's tool *names* were upstream's; its arguments were not
+
+`MAPEVAL_BASELINE_TOOLS` restricts ReAct to the five names `mapeval-api/Evaluator2.py` line 33
+constructs, and a test pinned that roster. The roster was never the surface. Field for field
+against `mapeval-api/Tools.py` and `FormattedTools.py` at 35d481a:
+
+| upstream | ours, before `contract="reference"` |
+| --- | --- |
+| `PlaceSearch(placeName)` → `data['results'][0]['place_id']`, one id | `query`, `center`, `category_code`, `radius_m`, `min_rating`, `open_now`, `limit`, returning ranked candidates |
+| `PlaceDetails(placeId)` | same |
+| `NearbyPlaces(placeId, type, rankby, radius)`, and `rankby=distance` **refuses** a radius | `center`, `query`, `category_code`, `radius_m`, `limit` — bounded *and* distance-ordered in one call |
+| `TravelTime(originId, destinationId, travelMode)` | + `priority`, + `waypoints` (up to 30), + `include_steps` |
+| `Directions(originId, destinationId, travelMode)` | the same three additions |
+
+An argument is a capability, so this was a stronger baseline than the paper's, and the two places
+it shows are measurable:
+
+- **Waypoints.** A detour is two routes and an addition for upstream's agent. On the v5 run ReAct
+  issued a waypointed `directions` call on all 8 `routing_distance_via` rows and took 6 of them.
+- **Radius with distance ordering.** "The nearest pharmacy within 500 m" is two calls and a
+  comparison upstream; ours answered it in one, which is the whole of `nearby_within_radius`.
+
+`ToolRegistry(provider, contract="reference")` replaces the five with upstream's contracts,
+including its refusal text word for word, and `--react-tools reference` is now the default.
+`native` is the old surface under its true name — a stronger-than-paper ablation — with `mapeval`
+kept as an accepted alias so saved commands still run. `full` is unchanged. The three are recorded
+in report metadata and are not poolable. `tests/test_tools_and_agents.py` pins the argument sets of
+both contracts, not just their names.
+
+Verified live against Kakao: `place_search("서울역")` returns `'9113903'` and nothing else, an
+unresolvable name returns upstream's "Incorrect place name. Please use the same name as in the
+question.", `nearby_places(rankby="distance", radius=500)` returns upstream's refusal,
+`travel_time` reports a duration and distance with no steps while `directions` reports 13, and a
+`waypoints` argument is rejected by the schema.
+
+**Every accuracy in the sections above was measured on the `native` surface.** They are ReAct with
+arguments MapEval's baseline does not have, and should be relabelled rather than re-read.
+
+### Two related claims, checked
+
+- **`MAX_REASONING_STEPS = 30` had no upstream basis, and the loop had two more deviations.**
+  Fixed; see the section below.
+- **"The paper's ReAct" is the wrong name for this port.** Spatial-Agent's Table 1 reports
+  `ReAct (GPT-4o-mini)` at 32.98% and `MapEval API (GPT-4o-mini)` at 23.00% as separate rows, and
+  what is ported here is the second one's public code. The paper ships no implementation of the
+  first, so equivalence with it cannot be checked. Call this a MapEval-API baseline port.
+

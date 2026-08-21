@@ -11,7 +11,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from src.models import Place, Route
-from src.tools.map import MapProvider, PlaceNotFoundError
+from src.tools.map import MapProvider, PlaceNotFoundError, ProviderError
 from src.tools.spatial import (
     SpatialOperatorRegistry,
     _cardinal_direction,
@@ -516,6 +516,64 @@ class ToolExecution:
         return {"status": "error", "error": self.error}
 
 
+
+# ------------------------------------------------------- upstream contracts
+#
+# The argument models MapEval's own baseline is given, taken field for field from
+# `mapeval-api/Tools.py` and `FormattedTools.py` at 35d481a. Restricting the *names* to
+# `MAPEVAL_BASELINE_TOOLS` was never enough: our five carry arguments upstream's five do not, and
+# an argument is a capability. Measured on the v5 run, ReAct issued a waypointed `directions` call
+# on all 8 `routing_distance_via` rows and took 6 of them — one call for a detour upstream's
+# baseline has to assemble from two routes and an addition.
+#
+#   upstream                                              | ours, before this surface existed
+#   ------------------------------------------------------|----------------------------------
+#   PlaceSearch(placeName) -> one place_id                 | query + center + category_code +
+#                                                          |   radius_m + min_rating + open_now +
+#                                                          |   limit, returning many candidates
+#   PlaceDetails(placeId)                                  | same
+#   NearbyPlaces(placeId, type, rankby, radius)            | center + query + category_code +
+#     rankby=distance *disallows* radius                   |   radius_m + limit, both at once
+#   TravelTime(originId, destinationId, travelMode)        | + priority + waypoints(30) +
+#   Directions(originId, destinationId, travelMode)        |   include_steps
+
+
+class ReferencePlaceSearchArgs(BaseModel):
+    """`PlaceSearch(placeName)` — a name in, one place id out, and nothing else."""
+
+    model_config = ConfigDict(extra="forbid")
+    place_name: str = Field(description="Place name, exactly as the question writes it")
+
+
+class ReferenceNearbyPlacesArgs(BaseModel):
+    """`NearbyPlaces(placeId, type, rankby, radius)`, including the rule that rejects both."""
+
+    model_config = ConfigDict(extra="forbid")
+    place_id: str = Field(description="Place id to search around, from PlaceSearch")
+    type: str = Field(description="Type of place (e.g. restaurant, hospital, cafe)")
+    rankby: str = Field(
+        default="distance",
+        description=(
+            "prominence (radius required) or distance (radius disallowed). Use distance when "
+            "you are not concerned about the radius."
+        ),
+    )
+    radius: int | None = Field(
+        default=None, description="Distance in metres within which to return results"
+    )
+
+
+class ReferenceRouteArgs(BaseModel):
+    """`TravelTime` and `Directions` both take exactly these three fields upstream."""
+
+    model_config = ConfigDict(extra="forbid")
+    origin_id: str = Field(description="Place id of the origin")
+    destination_id: str = Field(description="Place id of the destination")
+    travel_mode: str = Field(
+        default="driving", description="driving, walking, bicycling, or transit"
+    )
+
+
 class ToolRegistry:
     """One provider-neutral tool surface shared by ReAct and Spatial-Agent."""
 
@@ -547,8 +605,21 @@ class ToolRegistry:
         }
     )
 
-    def __init__(self, provider: MapProvider, *, allowed: Iterable[str] | None = None) -> None:
+    #: The same five names, with upstream's *argument contracts* rather than ours. Selected with
+    #: `contract="reference"`; `MAPEVAL_BASELINE_TOOLS` restricts the names either way.
+    REACT_CONTRACTS = ("native", "reference")
+
+    def __init__(
+        self,
+        provider: MapProvider,
+        *,
+        allowed: Iterable[str] | None = None,
+        contract: str = "native",
+    ) -> None:
+        if contract not in self.REACT_CONTRACTS:
+            raise ValueError(f"contract must be one of {self.REACT_CONTRACTS}, got {contract!r}")
         self.provider = provider
+        self.contract = contract
         self.calls: list[ToolExecution] = []
         self._tools = {
             tool.name: tool
@@ -643,6 +714,42 @@ class ToolRegistry:
                 ),
             )
         }
+
+        if contract == "reference":
+            # Replace the five baseline tools with upstream's contracts. The aggregation tools are
+            # untouched: they are Spatial-Agent's surface, and a run that hands them to ReAct is
+            # `--react-tools full`, which is a labelled ablation either way.
+            self._tools.update(
+                {
+                    tool.name: tool
+                    for tool in (
+                        ToolDefinition(
+                            "place_search",
+                            "Get place ID for a given location.",
+                            ReferencePlaceSearchArgs,
+                            self._reference_place_search,
+                        ),
+                        ToolDefinition(
+                            "nearby_places",
+                            "Get nearby places around a location.",
+                            ReferenceNearbyPlacesArgs,
+                            self._reference_nearby_places,
+                        ),
+                        ToolDefinition(
+                            "travel_time",
+                            "Estimate the travel time between two places.",
+                            ReferenceRouteArgs,
+                            lambda args: self._reference_route(args, include_steps=False),
+                        ),
+                        ToolDefinition(
+                            "directions",
+                            "Get directions/routes between two places.",
+                            ReferenceRouteArgs,
+                            lambda args: self._reference_route(args, include_steps=True),
+                        ),
+                    )
+                }
+            )
 
         if allowed is not None:
             permitted = set(allowed)
@@ -841,6 +948,84 @@ class ToolRegistry:
         if args.open_now is not None and any(place.is_open is not None for place in places):
             places = [place for place in places if place.is_open is args.open_now]
         return self._search_view(places)
+
+    # ------------------------------------------------ upstream-contract handlers
+
+    #: What upstream returns when a name does not resolve. It is an *observation*, not an error:
+    #: `FormattedTools.PlaceSearchTool` returns the string and the agent reads it and retries.
+    INCORRECT_PLACE_NAME = "Incorrect place name. Please use the same name as in the question."
+
+    #: Upstream's `rankby=distance` has no radius at all — Google returns the nearest results
+    #: unbounded. Kakao's keyword and category endpoints always take one, so the unbounded case is
+    #: served at the provider's ceiling. That is a provider difference, and it is the only place
+    #: this surface cannot be literal.
+    UNBOUNDED_RADIUS_M = 20_000
+
+    #: Google's Nearby Search returns one page. Upstream never asks for more.
+    NEARBY_PAGE = 20
+
+    def _reference_place_search(self, args: ReferencePlaceSearchArgs) -> str:
+        """`return data['results'][0]['place_id']` — one id, or upstream's retry message.
+
+        No centre, no category, no radius, no rating filter, no candidate list. A baseline that
+        wants coordinates pays a `PlaceDetails` round trip for them, which is the cost upstream's
+        agent is measured carrying.
+        """
+
+        try:
+            found = self.provider.search_place(args.place_name, limit=1)
+        except ProviderError:
+            return self.INCORRECT_PLACE_NAME
+        if not found:
+            return self.INCORRECT_PLACE_NAME
+        return found[0].place_id
+
+    def _reference_nearby_places(self, args: ReferenceNearbyPlacesArgs) -> Any:
+        """`NearbyPlaces(placeId, type, rankby, radius)`, with upstream's own refusal.
+
+        The refusal is the point of the port. Upstream will not rank by distance *and* bound by
+        radius in one call, so "the nearest X within 500 m" costs the baseline two calls and a
+        comparison; ours answered it in one. The message is upstream's, word for word.
+        """
+
+        rankby = args.rankby.strip().lower()
+        if rankby == "distance" and args.radius is not None and args.radius > 0:
+            return (
+                "When rankby is distance, radius is disallowed. If want to use rankby as "
+                "distance, please set radius to 0. And if you want to use radius, please set "
+                "rankby as prominence."
+            )
+        if rankby == "prominence" and not args.radius:
+            return "When rankby is prominence, the radius parameter is required."
+        radius = args.radius if rankby == "prominence" else self.UNBOUNDED_RADIUS_M
+        return self.provider.nearby_search(
+            self._reference(args.place_id),
+            query=args.type,
+            radius_m=int(radius or self.UNBOUNDED_RADIUS_M),
+            limit=self.NEARBY_PAGE,
+        )
+
+    def _reference_route(self, args: ReferenceRouteArgs, *, include_steps: bool) -> Route:
+        """One origin, one destination, one mode. No waypoints and no priority.
+
+        Upstream's `Directions` and `TravelTime` differ only in what they report, and neither can
+        be handed an intermediate stop: a detour is two routes and an addition there. `priority` is
+        absent too, so the route is whatever the provider recommends — Google returns its default
+        route and Kakao's counterpart is RECOMMEND.
+        """
+
+        origin = self._reference(args.origin_id)
+        destination = self._reference(args.destination_id)
+        if _same_endpoint(origin, destination):
+            return _self_route(origin, destination)
+        return self.provider.directions(
+            origin,
+            destination,
+            mode=args.travel_mode,
+            priority="RECOMMEND",
+            waypoints=[],
+            include_steps=include_steps,
+        )
 
     def _reference(self, value: Any) -> Any:
         """A place argument on a baseline tool must be something the provider handed out.

@@ -148,12 +148,11 @@ def create_agent_session(
                 llm,
                 tools,
                 # The loop travels with the surface, because both halves are the same claim about
-                # what MapEval's baseline is. `reference` runs upstream's: 15 iterations, one
-                # action per iteration, and a forced stop that carries no answer. `native` keeps
-                # what this repository had, which is a stronger agent and a labelled ablation.
-                max_steps=(
-                    settings.react_max_iterations if upstream else settings.max_reasoning_steps
-                ),
+                # what MapEval's baseline is. `reference` runs upstream's: one action per
+                # iteration and a forced stop that carries no answer, inside the shared
+                # `MAX_REASONING_STEPS` budget. `native` keeps what this repository had, which is
+                # a stronger agent and a labelled ablation.
+                max_steps=settings.max_reasoning_steps,
                 single_action=upstream,
                 force_final_answer=not upstream,
             )
@@ -232,11 +231,7 @@ def run(agent_type: str, args: argparse.Namespace, repeat: int = 1, repeats: int
             # both were stronger here than upstream's. An accuracy that does not record them
             # cannot be compared with the paper's or with this repository's own earlier runs.
             "llm_temperature": settings.llm_temperature,
-            "react_max_iterations": (
-                settings.react_max_iterations
-                if args.react_tools == "reference"
-                else settings.max_reasoning_steps
-            ),
+            "max_reasoning_steps": settings.max_reasoning_steps,
             "react_parallel_tool_calls": args.react_tools != "reference",
             "react_forces_final_answer": args.react_tools != "reference",
             # Which code answered. A night of fixes produces a shelf of reports whose accuracies

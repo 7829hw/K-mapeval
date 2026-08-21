@@ -269,7 +269,7 @@ class SpatialAgent(BenchmarkAgent):
 
     agent_type = "spatial_agent"
 
-    def __init__(self, llm: ChatClient, tools: ToolRegistry, *, max_steps: int = 8) -> None:
+    def __init__(self, llm: ChatClient, tools: ToolRegistry, *, max_steps: int = 15) -> None:
         self.llm = llm
         self.tools = tools
         self.operators = SpatialOperatorRegistry()

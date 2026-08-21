@@ -250,10 +250,13 @@ Measured directly on `MapEval-API.jsonl` (300 rows), because it decides what can
   Textual and queried by API is therefore question-for-question an answer key, which is why
   `ContextMapProvider` computes retrievals over the whole corpus instead of replaying the stored
   block (see above).
-- **The ReAct baseline's budget is 30 tool rounds** (`max_tool_rounds: int = 30` in
-  `mapeval-api/mapeval_api_evaluator.py`). `MAX_REASONING_STEPS=30` matches it, which matters for
-  the trip family: a four-option ordering question needs twelve route legs, so a smaller budget
-  would make a ReAct loss a budget artifact rather than an architectural result.
+- **The ReAct baseline's budget is 15 iterations**, langchain's default, which is what
+  `mapeval-api/Evaluator2.py` runs. An earlier version of this file argued 30 from
+  `max_tool_rounds: int = 30` in `mapeval-api/mapeval_api_evaluator.py`; that file is untracked
+  upstream, so it is a local adapter and justifies nothing about the paper's baseline. The
+  concern behind the 30 was real -- a four-stop ordering question needs twelve route legs, so a
+  budget can turn an architectural result into an artifact -- which is why the budget is now one
+  `.env` line, recorded in every report, and read beside the accuracy rather than assumed.
 
 ## Why the first Kakao run inverted the paper's result
 
@@ -1068,3 +1071,18 @@ thought to the completion and emits it first, so a cap tight enough to bite is s
 the answer is what gets truncated. The agent then sees an empty or half-finished message and
 records an `answer_parse_failure`, which reads in the report as the architecture failing to answer.
 A cap that changes an accuracy has to be reported alongside it, exactly like the iteration budget.
+
+### One step budget, not two
+
+`REACT_MAX_ITERATIONS` and `MAX_REASONING_STEPS` were two names for the same quantity — how many
+reasoning steps a question may take — and which one applied depended on the agent and the tool
+surface: 15 for `reference` ReAct, 8 for `native` ReAct, 8 for Spatial-Agent's graph. No single
+`.env` line said what the budget was, and a reader of a report had to reconstruct it from
+`react_tools`. They are now one setting, `MAX_REASONING_STEPS`, defaulting to 15.
+
+Two effects worth stating rather than burying. Spatial-Agent's authored graph may now hold 15
+nodes instead of 8 — that bound is a local guard, not something upstream has, so loosening it
+takes nothing away from the comparison, but a plan that used to be rejected as too long can now
+run. And `native` ReAct's loop went from 8 iterations to 15; it was always the stronger-than-paper
+ablation, and this makes it stronger still. Reports carry `max_reasoning_steps`, so neither
+change is invisible after the fact.

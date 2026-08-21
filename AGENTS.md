@@ -47,12 +47,15 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   `travel_time`, and `directions`. Adding a `ToolRegistry` tool makes it available to
   Spatial-Agent, not automatically to ReAct. Add a baseline tool only with upstream evidence and
   update the pinned tests.
-- The ReAct *loop* travels with the surface: `reference` runs upstream's — 15 iterations
-  (langchain's default, which `Evaluator2.py` never overrides), one action per iteration, and a
-  forced stop that carries no answer. Do not raise the budget, execute parallel tool calls, or add
-  a final "answer now" call under `reference`; each is a capability the paper's baseline lacks.
-  `native` keeps all three and is an ablation.
-- Report metadata must carry `llm_temperature`, `react_max_iterations`,
+- The ReAct *loop* travels with the surface: `reference` runs upstream's — one action per
+  iteration and a forced stop that carries no answer. Do not execute parallel tool calls or add a
+  final "answer now" call under `reference`; each is a capability the paper's baseline lacks.
+  `native` keeps both and is an ablation.
+- `MAX_REASONING_STEPS` is the one step budget, and every architecture answers under it: ReAct
+  loop iterations, Spatial-Agent graph nodes. It defaults to 15 because that is langchain's own
+  default and therefore the reference baseline's. Raising it is an ablation and has to be
+  reported; do not raise it in response to a benchmark miss.
+- Report metadata must carry `llm_temperature`, `max_reasoning_steps`,
   `react_parallel_tool_calls` and `react_forces_final_answer`. An accuracy without them is not
   comparable to anything.
 - Every question records what it cost: `llm_calls`, `prompt_tokens`, `completion_tokens`,

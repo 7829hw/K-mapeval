@@ -29,7 +29,7 @@ from src.tools import ToolRegistry
 #                                              |   observations, never as exceptions
 #   `handle_parsing_errors=True`               | an unparsed final answer is a recorded
 #                                              |   `answer_parse_failure`, not a crash
-#   `max_iterations=15` (langchain default)    | `REACT_MAX_ITERATIONS`, default 15
+#   `max_iterations=15` (langchain default)    | `MAX_REASONING_STEPS`, default 15
 #   1-based options, `^^Option_Number^^`       | 0-based options, `^^N^^` (repo-wide invariant)
 #   question + options + answer format         | `REACT_SYSTEM_PROMPT` + `format_question`
 #

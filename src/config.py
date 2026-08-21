@@ -44,12 +44,17 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = Field(default=1800.0, gt=0)
     llm_max_retries: int = Field(default=8, ge=0, le=20)
     llm_retry_backoff_seconds: float = Field(default=5.0, gt=0)
-    max_reasoning_steps: int = Field(default=8, ge=1, le=30)
-    # langchain's own default, which is what `mapeval-api/Evaluator2.py` runs: it calls
-    # `initialize_agent` with no `max_iterations`. The 30 this repository used was argued from
-    # `mapeval-api/mapeval_api_evaluator.py`, a file that is untracked in the upstream checkout --
-    # a local adapter, not upstream code. Raising it is an ablation and has to be reported.
-    react_max_iterations: int = Field(default=15, ge=1, le=60)
+    # One budget for every architecture: how many reasoning steps a question may take. For ReAct
+    # that is loop iterations, for Spatial-Agent the nodes its authored graph may hold. 15 is
+    # langchain's own default, which is what `mapeval-api/Evaluator2.py` runs -- it calls
+    # `initialize_agent` with no `max_iterations` -- so the reference baseline has to have it.
+    # The 30 this repository used was argued from `mapeval-api/mapeval_api_evaluator.py`, a file
+    # untracked in the upstream checkout, so a local adapter rather than upstream code.
+    #
+    # This used to be two settings, 8 here and 15 in `REACT_MAX_ITERATIONS`, which meant the
+    # number in force depended on which agent and which tool surface was running and no single
+    # `.env` line said what it was. Reports record the one that applied.
+    max_reasoning_steps: int = Field(default=15, ge=1, le=60)
     benchmark_concurrency: int = Field(default=4, ge=1, le=32)
     # Extra attempts for a single question the endpoint failed to serve. The client already retries
     # each request; this catches the case where the endpoint stayed down for a whole question, so

@@ -68,8 +68,11 @@ def test_evaluator_writes_upstream_spatial_agent_report_and_query_logs(tmp_path)
 
     query_logs = sorted(log_dir.glob("*_id*.log"))
     assert len(query_logs) == 2
+    # Whose log this is, without reading it: `--agent both` writes two per question into one
+    # directory, and the name is what a person greps first.
+    assert all("_fixed_id" in path.name for path in query_logs)
     log_text = query_logs[0].read_text(encoding="utf-8")
-    assert "FAST WORKFLOW STARTED" in log_text
+    assert "FAST WORKFLOW STARTED | AGENT: fixed" in log_text
     assert "[EVALUATE]" in log_text
     assert "WORKFLOW COMPLETED" in log_text
 

@@ -236,6 +236,7 @@ class Evaluator:
                 item.id,
                 log_dir=self.log_dir,
                 option_count=len(options),
+                agent_type=agent.agent_type,
             ) as logger:
                 result = agent.answer(question, options)
                 log_agent_result(logger, result, correct_answer=item.answer)

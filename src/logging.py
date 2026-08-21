@@ -49,14 +49,22 @@ def query_log(
     *,
     log_dir: str | Path = "logs",
     option_count: int = 0,
+    agent_type: str = "agent",
 ) -> Iterator[logging.Logger]:
-    """Attach the upstream-style UTC timestamped per-query file handler."""
+    """Attach the upstream-style UTC timestamped per-query file handler.
+
+    The file says which architecture wrote it, in its name and on its first lines. A `--agent
+    both` run writes two logs per question into one directory, and they were distinguishable only
+    by reading far enough in to recognise a graph stage -- which made "why did this question fail?"
+    start with working out whose failure it was.
+    """
 
     base_logger = configure_logging()
     # A global logger with multiple temporary handlers would copy concurrent queries into
     # one another's files. Each query therefore gets an isolated logger at the same level.
+    agent = normalise_filename(agent_type, max_length=20)
     logger = logging.Logger(
-        f"{LOGGER_NAME}.query.{question_id}.{datetime.now(UTC).timestamp()}",
+        f"{LOGGER_NAME}.query.{agent}.{question_id}.{datetime.now(UTC).timestamp()}",
         level=base_logger.level,
     )
     logger.propagate = False
@@ -65,9 +73,9 @@ def query_log(
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     slug = normalise_filename(" ".join(question.strip().split()[:5]))
     filename = (
-        f"{timestamp}_id{question_id}_{slug}.log"
+        f"{timestamp}_{agent}_id{question_id}_{slug}.log"
         if question_id is not None
-        else f"{timestamp}_{slug}.log"
+        else f"{timestamp}_{agent}_{slug}.log"
     )
     path = destination / filename
     handler = logging.FileHandler(path, encoding="utf-8")
@@ -77,7 +85,9 @@ def query_log(
     logger.info("Attached per-query log handler: %s", path)
     logger.info("=" * 80)
     id_text = f"ID: {question_id}" if question_id is not None else "Interactive"
-    logger.info("FAST WORKFLOW STARTED | %s | OPTIONS: %s", id_text, option_count)
+    logger.info(
+        "FAST WORKFLOW STARTED | AGENT: %s | %s | OPTIONS: %s", agent_type, id_text, option_count
+    )
     logger.info("=" * 80)
     logger.info("Question: %s%s", question[:100], "..." if len(question) > 100 else "")
     logger.info("Timestamp: %s", datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"))

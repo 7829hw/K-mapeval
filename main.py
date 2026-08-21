@@ -144,7 +144,19 @@ def create_agent_session(
             contract="reference" if upstream else "native",
         )
         agent = (
-            ReactAgent(llm, tools, max_steps=settings.max_reasoning_steps)
+            ReactAgent(
+                llm,
+                tools,
+                # The loop travels with the surface, because both halves are the same claim about
+                # what MapEval's baseline is. `reference` runs upstream's: 15 iterations, one
+                # action per iteration, and a forced stop that carries no answer. `native` keeps
+                # what this repository had, which is a stronger agent and a labelled ablation.
+                max_steps=(
+                    settings.react_max_iterations if upstream else settings.max_reasoning_steps
+                ),
+                single_action=upstream,
+                force_final_answer=not upstream,
+            )
             if agent_type == "react"
             else SpatialAgent(llm, tools, max_steps=settings.max_reasoning_steps)
         )
@@ -216,7 +228,17 @@ def run(agent_type: str, args: argparse.Namespace, repeat: int = 1, repeats: int
             # Which tool surface the ReAct baseline had. A run is only comparable to the paper
             # when this says "mapeval", and only comparable across our own agents when "full".
             "react_tools": args.react_tools,
+            # A tool surface is only half of what a baseline is; the loop is the other half, and
+            # both were stronger here than upstream's. An accuracy that does not record them
+            # cannot be compared with the paper's or with this repository's own earlier runs.
             "llm_temperature": settings.llm_temperature,
+            "react_max_iterations": (
+                settings.react_max_iterations
+                if args.react_tools == "reference"
+                else settings.max_reasoning_steps
+            ),
+            "react_parallel_tool_calls": args.react_tools != "reference",
+            "react_forces_final_answer": args.react_tools != "reference",
             # Which code answered. A night of fixes produces a shelf of reports whose accuracies
             # differ for reasons no field records, and "which commit was this?" is not
             # reconstructable from the timestamp once two runs overlap. Read once at import, not

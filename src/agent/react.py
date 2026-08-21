@@ -29,7 +29,7 @@ from src.tools import ToolRegistry
 #                                              |   observations, never as exceptions
 #   `handle_parsing_errors=True`               | an unparsed final answer is a recorded
 #                                              |   `answer_parse_failure`, not a crash
-#   `max_iterations=15` (langchain default)    | `MAX_REASONING_STEPS` (30 in the run env)
+#   `max_iterations=15` (langchain default)    | `REACT_MAX_ITERATIONS`, default 15
 #   1-based options, `^^Option_Number^^`       | 0-based options, `^^N^^` (repo-wide invariant)
 #   question + options + answer format         | `REACT_SYSTEM_PROMPT` + `format_question`
 #
@@ -55,10 +55,33 @@ Select one 0-based option. Never invent a place ID. When you have enough evidenc
 class ReactAgent(BenchmarkAgent):
     agent_type = "react"
 
-    def __init__(self, llm: ChatClient, tools: ToolRegistry, *, max_steps: int = 8) -> None:
+    def __init__(
+        self,
+        llm: ChatClient,
+        tools: ToolRegistry,
+        *,
+        max_steps: int = 15,
+        single_action: bool = True,
+        force_final_answer: bool = False,
+    ) -> None:
         self.llm = llm
         self.tools = tools
         self.max_steps = max_steps
+        # `AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION` parses one JSON action blob out
+        # of each LLM response, so upstream's baseline takes exactly one action per iteration. A
+        # provider's native tool channel will happily return several, and executing all of them
+        # turns one iteration into many: on the v5 run one question executed 24 tool calls in 6
+        # LLM rounds. Keeping only the first is what upstream's parser would have seen.
+        self.single_action = single_action
+        # Upstream stops. `initialize_agent` defaults to `early_stopping_method="force"`, which
+        # returns "Agent stopped due to iteration limit or time limit." as the output and makes no
+        # further call; `Evaluator2.py` then finds no `^^N^^` in it and the row scores nothing.
+        # Asking once more for an answer is a free extra turn the paper's baseline never gets.
+        self.force_final_answer = force_final_answer
+
+    #: What langchain returns when the iteration budget runs out under the default
+    #: `early_stopping_method="force"`. It carries no option, which is the point.
+    ITERATION_LIMIT_OUTPUT = "Agent stopped due to iteration limit or time limit."
 
     def answer(self, question: str, options: list[str]) -> AgentResult:
         started = time.perf_counter()
@@ -83,7 +106,13 @@ class ReactAgent(BenchmarkAgent):
                 if not response.tool_calls:
                     final_text = response.content
                     break
-                for call in response.tool_calls:
+                calls = response.tool_calls[:1] if self.single_action else response.tool_calls
+                if self.single_action and len(response.tool_calls) > 1:
+                    # Drop the extra calls from the message we keep, rather than answering them
+                    # with a refusal: an orphan tool_call_id breaks the next request, and upstream
+                    # never emitted them in the first place.
+                    messages[-1] = _one_action(messages[-1], calls[0].id)
+                for call in calls:
                     execution = self.tools.invoke(call.name, call.arguments)
                     observation = execution.observation()
                     trace.append(
@@ -102,16 +131,19 @@ class ReactAgent(BenchmarkAgent):
                         }
                     )
             if not final_text:
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "Tool budget is exhausted. Select the best-supported option now."
-                        ),
-                    }
-                )
-                reasoning_steps += 1
-                final_text = self.llm.chat(messages).content
+                if not self.force_final_answer:
+                    final_text = self.ITERATION_LIMIT_OUTPUT
+                else:
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Tool budget is exhausted. Select the best-supported option now."
+                            ),
+                        }
+                    )
+                    reasoning_steps += 1
+                    final_text = self.llm.chat(messages).content
         except LLMUnavailableError as exc:
             failure_type = "llm_unavailable"
             failure_message = f"{type(exc).__name__}: {exc}"
@@ -141,3 +173,14 @@ class ReactAgent(BenchmarkAgent):
             failure_message=failure_message,
             trace=trace,
         )
+
+
+def _one_action(message: dict[str, Any], keep: str) -> dict[str, Any]:
+    """The assistant message with a single tool call, the way the structured-chat parser saw it."""
+
+    kept = [
+        call
+        for call in (message.get("tool_calls") or [])
+        if (call.get("id") if isinstance(call, dict) else getattr(call, "id", None)) == keep
+    ]
+    return {**message, "tool_calls": kept}

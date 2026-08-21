@@ -991,3 +991,35 @@ arguments MapEval's baseline does not have, and should be relabelled rather than
   what is ported here is the second one's public code. The paper ships no implementation of the
   first, so equivalence with it cannot be checked. Call this a MapEval-API baseline port.
 
+## The loop was the other half of the baseline
+
+A tool surface is what an agent *can* reach; the loop is how many times and how widely it may
+reach. Ours was stronger than upstream's in three ways at once, and all three are now tied to
+`--react-tools reference`.
+
+| `mapeval-api/Evaluator2.py` @ 35d481a | ours, before this change |
+| --- | --- |
+| `initialize_agent(...)` with no `max_iterations` → langchain's default **15** | `MAX_REASONING_STEPS`, **30** in the run environment |
+| `STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION` parses **one** JSON action per response | every tool call in the assistant message is executed |
+| `early_stopping_method="force"` (the default) returns `"Agent stopped due to iteration limit or time limit."` and makes **no further call** | an extra LLM call asking for the best-supported option |
+
+The 30 was argued from `mapeval-api/mapeval_api_evaluator.py`. That file is **untracked** in the
+upstream checkout — `git ls-files` lists `Evaluator2.py` and not it — so it is a local adapter and
+cannot justify anything about the paper's baseline.
+
+The other two compound: parallel calls turn one of upstream's iterations into many, and the forced
+final answer converts an exhausted budget into a scored guess. On the v5 run 17 of 100 questions
+issued more than 15 tool calls and 13 of those were correct; one question executed 24 tool calls in
+6 LLM rounds, which upstream's parser could not have produced at any budget.
+
+`ReactAgent` now takes `max_steps`, `single_action` and `force_final_answer`, and `main.py` sets
+them from the surface — `reference` gets 15 / one action / forced stop, `native` and `full` keep
+what this repository had. `ITERATION_LIMIT_OUTPUT` is langchain's own string, so an exhausted run
+ends as an `answer_parse_failure` exactly as upstream's regex leaves it. Three tests pin it: one
+action per iteration with no orphan `tool_call_id`, an exhausted budget answering nothing and
+costing no extra call, and the native loop still executing several.
+
+Report metadata now carries `llm_temperature`, `react_max_iterations`, `react_parallel_tool_calls`
+and `react_forces_final_answer` beside `react_tools`. Every accuracy recorded above predates all
+of them.
+

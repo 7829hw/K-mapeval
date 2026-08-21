@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     llm_max_retries: int = Field(default=8, ge=0, le=20)
     llm_retry_backoff_seconds: float = Field(default=5.0, gt=0)
     max_reasoning_steps: int = Field(default=8, ge=1, le=30)
+    # langchain's own default, which is what `mapeval-api/Evaluator2.py` runs: it calls
+    # `initialize_agent` with no `max_iterations`. The 30 this repository used was argued from
+    # `mapeval-api/mapeval_api_evaluator.py`, a file that is untracked in the upstream checkout --
+    # a local adapter, not upstream code. Raising it is an ablation and has to be reported.
+    react_max_iterations: int = Field(default=15, ge=1, le=60)
     benchmark_concurrency: int = Field(default=4, ge=1, le=32)
     # Extra attempts for a single question the endpoint failed to serve. The client already retries
     # each request; this catches the case where the endpoint stayed down for a whole question, so

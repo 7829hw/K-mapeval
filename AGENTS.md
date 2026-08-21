@@ -47,6 +47,14 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   `travel_time`, and `directions`. Adding a `ToolRegistry` tool makes it available to
   Spatial-Agent, not automatically to ReAct. Add a baseline tool only with upstream evidence and
   update the pinned tests.
+- The ReAct *loop* travels with the surface: `reference` runs upstream's — 15 iterations
+  (langchain's default, which `Evaluator2.py` never overrides), one action per iteration, and a
+  forced stop that carries no answer. Do not raise the budget, execute parallel tool calls, or add
+  a final "answer now" call under `reference`; each is a capability the paper's baseline lacks.
+  `native` keeps all three and is an ablation.
+- Report metadata must carry `llm_temperature`, `react_max_iterations`,
+  `react_parallel_tool_calls` and `react_forces_final_answer`. An accuracy without them is not
+  comparable to anything.
 - `--react-tools full` is an ablation. Never pool it with the default `mapeval` surface, and do not
   tune ReAct's prompt, tool contracts, or step budget in response to benchmark misses.
 - Select one evidence mode per run: `context`, `hybrid`, or `kakao`. Only `hybrid` may use its

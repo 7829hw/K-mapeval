@@ -125,6 +125,96 @@ def test_react_executes_common_tool_then_parses_answer() -> None:
     assert result.failure_type is None
 
 
+def test_react_takes_one_action_per_iteration_like_the_structured_chat_parser() -> None:
+    """Upstream's agent cannot emit two actions in one step, so ours must not either.
+
+    `AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION` parses a single JSON action blob out of
+    each response. A native tool channel returns as many calls as the model likes, and executing
+    all of them collapses several of upstream's iterations into one: measured on the v5 run, one
+    question executed 24 tool calls across 6 LLM rounds against a nominal budget of 30.
+    """
+
+    llm = QueuedLLM(
+        [
+            LLMResponse(
+                "",
+                (
+                    LLMToolCall("call-1", "place_search", {"query": "경복궁"}),
+                    LLMToolCall("call-2", "place_search", {"query": "남산"}),
+                    LLMToolCall("call-3", "place_search", {"query": "서울역"}),
+                ),
+            ),
+            LLMResponse("^^2^^"),
+        ]
+    )
+    agent = ReactAgent(llm, ToolRegistry(FakeProvider()), max_steps=5, single_action=True)
+    result = agent.answer("질문", ["A", "B", "C", "D"])
+    assert result.tool_calls == 1
+    assert result.predicted_answer == 2
+    # The dropped calls leave no orphan tool_call_id behind, or the next request is malformed.
+    assistant = [
+        message
+        for message in llm.messages[-1]
+        if message.get("role") == "assistant" and message.get("tool_calls")
+    ]
+    assert [len(message["tool_calls"]) for message in assistant] == [1]
+    replies = [message for message in llm.messages[-1] if message.get("role") == "tool"]
+    assert [message["tool_call_id"] for message in replies] == ["call-1"]
+
+
+def test_react_running_out_of_iterations_answers_nothing() -> None:
+    """`early_stopping_method="force"` is langchain's default, and it does not ask again.
+
+    It returns "Agent stopped due to iteration limit or time limit." as the output, and
+    `Evaluator2.py` finds no `^^N^^` in that string. An extra call to force an answer is a turn the
+    paper's baseline never gets, and it converts an exhausted budget into a scored guess.
+    """
+
+    llm = QueuedLLM(
+        [
+            LLMResponse("", (LLMToolCall("call-1", "place_search", {"query": "경복궁"}),)),
+            LLMResponse("", (LLMToolCall("call-2", "place_search", {"query": "남산"}),)),
+        ]
+    )
+    agent = ReactAgent(
+        llm,
+        ToolRegistry(FakeProvider()),
+        max_steps=2,
+        single_action=True,
+        force_final_answer=False,
+    )
+    result = agent.answer("질문", ["A", "B", "C", "D"])
+    assert result.predicted_answer is None
+    assert result.failure_type == "answer_parse_failure"
+    assert result.response == ReactAgent.ITERATION_LIMIT_OUTPUT
+    # Two iterations, two LLM calls: the stop costs none.
+    assert result.reasoning_steps == 2
+    assert not llm.responses
+
+
+def test_the_native_loop_stays_available_as_the_ablation_it_is() -> None:
+    """The stronger loop is not deleted, it is named. Reports record which one ran."""
+
+    llm = QueuedLLM(
+        [
+            LLMResponse(
+                "",
+                (
+                    LLMToolCall("call-1", "place_search", {"query": "경복궁"}),
+                    LLMToolCall("call-2", "place_search", {"query": "남산"}),
+                ),
+            ),
+            LLMResponse("^^1^^"),
+        ]
+    )
+    agent = ReactAgent(
+        llm, ToolRegistry(FakeProvider()), max_steps=5, single_action=False
+    )
+    result = agent.answer("질문", ["A", "B", "C", "D"])
+    assert result.tool_calls == 2
+    assert result.predicted_answer == 1
+
+
 def test_spatial_agent_runs_paper_aligned_pipeline() -> None:
     llm = QueuedLLM(
         [

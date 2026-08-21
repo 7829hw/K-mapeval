@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict
 from src.agent.base import BenchmarkAgent
 from src.dataset import BenchmarkItem
 from src.llm import LLMOutputTruncatedError, LLMUnavailableError
-from src.logging import log_agent_result, query_log
+from src.logging import log_agent_result, log_trace_entry, query_log
 
 INFRASTRUCTURE_FAILURE = "llm_unavailable"
 PROVIDER_FAILURE = "provider_failure"
@@ -238,8 +238,24 @@ class Evaluator:
                 option_count=len(options),
                 agent_type=agent.agent_type,
             ) as logger:
-                result = agent.answer(question, options)
-                log_agent_result(logger, result, correct_answer=item.answer)
+                # Written as the agent works, not once it is done: a question can run for
+                # minutes, and a log that appears only on return says nothing about the one
+                # currently in flight and nothing at all about a question that never returns.
+                streamed = 0
+
+                def emit(entry: dict[str, Any], logger: Any = logger) -> None:
+                    nonlocal streamed
+                    streamed += 1
+                    log_trace_entry(logger, entry)
+
+                agent.trace_sink = emit
+                try:
+                    result = agent.answer(question, options)
+                finally:
+                    agent.trace_sink = None
+                log_agent_result(
+                    logger, result, correct_answer=item.answer, already_logged=streamed
+                )
             elapsed = time.time() - started
             predicted_option = result.predicted_answer
             predicted_text = (

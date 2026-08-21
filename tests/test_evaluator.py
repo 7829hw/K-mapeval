@@ -226,3 +226,69 @@ def test_no_intent_is_scored_against_the_datasets_class(tmp_path) -> None:
     assert report.results[0]["predicted_intent"] is None
     assert set(report.statistics["answer_accuracy_by_class"]) == {"poi", "nearby"}
     assert report.statistics["overall_answer_accuracy"]["accuracy"] == 1.0
+
+
+def test_a_trace_reaches_the_log_while_the_question_is_still_being_answered(tmp_path) -> None:
+    """A question can run for minutes; its log should not arrive only once it is over.
+
+    The agent reads its own log file mid-answer, which is the only way to tell streaming apart
+    from a well-ordered dump at the end.
+    """
+
+    log_dir = tmp_path / "logs"
+
+    class SelfWatchingAgent(BenchmarkAgent):
+        agent_type = "watcher"
+
+        def __init__(self) -> None:
+            self.saw_itself = False
+
+        def answer(self, question: str, options: list[str]) -> AgentResult:
+            trace = self.new_trace()
+            trace.append({"stage": "analyze", "note": "first-step"})
+            self.saw_itself = any(
+                "first-step" in path.read_text(encoding="utf-8")
+                for path in log_dir.glob("*.log")
+            )
+            trace.append({"stage": "evaluate", "note": "last-step"})
+            return AgentResult(
+                agent_type=self.agent_type,
+                predicted_answer=0,
+                response="^^0^^",
+                trace=list(trace),
+            )
+
+    agent = SelfWatchingAgent()
+    items = [
+        BenchmarkItem(id="a", question="q", options=["x", "y"], answer=0, classification="poi")
+    ]
+    Evaluator(agent, items, output_dir=None, log_dir=log_dir).run()
+
+    assert agent.saw_itself
+    written = next(log_dir.glob("*.log")).read_text(encoding="utf-8")
+    # Streamed once, not streamed and then dumped again at the end.
+    assert written.count("first-step") == 1
+    assert written.count("last-step") == 1
+
+
+def test_an_agent_that_streams_nothing_still_gets_its_whole_trace_logged(tmp_path) -> None:
+    """Test doubles and any future caller that builds a trace by hand keep working."""
+
+    class PlainListAgent(BenchmarkAgent):
+        agent_type = "plain"
+
+        def answer(self, question: str, options: list[str]) -> AgentResult:
+            return AgentResult(
+                agent_type=self.agent_type,
+                predicted_answer=0,
+                response="^^0^^",
+                trace=[{"stage": "compose", "note": "never-streamed"}],
+            )
+
+    log_dir = tmp_path / "logs"
+    items = [
+        BenchmarkItem(id="a", question="q", options=["x", "y"], answer=0, classification="poi")
+    ]
+    Evaluator(PlainListAgent(), items, output_dir=None, log_dir=log_dir).run()
+
+    assert "never-streamed" in next(log_dir.glob("*.log")).read_text(encoding="utf-8")

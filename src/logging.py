@@ -99,17 +99,29 @@ def query_log(
         handler.close()
 
 
+def log_trace_entry(logger: logging.Logger, entry: dict) -> None:
+    """Write one trace entry, in the same shape whether it arrives live or at the end."""
+
+    stage = str(entry.get("stage", "trace")).upper()
+    logger.info("[%s] %s", stage, json.dumps(entry, ensure_ascii=False, default=str))
+
+
 def log_agent_result(
     logger: logging.Logger,
     result: AgentResult,
     *,
     correct_answer: int,
+    already_logged: int = 0,
 ) -> None:
-    """Write the agent's phases and upstream-style workflow summary."""
+    """Write the agent's phases and upstream-style workflow summary.
 
-    for entry in result.trace:
-        stage = str(entry.get("stage", "trace")).upper()
-        logger.info("[%s] %s", stage, json.dumps(entry, ensure_ascii=False, default=str))
+    `already_logged` is how many entries were streamed while the agent worked; only the rest are
+    written here. An agent that streams nothing -- a test double, an interactive call -- still
+    gets its whole trace, and one that streamed everything does not get it twice.
+    """
+
+    for entry in result.trace[already_logged:]:
+        log_trace_entry(logger, entry)
     logger.info("")
     logger.info("=" * 80)
     logger.info(

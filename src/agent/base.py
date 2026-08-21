@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -37,10 +38,37 @@ class AgentResult(BaseModel):
     trace: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class LiveTrace(list):
+    """A trace list that hands each entry to a listener the moment it is appended.
+
+    A question can run for minutes, and its log used to appear all at once when the agent came
+    back -- so a run in flight showed nothing at all about the question it was working on, and a
+    question that never returned left an empty file. Appending is the only mutation either agent
+    performs on its trace, so this is the whole of it.
+    """
+
+    def __init__(self, sink: Callable[[dict[str, Any]], None] | None = None) -> None:
+        super().__init__()
+        self._sink = sink
+
+    def append(self, entry: dict[str, Any]) -> None:
+        super().append(entry)
+        if self._sink is not None:
+            self._sink(entry)
+
+
 class BenchmarkAgent(ABC):
     agent_type: str
     # Every benchmarked agent owns one; a test double answering from a script owns none.
     tools: ToolRegistry | None = None
+    # Where trace entries go as they happen. Set by whoever is watching -- the evaluator, for the
+    # length of one question -- and left None when nobody is. Worker-owned, like the agent itself.
+    trace_sink: Callable[[dict[str, Any]], None] | None = None
+
+    def new_trace(self) -> list[dict[str, Any]]:
+        """The trace to build this question's answer in."""
+
+        return LiveTrace(self.trace_sink)
 
     @abstractmethod
     def answer(self, question: str, options: list[str]) -> AgentResult: ...

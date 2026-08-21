@@ -93,7 +93,7 @@ class ReactAgent(BenchmarkAgent):
             {"role": "system", "content": REACT_SYSTEM_PROMPT},
             {"role": "user", "content": format_question(question, options)},
         ]
-        trace: list[dict[str, Any]] = []
+        trace = self.new_trace()
         final_text = ""
         failure_type: str | None = None
         failure_message: str | None = None

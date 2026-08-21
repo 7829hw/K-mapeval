@@ -288,7 +288,7 @@ class SpatialAgent(BenchmarkAgent):
         cache_hits_before = self.tools.provider.cache_hit_count
         cache_misses_before = self.tools.provider.cache_miss_count
         tools_before = self.tools.tool_call_count
-        trace: list[dict[str, Any]] = []
+        trace = self.new_trace()
         failure_type: str | None = None
         failure_message: str | None = None
         response_text = ""

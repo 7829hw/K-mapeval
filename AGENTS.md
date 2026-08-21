@@ -83,6 +83,10 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
 
 ## Benchmarks
 
+- `dataset/seoul_kmapeval_v6_mcq_100.jsonl`: v5's families each raised one step (composition or
+  ordinality) and the radius family's word order fixed. Built by
+  `data/build_mapeval_v6_benchmark.py`; passes `data/audit_dataset.py`. **Not yet measured** —
+  no agent run and no no-tool floor, so it has no accuracy to quote.
 - `dataset/seoul_kmapeval_v5_mcq_100.jsonl`: v4's method at MapEval-API's own difficulty (tight
   options over reproducible measures, ordinal and membership `nearby`, subjective `unanswerable`,
   `trip_optimal_order`). Built by `data/build_mapeval_v5_benchmark.py`.

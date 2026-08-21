@@ -849,3 +849,98 @@ whose floor is high, and only then run the agents. `poi_address_district` is the
 there, since a model may know a district without a map; it already rejects any place whose name
 carries its own district, and the floor is what decides whether that is enough.
 
+## What v5 measured
+
+`reports/test_20260820T135925Z.json` (ReAct) and `test_20260820T162733Z.json` (Spatial-Agent),
+`--provider kakao`, `--react-tools mapeval`, `temperature=0`, prompting-only:
+
+```
+no-tool floor  24/100 and 32/100   (two runs, same file)
+ReAct          84/100
+Spatial-Agent  88/100
+```
+
+75 questions both answer, 3 neither, 9 ReAct only, 13 Spatial-Agent only — exact McNemar p = 0.52.
+**The architectures are still indistinguishable**, and the four-point gap is well inside the
+repeat-to-repeat spread the floor just showed. That is the same conclusion v4 reached, now on a
+benchmark whose floor sits at the 25% chance rate instead of ten points above it.
+
+| family | ReAct | Spatial-Agent | floor (2 runs) |
+| --- | --- | --- | --- |
+| `nearby_clinic_subtype` | 9/10 | 10/10 | 0, 1 |
+| `nearby_cuisine_subtype` | 5/8 | 6/8 | 2, 4 |
+| `nearby_second_nearest` | 5/6 | 6/6 | 3, 0 |
+| `nearby_within_radius` | **4/4** | **0/4** | 0, 1 |
+| `poi_direction_distance_straddled` | 10/10 | 10/10 | 2, 3 |
+| `poi_straight_distance_tight` | 11/11 | 11/11 | 4, 2 |
+| `routing_distance_via` | 6/8 | 8/8 | 3, 4 |
+| `routing_next_turn` | 7/7 | 7/7 | 2, 2 |
+| `routing_turn_count` | 6/7 | 7/7 | 2, 3 |
+| `trip_feasible_count` | 7/7 | 7/7 | 2, 2 |
+| `trip_optimal_order` | 6/8 | 6/8 | 2, 4 |
+| `trip_total_distance` | **2/7** | **7/7** | 0, 2 |
+| `unanswerable_*` (4 families) | 6/7 | 3/7 | 2–3 of 4 on the subjective rows |
+
+Three results the earlier benchmarks could not isolate:
+
+- **Aggregating a length is where the architectures actually differ.** `trip_total_distance` runs
+  ReAct 2/7 against Spatial-Agent 7/7 — a complete inversion, on the family v4 had both agents
+  scoring 7/7 because its options were 22% to 45% apart. Tightened, ReAct accumulates four legs by
+  hand across four tool calls and drifts; the GeoFlow graph puts them through one `distance_matrix`
+  and sums exactly. This is the paper's own claim about composed retrieval, and it took options
+  narrow enough to punish drift before it showed up.
+- **Counting membership against a stated radius is where Spatial-Agent breaks.** `nearby_within_radius`
+  runs 4/4 against 0/4. None of the four is a parse failure — every one returned a valid count, just
+  the wrong one, on rows whose insides sit at 421/264/390 m against a 500 m boundary. A pipeline
+  that composes a graph per question gets a question whose answer is a *count over a predicate*
+  wrong in a way that reading four distances one at a time does not.
+- **A graph that must terminate in a Measure still cannot refuse.** ReAct 6/7 on the unanswerable
+  rows against Spatial-Agent's 3/7, reproducing v4's finding on new questions — including the
+  subjective ones, where the map holds the places and simply does not rank them.
+
+Two families stay saturated for both, and it is worth saying why rather than tightening them
+further: `poi_straight_distance_tight` and `poi_direction_distance_straddled` rest on a haversine
+over two resolved coordinates, which is exact arithmetic. No option spacing defeats it, so those 21
+rows measure name resolution and nothing else. MapEval's distance questions are hard because
+Google's *road* distances and durations are estimates; that half cannot be asked here.
+
+## v6: every family raised, and the radius family's word order fixed
+
+Seven of v5's fourteen families were saturated by both agents, and a saturated family cannot show a
+difference. Tightening their options does not help where the measure is exact — a haversine over
+two resolved coordinates is arithmetic, not an estimate — so v6 raises each family along one of two
+axes instead: **composition**, where the answer needs two measurements and an operation between
+them, and **ordinality**, which denies the agent the first row of a ranking.
+
+| v5 family | v6 family | what changed |
+| --- | --- | --- |
+| `poi_straight_distance_tight` | `poi_distance_difference` | two haversines and a subtraction |
+| `poi_direction_distance_straddled` | `poi_farthest_of_three` | three haversines and a maximum |
+| `nearby_second_nearest` | `nearby_kth_nearest` | k drawn from 2..4, options from ranks 1..6 |
+| `nearby_clinic_subtype` | `nearby_subtype_kth` | the k-th of a named subtype, not the nearest |
+| `routing_next_turn` | `routing_nth_turn` | count into the guidance list, not match a road |
+| `routing_turn_count` | `routing_turn_count_via` | counted on a route through a waypoint |
+| `routing_distance_via` | `routing_detour_cost` | via length minus direct length |
+| `trip_optimal_order` | `trip_optimal_order_four` | four stops, 24 orders instead of 6 |
+| `trip_total_distance` | `trip_total_distance_four` | four stops, five legs |
+| `nearby_within_radius` | `nearby_within_radius_count` | word order fixed, radius 300/500/800 |
+
+`nearby_cuisine_subtype`, `trip_feasible_count`, `unanswerable` and `unanswerable_subjective` carry
+over unchanged, because a family that is already discriminating only spends rows when raised.
+Class proportions stay MapEval-API's: nearby 28, poi 21, routing 22, trip 22, unanswerable 7.
+
+**The radius family's 0/4 was the question's fault, not the agent's.** v5 asked "다음 네 약국 중
+<anchor>에서 반경 500m …", and `_extract_anchor` splits a radius question on `" 반경"` and takes
+everything before it — so the anchor handed to `batch_geocode` was the whole clause
+"다음 네 약국 중 신이문역 1호선에서", which resolves to nothing and fails every step downstream. All
+four traces are that one failure. No Korean speaker puts the list before the landmark, so v6 asks
+"<anchor>에서 반경 500m 이내에 있는 약국은 아래 목록 중 몇 곳인가요?" — the ordinary word order, and
+the one `_extract_anchor` was written for. Fixing the phrasing was right and tuning the splitter
+would not have been: the agent's reader is part of the architecture under test.
+
+The counts are spread across the ladder deliberately: keying the answer on a loop index spends the
+rungs wherever the loop happened to succeed, which is how v5's four-rung radius family shipped
+drawing from three values. `dataset/seoul_kmapeval_v6_mcq_100.jsonl` passes
+`data/audit_dataset.py`. **No agent has been run against it yet**, and its no-tool floor is not
+measured either; both have to happen before any v6 accuracy means anything.
+

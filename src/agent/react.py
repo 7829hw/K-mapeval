@@ -10,7 +10,7 @@ from src.agent.base import (
     find_provider_failure,
     format_question,
 )
-from src.llm import ChatClient, LLMUnavailableError
+from src.llm import ChatClient, LLMUnavailableError, TokenUsage
 from src.parsing import parse_answer
 from src.tools import ToolRegistry
 
@@ -98,10 +98,12 @@ class ReactAgent(BenchmarkAgent):
         failure_type: str | None = None
         failure_message: str | None = None
         reasoning_steps = 0
+        usage = TokenUsage()
         try:
             for _ in range(self.max_steps):
                 reasoning_steps += 1
                 response = self.llm.chat(messages, tools=self.tools.schemas())
+                usage += response.usage
                 messages.append(response.assistant_message())
                 if not response.tool_calls:
                     final_text = response.content
@@ -143,7 +145,9 @@ class ReactAgent(BenchmarkAgent):
                         }
                     )
                     reasoning_steps += 1
-                    final_text = self.llm.chat(messages).content
+                    forced = self.llm.chat(messages)
+                    usage += forced.usage
+                    final_text = forced.content
         except LLMUnavailableError as exc:
             failure_type = "llm_unavailable"
             failure_message = f"{type(exc).__name__}: {exc}"
@@ -168,6 +172,12 @@ class ReactAgent(BenchmarkAgent):
             cache_hits=self.tools.provider.cache_hit_count - cache_hits_before,
             cache_misses=self.tools.provider.cache_miss_count - cache_misses_before,
             reasoning_steps=reasoning_steps,
+            llm_calls=reasoning_steps,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            total_tokens=usage.total_tokens,
+            reasoning_tokens=usage.reasoning_tokens,
+            reasoning_chars=usage.reasoning_chars,
             latency_ms=(time.perf_counter() - started) * 1000,
             failure_type=failure_type,
             failure_message=failure_message,

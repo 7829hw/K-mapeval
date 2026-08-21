@@ -55,6 +55,10 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
 - Report metadata must carry `llm_temperature`, `react_max_iterations`,
   `react_parallel_tool_calls` and `react_forces_final_answer`. An accuracy without them is not
   comparable to anything.
+- Every question records what it cost: `llm_calls`, `prompt_tokens`, `completion_tokens`,
+  `total_tokens`, `reasoning_tokens`, `reasoning_chars`, in the log line, the report row and the
+  run statistics. `reasoning_tokens` is only ever what the server reported — leave it null when it
+  reports nothing rather than estimating it, and never sum it unless every row has one.
 - `--react-tools full` is an ablation. Never pool it with the default `mapeval` surface, and do not
   tune ReAct's prompt, tool contracts, or step budget in response to benchmark misses.
 - Select one evidence mode per run: `context`, `hybrid`, or `kakao`. Only `hybrid` may use its

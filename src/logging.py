@@ -108,6 +108,16 @@ def log_agent_result(
         result.reasoning_steps,
         result.api_calls,
     )
+    logger.info(
+        "TOKENS | prompt %s | completion %s | total %s | reasoning %s | reasoning text %s chars",
+        result.prompt_tokens,
+        result.completion_tokens,
+        result.total_tokens,
+        # A server that does not split the completion reports nothing here, and nothing is what
+        # gets written: an estimate printed beside three measured counts reads as a fourth.
+        "n/a" if result.reasoning_tokens is None else result.reasoning_tokens,
+        result.reasoning_chars,
+    )
     logger.info("=" * 80)
     logger.info("Result:")
     logger.info("  - Intent: %s", result.predicted_intent)

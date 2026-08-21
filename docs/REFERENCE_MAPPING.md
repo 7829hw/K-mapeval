@@ -1023,3 +1023,34 @@ Report metadata now carries `llm_temperature`, `react_max_iterations`, `react_pa
 and `react_forces_final_answer` beside `react_tools`. Every accuracy recorded above predates all
 of them.
 
+## What a question costs, and how much of it is thinking
+
+Per-question logs, report rows and run statistics now carry `llm_calls`, `prompt_tokens`,
+`completion_tokens`, `total_tokens`, `reasoning_tokens` and `reasoning_chars`, summed over every
+completion the question asked for. Two agents that score the same are not the same result if one
+spent three times the tokens getting there, and on a reasoning model most of a completion is text
+the parser never sees — the Spatial-Agent pipeline makes three to four calls per question against
+ReAct's one per iteration, and neither cost was recorded before.
+
+**`reasoning_tokens` is whatever the server reported, and nothing else.** This deployment returns
+`completion_tokens_details: null` while returning a populated `message.reasoning`: 441 completion
+tokens for a one-sentence answer, with the thinking in a field the usage block does not count.
+There is no `/tokenize` route either — both `…/tokenize` and `…/v1/tokenize` are 404 — so the split
+cannot be recovered without a tokenizer that would have to agree with the server's. So the field
+stays `null` rather than being estimated, `reasoning_chars` records the thinking text that did come
+back, and the summary line says which of the two it is printing. On a server that does report
+`completion_tokens_details.reasoning_tokens`, the field fills in by itself and the aggregate sums
+it — but only when every row reported one, because summing a column the server filled in sometimes
+would read as a total.
+
+Measured on two v6 questions with `--react-tools reference`:
+
+```
+Tokens: 37846 total (32167 prompt + 5679 completion) over 16 LLM calls,
+        18923 per question | 9288 reasoning chars (server reports no reasoning-token split)
+```
+
+The prompt-to-completion ratio is the thing to watch in a write-up: a ReAct question re-sends its
+whole growing trace on every iteration, so 85% of what this run spent was prompt, and a budget
+change moves that number quadratically rather than linearly.
+

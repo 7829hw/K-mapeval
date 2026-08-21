@@ -21,6 +21,16 @@ class AgentResult(BaseModel):
     cache_hits: int = Field(default=0, ge=0)
     cache_misses: int = Field(default=0, ge=0)
     reasoning_steps: int = Field(default=0, ge=0)
+    # What the question cost at the endpoint, summed over every completion the agent asked for.
+    # `reasoning_tokens` stays None when the server does not split the completion; see
+    # `src.llm.TokenUsage`. `reasoning_chars` is the thinking text that came back and never
+    # reached the parser, which is measurable on every deployment.
+    llm_calls: int = Field(default=0, ge=0)
+    prompt_tokens: int = Field(default=0, ge=0)
+    completion_tokens: int = Field(default=0, ge=0)
+    total_tokens: int = Field(default=0, ge=0)
+    reasoning_tokens: int | None = Field(default=None, ge=0)
+    reasoning_chars: int = Field(default=0, ge=0)
     latency_ms: float = Field(default=0.0, ge=0)
     failure_type: str | None = None
     failure_message: str | None = None

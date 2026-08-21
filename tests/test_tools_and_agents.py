@@ -125,6 +125,84 @@ def test_react_executes_common_tool_then_parses_answer() -> None:
     assert result.failure_type is None
 
 
+def test_a_question_records_what_it_cost_at_the_endpoint() -> None:
+    """Tokens are summed over every completion the question asked for, thinking counted apart.
+
+    Two agents that score the same are not the same result if one spent three times the tokens,
+    and on a reasoning model most of a completion is text the parser never sees. `reasoning_tokens`
+    is whatever the server reported and nothing else: the deployment this runs against returns
+    `completion_tokens_details: null` beside a populated `message.reasoning`, and an estimate
+    printed next to three measured counts would read as a fourth.
+    """
+
+    from src.llm import TokenUsage
+
+    llm = QueuedLLM(
+        [
+            LLMResponse(
+                "",
+                (LLMToolCall("call-1", "place_search", {"query": "경복궁"}),),
+                TokenUsage(
+                    prompt_tokens=120,
+                    completion_tokens=64,
+                    total_tokens=184,
+                    reasoning_tokens=40,
+                    reasoning_chars=310,
+                ),
+            ),
+            LLMResponse(
+                "^^2^^",
+                (),
+                TokenUsage(
+                    prompt_tokens=200,
+                    completion_tokens=12,
+                    total_tokens=212,
+                    reasoning_tokens=5,
+                    reasoning_chars=44,
+                ),
+            ),
+        ]
+    )
+    agent = ReactAgent(llm, ToolRegistry(FakeProvider()), max_steps=5)
+    result = agent.answer("질문", ["A", "B", "C", "D"])
+
+    assert result.llm_calls == 2
+    assert result.prompt_tokens == 320
+    assert result.completion_tokens == 76
+    assert result.total_tokens == 396
+    assert result.reasoning_tokens == 45
+    assert result.reasoning_chars == 354
+
+
+def test_an_unsplit_completion_reports_no_reasoning_token_count() -> None:
+    """A server that does not break the completion down leaves the field empty, not zero.
+
+    Zero would read as "it did no thinking", which is the opposite of what a null
+    `completion_tokens_details` means beside 441 completion tokens and a paragraph of
+    `message.reasoning`.
+    """
+
+    from src.llm import TokenUsage
+
+    llm = QueuedLLM(
+        [
+            LLMResponse(
+                "^^1^^",
+                (),
+                TokenUsage(
+                    prompt_tokens=90, completion_tokens=441, total_tokens=531, reasoning_chars=900
+                ),
+            )
+        ]
+    )
+    result = ReactAgent(llm, ToolRegistry(FakeProvider()), max_steps=3).answer(
+        "질문", ["A", "B", "C", "D"]
+    )
+    assert result.reasoning_tokens is None
+    assert result.reasoning_chars == 900
+    assert result.completion_tokens == 441
+
+
 def test_react_takes_one_action_per_iteration_like_the_structured_chat_parser() -> None:
     """Upstream's agent cannot emit two actions in one step, so ours must not either.
 

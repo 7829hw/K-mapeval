@@ -23,7 +23,7 @@ from src.agent.geoflow import (
     retrieve_templates,
     split_reference_arithmetic,
 )
-from src.llm import ChatClient, LLMUnavailableError
+from src.llm import ChatClient, LLMUnavailableError, TokenUsage
 from src.parsing import parse_answer, parse_json_object
 from src.tools import SpatialOperatorRegistry, ToolRegistry
 from src.tools.spatial import (
@@ -295,6 +295,7 @@ class SpatialAgent(BenchmarkAgent):
         predicted: int | None = None
         predicted_intent: str | None = None
         reasoning_steps = 0
+        usage = TokenUsage()
         try:
             analysis_response = self.llm.chat(
                 [
@@ -303,6 +304,7 @@ class SpatialAgent(BenchmarkAgent):
                 ]
             )
             reasoning_steps += 1
+            usage += analysis_response.usage
             raw_analysis = parse_json_object(analysis_response.content)
             fallback_intent = _heuristic_intent(question)
             analysis = normalize_analysis(raw_analysis, question, fallback_intent)
@@ -340,6 +342,7 @@ class SpatialAgent(BenchmarkAgent):
                 ]
             )
             reasoning_steps += 1
+            usage += plan_response.usage
             plan = parse_json_object(plan_response.content)
             trace.append({"stage": "compose", "graph": plan.get("graph") or plan.get("steps")})
             try:
@@ -379,6 +382,7 @@ class SpatialAgent(BenchmarkAgent):
                     ]
                 )
                 reasoning_steps += 1
+                usage += repair_response.usage
                 repaired_plan = parse_json_object(repair_response.content)
                 trace.append(
                     {
@@ -523,6 +527,7 @@ class SpatialAgent(BenchmarkAgent):
                 ]
             )
             reasoning_steps += 1
+            usage += evaluation.usage
             evaluation_json = parse_json_object(evaluation.content)
             predicted, selection = _select_option(evaluation_json, options, results)
             if predicted is None:
@@ -566,6 +571,12 @@ class SpatialAgent(BenchmarkAgent):
             cache_hits=self.tools.provider.cache_hit_count - cache_hits_before,
             cache_misses=self.tools.provider.cache_miss_count - cache_misses_before,
             reasoning_steps=reasoning_steps,
+            llm_calls=reasoning_steps,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            total_tokens=usage.total_tokens,
+            reasoning_tokens=usage.reasoning_tokens,
+            reasoning_chars=usage.reasoning_chars,
             latency_ms=(time.perf_counter() - started) * 1000,
             failure_type=failure_type,
             failure_message=failure_message,

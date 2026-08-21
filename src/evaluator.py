@@ -277,6 +277,15 @@ class Evaluator:
                 "cache_hits": result.cache_hits,
                 "cache_misses": result.cache_misses,
                 "reasoning_steps": result.reasoning_steps,
+                # What the question cost at the endpoint. `reasoning_tokens` is null on a server
+                # that does not split the completion, and `reasoning_chars` is the thinking text
+                # that came back and never reached the parser -- measurable everywhere.
+                "llm_calls": result.llm_calls,
+                "prompt_tokens": result.prompt_tokens,
+                "completion_tokens": result.completion_tokens,
+                "total_tokens": result.total_tokens,
+                "reasoning_tokens": result.reasoning_tokens,
+                "reasoning_chars": result.reasoning_chars,
                 "error": error,
                 "failure_type": result.failure_type,
                 "attempts": 1,
@@ -329,6 +338,12 @@ class Evaluator:
             "cache_hits": 0,
             "cache_misses": 0,
             "reasoning_steps": 0,
+            "llm_calls": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "reasoning_tokens": None,
+            "reasoning_chars": 0,
             "error": error,
             "failure_type": failure_type,
             "attempts": attempts,
@@ -425,7 +440,31 @@ def calculate_statistics(results: list[dict[str, Any]]) -> dict[str, Any]:
             "cache_hits": sum(int(row.get("cache_hits") or 0) for row in results),
             "cache_misses": sum(int(row.get("cache_misses") or 0) for row in results),
             "reasoning_steps": sum(int(row.get("reasoning_steps") or 0) for row in results),
+            **_token_totals(results),
         },
+    }
+
+
+def _token_totals(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """What the run cost at the endpoint, and how much of it was thinking.
+
+    Two agents that score the same are not the same result if one spent three times the tokens
+    getting there, and a reasoning model spends most of a completion on text the parser never
+    sees. `reasoning_tokens` stays null unless the server reported it on every row that had a
+    completion: summing a column the server filled in sometimes would read as a total.
+    """
+
+    reported = [row.get("reasoning_tokens") for row in results]
+    complete = results and all(value is not None for value in reported)
+    return {
+        "llm_calls": sum(int(row.get("llm_calls") or 0) for row in results),
+        "prompt_tokens": sum(int(row.get("prompt_tokens") or 0) for row in results),
+        "completion_tokens": sum(int(row.get("completion_tokens") or 0) for row in results),
+        "total_tokens": sum(int(row.get("total_tokens") or 0) for row in results),
+        "reasoning_tokens": (
+            sum(int(value or 0) for value in reported) if complete else None
+        ),
+        "reasoning_chars": sum(int(row.get("reasoning_chars") or 0) for row in results),
     }
 
 
@@ -455,6 +494,23 @@ def print_summary(statistics: dict[str, Any]) -> None:
         f"({overall['accuracy'] * 100:.1f}%)"
     )
     print(f"Average time: {performance['average_time_seconds']:.2f}s")
+    total_tokens = performance.get("total_tokens") or 0
+    if total_tokens:
+        answered = overall["total"] or 1
+        reasoning = performance.get("reasoning_tokens")
+        thinking = (
+            f"{reasoning} reasoning"
+            if reasoning is not None
+            else f"{performance.get('reasoning_chars') or 0} reasoning chars (server reports "
+            "no reasoning-token split)"
+        )
+        print(
+            f"Tokens: {total_tokens} total "
+            f"({performance.get('prompt_tokens') or 0} prompt + "
+            f"{performance.get('completion_tokens') or 0} completion) over "
+            f"{performance.get('llm_calls') or 0} LLM calls, "
+            f"{total_tokens / answered:.0f} per question | {thinking}"
+        )
     if performance["failed_count"]:
         print(f"Failed samples: {performance['failed_ids']}")
     if performance.get("failure_types"):

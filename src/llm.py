@@ -38,9 +38,62 @@ class LLMToolCall:
 
 
 @dataclass(frozen=True)
+class TokenUsage:
+    """What one completion actually cost, as the endpoint reported it.
+
+    `reasoning_tokens` is `None` rather than 0 when the server does not break the completion down.
+    The deployment this repository runs against returns `completion_tokens_details: null` while
+    still returning a populated `message.reasoning`, and exposes no `/tokenize` route, so the
+    thinking tokens cannot be counted from here without a tokenizer that would have to agree with
+    the server's. Reporting an estimate as a count is worse than reporting nothing, so the estimate
+    is not made: `reasoning_chars` records how much thinking text came back, which is measurable,
+    and `reasoning_tokens` fills in by itself on a server that reports it.
+    """
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    reasoning_tokens: int | None = None
+    reasoning_chars: int = 0
+
+    def __add__(self, other: TokenUsage) -> TokenUsage:
+        reasoning = (
+            None
+            if self.reasoning_tokens is None and other.reasoning_tokens is None
+            else (self.reasoning_tokens or 0) + (other.reasoning_tokens or 0)
+        )
+        return TokenUsage(
+            prompt_tokens=self.prompt_tokens + other.prompt_tokens,
+            completion_tokens=self.completion_tokens + other.completion_tokens,
+            total_tokens=self.total_tokens + other.total_tokens,
+            reasoning_tokens=reasoning,
+            reasoning_chars=self.reasoning_chars + other.reasoning_chars,
+        )
+
+
+def _token_usage(completion: Any, message: Any) -> TokenUsage:
+    """Read the usage block, tolerating a server that omits any part of it."""
+
+    usage = getattr(completion, "usage", None)
+    details = getattr(usage, "completion_tokens_details", None) if usage else None
+    reasoning = getattr(details, "reasoning_tokens", None) if details else None
+    # vLLM puts the chain of thought on `reasoning`; the OpenAI reasoning models use
+    # `reasoning_content`. Either is thinking text that never reaches the parser.
+    text = getattr(message, "reasoning", None) or getattr(message, "reasoning_content", None)
+    return TokenUsage(
+        prompt_tokens=int(getattr(usage, "prompt_tokens", 0) or 0),
+        completion_tokens=int(getattr(usage, "completion_tokens", 0) or 0),
+        total_tokens=int(getattr(usage, "total_tokens", 0) or 0),
+        reasoning_tokens=None if reasoning is None else int(reasoning),
+        reasoning_chars=len(text) if isinstance(text, str) else 0,
+    )
+
+
+@dataclass(frozen=True)
 class LLMResponse:
     content: str
     tool_calls: tuple[LLMToolCall, ...] = ()
+    usage: TokenUsage = TokenUsage()
 
     def assistant_message(self) -> dict[str, Any]:
         message: dict[str, Any] = {"role": "assistant", "content": self.content or None}
@@ -111,7 +164,7 @@ class OpenAIChatClient:
             except json.JSONDecodeError:
                 arguments = {"_invalid_json": call.function.arguments}
             calls.append(LLMToolCall(call.id, call.function.name, arguments))
-        return LLMResponse(message.content or "", tuple(calls))
+        return LLMResponse(message.content or "", tuple(calls), _token_usage(completion, message))
 
     def _request_with_retries(self, kwargs: dict[str, Any]) -> Any:
         last_error: Exception | None = None

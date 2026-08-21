@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from src.dataset import load_dataset
+from src.dataset import BenchmarkItem, load_dataset
 from src.models import Place, Route
 from src.tools import ContextMapProvider, MapProvider, ToolRegistry
 from src.tools.context import parse_context
@@ -375,3 +375,43 @@ def test_a_miss_falls_back_to_the_live_provider_the_way_upstream_does() -> None:
     alone = ContextMapProvider([RADIUS_CONTEXT])
     assert alone.search_place("IBK기업은행") == []
     assert alone.api_call_count == 0
+
+
+def test_a_context_carrying_dataset_defaults_to_upstreams_own_arrangement() -> None:
+    """`--provider auto` resolves to `hybrid`, not to the closed world.
+
+    Upstream Spatial-Agent never runs the corpus alone. `local_context_db.py` answers from
+    `data/context_cache.db` and every operator that misses falls through to the Google Maps API
+    (`ContextManager.should_use_local_db` -> `query_local_place` -> geocode), so the arrangement
+    it measures is corpus-plus-live-provider. `context` is that arrangement with the fallback
+    removed, which is stricter than anything upstream reports and therefore an ablation someone
+    has to ask for by name.
+    """
+
+    from main import resolve_provider_kind
+
+    with_context = [
+        BenchmarkItem(
+            id="q1",
+            question="가장 가까운 서점은?",
+            options=["어라운드북", "우리은행"],
+            answer=0,
+            classification="nearby",
+            context=NEARBY_CONTEXT,
+        )
+    ]
+    without = [
+        BenchmarkItem(
+            id="q2",
+            question="가장 가까운 서점은?",
+            options=["어라운드북", "우리은행"],
+            answer=0,
+            classification="nearby",
+        )
+    ]
+
+    assert resolve_provider_kind("auto", with_context) == "hybrid"
+    assert resolve_provider_kind("auto", without) == "kakao"
+    assert resolve_provider_kind("context", with_context) == "context"
+    with pytest.raises(ValueError):
+        resolve_provider_kind("hybrid", without)

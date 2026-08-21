@@ -35,10 +35,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("auto", "context", "hybrid", "kakao"),
         default="auto",
         help=(
-            "Where tools get their evidence: the corpus built from the dataset's contexts, that "
-            "corpus with a live Kakao fallback for what it does not hold (hybrid, upstream "
-            "Spatial-Agent's arrangement), or Kakao alone (default: auto, which picks context "
-            "when every row carries one)"
+            "Where tools get their evidence: the corpus built from the dataset's contexts alone "
+            "(context, a closed-world ablation upstream does not run), that corpus with a live "
+            "Kakao fallback for what it does not hold (hybrid, upstream Spatial-Agent's own "
+            "arrangement), or Kakao alone (default: auto, which picks hybrid when every row "
+            "carries a context and kakao otherwise)"
         ),
     )
     result.add_argument(
@@ -131,7 +132,15 @@ def create_agent_session(
 
 
 def resolve_provider_kind(requested: str, dataset: list) -> str:
-    """Choose the evidence source, and refuse to silently answer from the wrong one."""
+    """Choose the evidence source, and refuse to silently answer from the wrong one.
+
+    A context-carrying dataset resolves to `hybrid`, because that is what upstream Spatial-Agent
+    runs: `local_context_db.py` answers from `data/context_cache.db` and every operator falls back
+    to the Google Maps API on a miss (`ContextManager.should_use_local_db` -> `query_local_place`
+    -> geocode). `context` is the same corpus with the fallback removed, which is a closed world
+    stricter than anything upstream measures, so it stays an explicit ablation rather than the
+    default a bare `--provider auto` lands on.
+    """
 
     with_context = sum(1 for item in dataset if item.context)
     if requested in ("context", "hybrid"):
@@ -143,7 +152,7 @@ def resolve_provider_kind(requested: str, dataset: list) -> str:
         return requested
     if requested == "kakao":
         return "kakao"
-    return "context" if with_context == len(dataset) else "kakao"
+    return "hybrid" if with_context == len(dataset) else "kakao"
 
 
 def run(agent_type: str, args: argparse.Namespace) -> dict:

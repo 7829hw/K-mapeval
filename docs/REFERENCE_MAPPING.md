@@ -101,9 +101,14 @@ What this repo does, and why:
   running question, and that made the mere existence of a name an answer signal — "which option
   exists at all" answered 14 of 100 questions under per-question scoping and 9 under the shared
   corpus.
-- `--provider hybrid` is upstream's cache-then-live arrangement with Kakao in Google's place.
-  `--provider context` (the default) runs the corpus alone, so a run needs no Kakao key and a miss
-  stays a miss.
+- `--provider hybrid` is upstream's cache-then-live arrangement with Kakao in Google's place, and
+  it is what `--provider auto` now resolves to for a context-carrying dataset. `--provider context`
+  runs the corpus alone, so a run needs no Kakao key and a miss stays a miss — a closed world
+  stricter than anything upstream measures, which makes it an ablation to ask for by name rather
+  than the default a bare run lands on. `resolve_provider_kind` and its test pin the choice.
+  One asymmetry the mode carries and upstream does not: upstream's cache and its fallback are both
+  Google, while `seoul_mapeval_v1`'s contexts are OSM-derived and the fallback is Kakao, so a
+  hybrid run here mixes two gazetteers where upstream mixes none.
 - **Retrievals are computed, not replayed.** This is the one place the port deliberately does not
   follow upstream, and the reason is an evaluation-validity flaw in upstream that this repo
   reproduced and then measured. MapEval-API is MapEval-Textual with the `context` field removed —
@@ -138,6 +143,28 @@ Deliberate deviations from upstream, and the reason for each:
 - Place types are served in the context's own vocabulary (`convenience_store`, `amenity=bank`).
   Translating them into the Korean nouns a place-type question offers as options would be supplying
   part of the answer.
+
+### What upstream's own number was measured with
+
+`~/spatial-agent/reports/test_20260808T210842Z.json`, 280 of MapEval-API's 300 rows (the 20
+unanswerable ones excluded), is the reference point for every accuracy this repository quotes:
+
+```
+overall 71.07%   trip 55.2%   poi 53.1%   nearby 80.7%   routing 92.4%   failed 41
+```
+
+`data/context_cache.db` (589 KB) was present and newer than that report when it was written, and
+`SpatialAgent.__init__` initializes the cache whenever the file exists. So that 71.07% is a
+**context-assisted** number, on the arrangement described above — the corpus built from the same
+300 questions' curated evidence, with the live API behind it. The configuration here that
+corresponds to it is `hybrid`, not `kakao`; a `kakao` run has no curated corpus at all and is a
+harder setting than the one the reference number comes from. Any comparison that puts our number
+beside 71.07% has to say which of the two it is.
+
+The per-class split is the more useful half of it: upstream's losses are concentrated in `poi`
+(53.1%) and `trip` (55.2%), and `poi` there is dominated by rating, opening-hours and
+reservability questions that Kakao cannot be asked. A benchmark built on Kakao that reports a high
+number has usually just left out the classes upstream fails.
 
 ## Kakao-specific constraints
 
@@ -650,3 +677,4 @@ One family keeps pointing the other way, and it is the one worth reporting: Spat
 3/7 on the `unanswerable_*` rows against ReAct's 7/7. A graph that must terminate in a Measure
 composes, executes and reports a number; ReAct reads the options, finds the map silent and picks
 the refusal.
+

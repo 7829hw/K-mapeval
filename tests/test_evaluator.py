@@ -50,8 +50,7 @@ def test_evaluator_writes_upstream_spatial_agent_report_and_query_logs(tmp_path)
     report = evaluator.run()
 
     assert report.statistics["overall_answer_accuracy"]["accuracy"] == 0.5
-    assert report.statistics["answer_accuracy_by_intent"]["poi"]["correct"] == 1
-    assert report.statistics["intent_classification_accuracy"]["accuracy"] == 1.0
+    assert report.statistics["answer_accuracy_by_class"]["poi"]["correct"] == 1
     report_files = list(report_dir.glob("test_*.json"))
     assert len(report_files) == 1
     saved = json.loads(report_files[0].read_text(encoding="utf-8"))
@@ -196,8 +195,14 @@ def test_parallel_evaluator_rejects_a_shared_agent() -> None:
 
 
 
-def test_an_agent_without_an_intent_stage_is_not_scored_as_wrong(tmp_path) -> None:
-    """ReAct has no classifier, so 0.0% was a verdict on a stage the architecture never had."""
+def test_no_intent_is_scored_against_the_datasets_class(tmp_path) -> None:
+    """The two are not the same kind of thing, and only one architecture even has an intent.
+
+    `classification` labels the question; a Spatial-Agent intent is a routing decision inside one
+    pipeline, and ReAct has no such stage at all. Comparing them scored one architecture on a
+    stage the other does not have, so the report keeps the intent as a record of what happened
+    and grades nothing against it.
+    """
 
     class SilentAgent(BenchmarkAgent):
         agent_type = "react"
@@ -213,8 +218,8 @@ def test_an_agent_without_an_intent_stage_is_not_scored_as_wrong(tmp_path) -> No
         SilentAgent(), items, output_dir=None, log_dir=tmp_path / "logs"
     ).run()
 
-    intent = report.statistics["intent_classification_accuracy"]
-    assert intent["classified"] == 0
-    assert intent["accuracy"] is None
-    assert intent["total"] == 2
+    assert not [key for key in report.statistics if "intent" in key]
+    assert not [key for key in report.results[0] if key.endswith("intent_correct")]
+    assert report.results[0]["predicted_intent"] is None
+    assert set(report.statistics["answer_accuracy_by_class"]) == {"poi", "nearby"}
     assert report.statistics["overall_answer_accuracy"]["accuracy"] == 1.0

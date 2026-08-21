@@ -244,17 +244,14 @@ class Evaluator:
                 else None
             )
             error = result.failure_message
-            intent_correct = result.predicted_intent == item.classification
             answer_correct = predicted_option == correct_option
             self._print_result(
                 item,
                 index=index,
                 total=total,
-                predicted_intent=result.predicted_intent,
                 predicted_text=predicted_text,
                 predicted_option=predicted_option,
                 correct_text=correct_text,
-                intent_correct=intent_correct,
                 answer_correct=answer_correct,
                 elapsed=elapsed,
             )
@@ -267,7 +264,6 @@ class Evaluator:
                 "correct_answer_text": correct_text,
                 "predicted_option": predicted_option,
                 "predicted_answer": predicted_text,
-                "intent_correct": intent_correct,
                 "answer_correct": answer_correct,
                 "time": elapsed,
                 # Deltas read off the shared registry/provider around this question. Without them
@@ -330,7 +326,6 @@ class Evaluator:
             "correct_answer_text": correct_text,
             "predicted_option": None,
             "predicted_answer": None,
-            "intent_correct": False,
             "answer_correct": False,
             "time": elapsed,
             "tool_calls": 0,
@@ -355,20 +350,17 @@ class Evaluator:
         *,
         index: int,
         total: int,
-        predicted_intent: str | None,
         predicted_text: str | None,
         predicted_option: int | None,
         correct_text: str,
-        intent_correct: bool,
         answer_correct: bool,
         elapsed: float,
     ) -> None:
-        intent_mark = "OK" if intent_correct else "NO"
         answer_mark = "OK" if answer_correct else "NO"
         shown_pred = predicted_text if predicted_text is not None else f"idx={predicted_option}"
         print(
             f"[{index}/{total}] ID {item.id!s:>3} | "
-            f"{item.classification:10s} -> {predicted_intent or 'None':10s} {intent_mark} | "
+            f"{item.classification:10s} | "
             f"pred={str(shown_pred)[:24]!r}, correct={correct_text[:24]!r} {answer_mark} | "
             f"{elapsed:.1f}s",
             flush=True,
@@ -387,36 +379,26 @@ class Evaluator:
 
 def calculate_statistics(results: list[dict[str, Any]]) -> dict[str, Any]:
     total = len(results)
-    intent_correct = sum(1 for row in results if row.get("intent_correct"))
-    # ReAct has no intent stage at all, so every row carries predicted_intent=None. Scoring those
-    # as wrong reported 0.0% accuracy for a classifier the architecture does not have; the honest
-    # denominator is the questions an intent was actually predicted for.
-    intent_classified = sum(1 for row in results if row.get("predicted_intent"))
     answer_correct = sum(1 for row in results if row.get("answer_correct"))
     failed = [row["id"] for row in results if row.get("error")]
-    by_intent: dict[str, dict[str, Any]] = {}
+    # Answer accuracy split by the *dataset's* class, which is a property of the question and not
+    # of anything an agent predicted. It was called "by intent", which is how scoring an agent's
+    # intent against it came to look like a measurement in the first place.
+    by_class: dict[str, dict[str, Any]] = {}
     for row in results:
         classification = str(row.get("expected_classification", "unknown"))
-        stats = by_intent.setdefault(classification, {"total": 0, "correct": 0})
+        stats = by_class.setdefault(classification, {"total": 0, "correct": 0})
         stats["total"] += 1
         if row.get("answer_correct"):
             stats["correct"] += 1
-    for stats in by_intent.values():
+    for stats in by_class.values():
         stats["accuracy"] = round(stats["correct"] / stats["total"], 4) if stats["total"] else 0.0
     average_time = sum(float(row.get("time", 0.0)) for row in results) / total if total else 0.0
     failure_types = Counter(str(row["failure_type"]) for row in results if row.get("failure_type"))
     retried = [row for row in results if int(row.get("attempts") or 1) > 1]
     recovered = [row["id"] for row in retried if not is_transient_failure(row)]
     return {
-        "intent_classification_accuracy": {
-            "correct": intent_correct,
-            "total": total,
-            "classified": intent_classified,
-            "accuracy": (
-                round(intent_correct / intent_classified, 4) if intent_classified else None
-            ),
-        },
-        "answer_accuracy_by_intent": by_intent,
+        "answer_accuracy_by_class": by_class,
         "overall_answer_accuracy": {
             "correct": answer_correct,
             "total": total,
@@ -472,19 +454,10 @@ def print_summary(statistics: dict[str, Any]) -> None:
     print("=" * 80)
     print("Summary")
     print("=" * 80)
-    intent = statistics["intent_classification_accuracy"]
     overall = statistics["overall_answer_accuracy"]
     performance = statistics["performance"]
-    classified = intent.get("classified", intent["total"])
-    if classified:
-        print(
-            f"Intent accuracy: {intent['correct']}/{classified} "
-            f"({intent['accuracy'] * 100:.1f}% of {classified} classified)"
-        )
-    else:
-        print("Intent accuracy: n/a (this architecture has no intent-classification stage)")
-    print("Answer accuracy by intent:")
-    for classification, stats in sorted(statistics["answer_accuracy_by_intent"].items()):
+    print("Answer accuracy by question class:")
+    for classification, stats in sorted(statistics["answer_accuracy_by_class"].items()):
         print(
             f"  {classification:10s}: {stats['correct']:3d}/{stats['total']:3d} "
             f"({stats['accuracy'] * 100:.1f}%)"

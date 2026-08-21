@@ -1057,28 +1057,24 @@ The prompt-to-completion ratio is the thing to watch in a write-up: a ReAct ques
 whole growing trace on every iteration, so 85% of what this run spent was prompt, and a budget
 change moves that number quadratically rather than linearly.
 
-### Capping it, and why the default does not
+### A completion the server cut off is its own failure
 
-`LLM_MAX_TOKENS` sets a ceiling on a single completion, sent as `max_tokens`. It is unset by
-default, and unset means the key is not sent at all: both upstreams construct their clients with no
-token limit (`mapeval-api/GPT_4o_mini.py`, `spatial-agent/src/agent/spatial_agent.py`), so a run
-under the default is a run under the server's own limit, the way theirs are.
+Nothing here sends `max_tokens`. The output ceiling is the vLLM deployment's to set, which is also
+the arrangement both upstreams run under — `mapeval-api/GPT_4o_mini.py` and
+`spatial-agent/src/agent/spatial_agent.py` construct their clients without one.
 
-Reach for it to bound a runaway loop, not to make a run cheaper. The ratio above says why the
-saving would be small — 85% of what a ReAct question spends is prompt, which no completion cap
-touches — and the reasoning split says why the cost is high: this endpoint bills the chain of
-thought to the completion and emits it first, so a cap tight enough to bite is spent thinking and
-the answer is what gets truncated. The agent then sees an empty or half-finished message and
-records an `answer_parse_failure`, which reads in the report as the architecture failing to answer.
-A cap that changes an accuracy has to be reported alongside it, exactly like the iteration budget.
+A ceiling still lands sometimes, and when it does the question is not answered badly, it is not
+allowed to finish. A completion that comes back with `finish_reason="length"` raises
+`LLMOutputTruncatedError`, both agents record it as `llm_output_truncated`, the run statistics
+carry `llm_output_truncated_count`, and the summary says so. Without that the row read
+`answer_parse_failure` — the same label a genuinely confused agent earns, and indistinguishable
+from one in a report.
 
-That last failure mode is now named rather than silent. A completion that comes back with
-`finish_reason="length"` raises `LLMOutputTruncatedError`, both agents record it as
-`llm_output_truncated`, and the run statistics carry `llm_output_truncated_count` with a summary
-line pointing at the setting. It is never retried -- the ceiling is a setting, so the second
-attempt meets the same one -- and the tokens the truncated call burned are still added to the
-question's cost, since they were spent. Without this the row read `answer_parse_failure`, which is
-the same label a genuinely confused agent earns.
+It matters more here than it would elsewhere. This endpoint bills the chain of thought to the
+completion and emits it first, so a ceiling tight enough to bite is spent thinking and the answer
+is what gets cut. A truncated question is never retried, because the serving limit is the same on
+the second ask, and the tokens the cut-off call burned still count toward what the question cost,
+since they were spent.
 
 ### One step budget, not two
 

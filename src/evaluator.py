@@ -437,8 +437,8 @@ def calculate_statistics(results: list[dict[str, Any]]) -> dict[str, Any]:
             # Questions that ran out of patience rather than out of evidence. Reported as a plain
             # count: it belongs in the write-up next to the accuracy, not in a verdict here.
             "llm_unavailable_count": failure_types[INFRASTRUCTURE_FAILURE],
-            # Questions a token ceiling ended rather than the map or the model. An accuracy with
-            # any of these in it is partly a measurement of LLM_MAX_TOKENS.
+            # Questions the serving side's output limit ended rather than the map or the model.
+            # An accuracy with any of these in it is partly a measurement of that limit.
             "llm_output_truncated_count": failure_types[TRUNCATION_FAILURE],
             # Summed over the questions, so a run can be read as "how much did it look up".
             "tool_calls": sum(int(row.get("tool_calls") or 0) for row in results),
@@ -511,9 +511,9 @@ def print_summary(statistics: dict[str, Any]) -> None:
     truncated = performance.get("llm_output_truncated_count") or 0
     if truncated:
         print(
-            f"Token ceiling cut off {truncated} question(s): raise LLM_MAX_TOKENS or leave it "
-            "unset. Their answers were never written, so this accuracy is partly a measurement "
-            "of the ceiling."
+            f"The endpoint's output limit cut off {truncated} question(s): their answers were "
+            "never written, so this accuracy is partly a measurement of that limit. Raise it on "
+            "the serving side."
         )
     if performance["failed_count"]:
         print(f"Failed samples: {performance['failed_ids']}")

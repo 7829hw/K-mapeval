@@ -75,7 +75,8 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
 - Use 0-based option indices in datasets, predictions, logs, and reports. The answer wire format is
   `^^N^^`.
 - Never special-case a question ID or option string, and never hardcode an answer.
-- A completion a token ceiling cut off is `llm_output_truncated`, never `answer_parse_failure`:
+- Send no `max_tokens`: the output ceiling belongs to the vLLM deployment, which is also what both
+  upstreams do. A completion it cut off is `llm_output_truncated`, never `answer_parse_failure` --
   the question was not answered badly, it was not allowed to finish. Do not retry it, and keep its
   tokens in the question's cost.
 - Missing or weak evidence must fail explicitly. Do not invent measurements, silently choose the

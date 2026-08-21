@@ -34,10 +34,12 @@ class LLMOutputTruncatedError(RuntimeError):
     """A token ceiling ended the completion before the model finished writing it.
 
     Its own failure type, because it is neither the endpoint being unavailable nor the agent
-    reasoning badly: the run was configured with a ceiling the question did not fit under. On a
-    thinking model the chain of thought is billed to the completion and emitted first, so the
-    cut almost always lands on the answer -- which would otherwise be recorded as an
-    `answer_parse_failure` and read as the architecture failing to answer.
+    reasoning badly: the question did not fit under the serving side's output limit. Nothing here
+    sends `max_tokens` -- the vLLM deployment owns that ceiling, which is also what both upstreams
+    do -- so this says the server stopped the answer, not that the run asked it to. On a thinking
+    model the chain of thought is billed to the completion and emitted first, so the cut almost
+    always lands on the answer, which would otherwise be recorded as an `answer_parse_failure` and
+    read as the architecture failing to answer.
 
     Carries the usage of the truncated call so the question still reports what it spent.
     """
@@ -155,7 +157,6 @@ class OpenAIChatClient:
         self._client = OpenAI(**kwargs)
         self._model = settings.llm_model
         self._temperature = settings.llm_temperature
-        self._max_tokens = settings.llm_max_tokens
         self._max_retries = settings.llm_max_retries
         self._backoff = settings.llm_retry_backoff_seconds
 
@@ -170,11 +171,6 @@ class OpenAIChatClient:
             "messages": messages,
             "temperature": self._temperature,
         }
-        # Absent unless `.env` asks for it: an unset ceiling is the endpoint's own, which is what
-        # both upstreams run under. Sending `max_tokens=None` is not the same as sending nothing
-        # to every server, so the key is omitted rather than nulled.
-        if self._max_tokens is not None:
-            kwargs["max_tokens"] = self._max_tokens
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
@@ -183,16 +179,11 @@ class OpenAIChatClient:
         message = choice.message
         usage = _token_usage(completion, message)
         if getattr(choice, "finish_reason", None) == "length":
-            ceiling = (
-                f"LLM_MAX_TOKENS={self._max_tokens}"
-                if self._max_tokens is not None
-                else "the endpoint's own output limit"
-            )
             raise LLMOutputTruncatedError(
-                f"The completion was cut off at {ceiling} after "
+                "The completion was cut off at the endpoint's output limit after "
                 f"{usage.completion_tokens} completion tokens "
                 f"({usage.reasoning_chars} of them thinking text), so the answer it was writing "
-                "never arrived",
+                "never arrived. The ceiling is the serving side's; nothing here sends max_tokens.",
                 usage,
             )
         calls: list[LLMToolCall] = []

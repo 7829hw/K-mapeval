@@ -40,9 +40,11 @@ class ScriptedCompletions:
     def __init__(self, script: list[Any]) -> None:
         self.script = list(script)
         self.calls = 0
+        self.requests: list[dict[str, Any]] = []
 
-    def create(self, **_: Any) -> Any:
+    def create(self, **kwargs: Any) -> Any:
         self.calls += 1
+        self.requests.append(kwargs)
         outcome = self.script.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
@@ -363,3 +365,36 @@ def test_a_transient_provider_failure_is_asked_again(tmp_path) -> None:
 
     assert agent.attempts == 2
     assert report.results[0]["answer_correct"] is True
+
+
+def test_no_token_ceiling_is_sent_unless_the_environment_asks_for_one() -> None:
+    """The default is the server's own limit, which is what both upstreams run under.
+
+    `max_tokens: None` is not the same request as no `max_tokens` at all on every OpenAI-compatible
+    server, so the key has to be absent rather than null.
+    """
+
+    client = build_client()
+    script = install(client, [completion("^^1^^")])
+
+    client.chat([{"role": "user", "content": "q"}])
+
+    assert "max_tokens" not in script.requests[0]
+    assert script.requests[0]["temperature"] == 0.0
+
+
+def test_a_configured_ceiling_reaches_every_request() -> None:
+    client = build_client(llm_max_tokens=256)
+    script = install(client, [completion("^^1^^"), completion("^^2^^")])
+
+    client.chat([{"role": "user", "content": "q"}])
+    client.chat([{"role": "user", "content": "q2"}])
+
+    assert [request["max_tokens"] for request in script.requests] == [256, 256]
+
+
+@pytest.mark.parametrize("blank", ["", "  ", "0", 0, None])
+def test_a_blank_or_zero_ceiling_means_no_ceiling_not_a_budget_of_zero(blank: Any) -> None:
+    """`.env` says "leave this alone" with an empty value, and a reader reaches for 0 to say it."""
+
+    assert Settings(llm_api_key="k", llm_model="m", llm_max_tokens=blank).llm_max_tokens is None

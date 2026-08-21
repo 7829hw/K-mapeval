@@ -138,6 +138,7 @@ class OpenAIChatClient:
         self._client = OpenAI(**kwargs)
         self._model = settings.llm_model
         self._temperature = settings.llm_temperature
+        self._max_tokens = settings.llm_max_tokens
         self._max_retries = settings.llm_max_retries
         self._backoff = settings.llm_retry_backoff_seconds
 
@@ -152,6 +153,11 @@ class OpenAIChatClient:
             "messages": messages,
             "temperature": self._temperature,
         }
+        # Absent unless `.env` asks for it: an unset ceiling is the endpoint's own, which is what
+        # both upstreams run under. Sending `max_tokens=None` is not the same as sending nothing
+        # to every server, so the key is omitted rather than nulled.
+        if self._max_tokens is not None:
+            kwargs["max_tokens"] = self._max_tokens
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,6 +26,18 @@ class Settings(BaseSettings):
     # back 27/100 and 38/100, and single families swung 2/7 to 6/7 between them. An accuracy
     # sampled that way is one draw, not a measurement.
     llm_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    # A ceiling on what one completion may spend, sent as `max_tokens`. Blank or 0 sends nothing
+    # and leaves the server's own limit in force, which is what both upstreams do -- neither
+    # `mapeval-api` nor `spatial-agent` caps its client -- so the default here is no cap.
+    #
+    # Read the cap for what it is on a thinking model: this endpoint bills the chain of thought to
+    # the completion, so the cap is spent on reasoning *first* and the answer is what gets cut. A
+    # cap low enough to bite does not make a question cheaper, it makes it unanswerable -- the
+    # agent sees an empty or truncated message and records an `answer_parse_failure` that reads
+    # like the architecture failed. Measured here, one ReAct question spent 737 completion tokens
+    # across three calls, of which most was thinking. Cap to bound a runaway loop, not to save
+    # money on a run you intend to report.
+    llm_max_tokens: int | None = Field(default=None, gt=0)
     # A ReAct question carries its whole growing trace into every call, and a busy self-hosted
     # endpoint can take minutes to answer one. A short timeout does not make the answer arrive
     # sooner; it only turns a slow answer into a lost question.
@@ -55,6 +67,19 @@ class Settings(BaseSettings):
     kakao_timeout_seconds: float = Field(default=30.0, gt=0)
     kakao_cache_db_path: str = "data/kakao_cache.db"
     kakao_cache_ttl_seconds: int = Field(default=86_400, ge=0)
+
+    @field_validator("llm_max_tokens", mode="before")
+    @classmethod
+    def no_ceiling_when_blank(cls, value: object) -> object:
+        """`LLM_MAX_TOKENS=` and `LLM_MAX_TOKENS=0` both mean "send no ceiling".
+
+        An empty variable is how `.env` says "leave this alone", and 0 is what a reader reaches for
+        to say the same thing. Neither is a budget of zero tokens.
+        """
+
+        if isinstance(value, str) and (not value.strip() or value.strip() == "0"):
+            return None
+        return None if value == 0 else value
 
     @model_validator(mode="after")
     def normalize_blanks(self) -> Settings:

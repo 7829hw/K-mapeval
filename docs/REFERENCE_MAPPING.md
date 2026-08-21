@@ -1054,3 +1054,17 @@ The prompt-to-completion ratio is the thing to watch in a write-up: a ReAct ques
 whole growing trace on every iteration, so 85% of what this run spent was prompt, and a budget
 change moves that number quadratically rather than linearly.
 
+### Capping it, and why the default does not
+
+`LLM_MAX_TOKENS` sets a ceiling on a single completion, sent as `max_tokens`. It is unset by
+default, and unset means the key is not sent at all: both upstreams construct their clients with no
+token limit (`mapeval-api/GPT_4o_mini.py`, `spatial-agent/src/agent/spatial_agent.py`), so a run
+under the default is a run under the server's own limit, the way theirs are.
+
+Reach for it to bound a runaway loop, not to make a run cheaper. The ratio above says why the
+saving would be small — 85% of what a ReAct question spends is prompt, which no completion cap
+touches — and the reasoning split says why the cost is high: this endpoint bills the chain of
+thought to the completion and emits it first, so a cap tight enough to bite is spent thinking and
+the answer is what gets truncated. The agent then sees an empty or half-finished message and
+records an `answer_parse_failure`, which reads in the report as the architecture failing to answer.
+A cap that changes an accuracy has to be reported alongside it, exactly like the iteration budget.

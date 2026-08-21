@@ -82,7 +82,7 @@ pip install -e '.[dev]'
 cp example.env .env
 ```
 
-`.env`에 LLM과 `KAKAO_REST_API_KEY`를 입력합니다. 하나의 Kakao REST API 키를 Local API와 Mobility API에 함께 사용합니다. `LLM_BASE_URL`을 비워두면 OpenAI 기본 endpoint를 사용하고, 입력하면 OpenAI 호환 Chat Completions endpoint를 사용합니다. Temperature, 출력 토큰 수, 요청 timeout은 별도로 전달하지 않고 연결된 LLM/API의 기본값을 사용합니다. `MAX_REASONING_STEPS`로 문항당 reasoning/tool-call 단계 상한을 설정할 수 있습니다. `BENCHMARK_CONCURRENCY`의 기본값은 `4`이며, 각 worker가 독립 LLM 클라이언트·에이전트·Kakao provider를 사용해 네 문항을 동시에 처리합니다.
+`.env`에 LLM과 `KAKAO_REST_API_KEY`를 입력합니다. 하나의 Kakao REST API 키를 Local API와 Mobility API에 함께 사용합니다. `LLM_BASE_URL`을 비워두면 OpenAI 기본 endpoint를 사용하고, 입력하면 OpenAI 호환 Chat Completions endpoint를 사용합니다. Temperature는 두 upstream과 동일하게 `LLM_TEMPERATURE=0`으로 전달합니다(전달하지 않으면 endpoint 기본값이 적용되어 동일 벤치마크의 두 실행이 11점 차이가 났습니다). 출력 토큰 상한 `LLM_MAX_TOKENS`는 비워두면 전송하지 않고 endpoint 기본값을 사용하며, 상한에 걸려 잘린 문항은 `llm_output_truncated`로 기록됩니다. 요청 timeout은 `LLM_TIMEOUT_SECONDS`입니다. `MAX_REASONING_STEPS`(기본 15, langchain 기본값)는 문항당 추론 단계 상한이며 ReAct의 loop 반복 수와 Spatial-Agent 그래프의 노드 수에 함께 적용됩니다. `BENCHMARK_CONCURRENCY`의 기본값은 `4`이며, 각 worker가 독립 LLM 클라이언트·에이전트·Kakao provider를 사용해 네 문항을 동시에 처리합니다.
 
 ## 실행
 

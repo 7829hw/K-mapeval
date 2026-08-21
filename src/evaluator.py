@@ -16,11 +16,14 @@ from pydantic import BaseModel, ConfigDict
 
 from src.agent.base import BenchmarkAgent
 from src.dataset import BenchmarkItem
-from src.llm import LLMUnavailableError
+from src.llm import LLMOutputTruncatedError, LLMUnavailableError
 from src.logging import log_agent_result, query_log
 
 INFRASTRUCTURE_FAILURE = "llm_unavailable"
 PROVIDER_FAILURE = "provider_failure"
+# A token ceiling cut the completion off. Never retried: the ceiling is a setting, so asking the
+# same question again under it only spends the tokens again.
+TRUNCATION_FAILURE = "llm_output_truncated"
 # Provider errors that say the API could not answer right now, as opposed to answering that the
 # place does not exist. Only these are worth asking again for; a PlaceNotFoundError is evidence.
 TRANSIENT_PROVIDER_ERRORS = ("ProviderTimeoutError", "ProviderRateLimitError")
@@ -292,11 +295,12 @@ class Evaluator:
                 f"[{index}/{total}] ID {item.id!s:>3} | ERROR: {str(exc)[:80]} | {elapsed:.1f}s",
                 flush=True,
             )
-            failure_type = (
-                INFRASTRUCTURE_FAILURE
-                if isinstance(exc, LLMUnavailableError)
-                else "agent_reasoning_failure"
-            )
+            if isinstance(exc, LLMUnavailableError):
+                failure_type = INFRASTRUCTURE_FAILURE
+            elif isinstance(exc, LLMOutputTruncatedError):
+                failure_type = TRUNCATION_FAILURE
+            else:
+                failure_type = "agent_reasoning_failure"
             return self._failed_row(
                 item,
                 question,
@@ -416,6 +420,9 @@ def calculate_statistics(results: list[dict[str, Any]]) -> dict[str, Any]:
             # Questions that ran out of patience rather than out of evidence. Reported as a plain
             # count: it belongs in the write-up next to the accuracy, not in a verdict here.
             "llm_unavailable_count": failure_types[INFRASTRUCTURE_FAILURE],
+            # Questions a token ceiling ended rather than the map or the model. An accuracy with
+            # any of these in it is partly a measurement of LLM_MAX_TOKENS.
+            "llm_output_truncated_count": failure_types[TRUNCATION_FAILURE],
             # Summed over the questions, so a run can be read as "how much did it look up".
             "tool_calls": sum(int(row.get("tool_calls") or 0) for row in results),
             "api_calls": sum(int(row.get("api_calls") or 0) for row in results),
@@ -483,6 +490,13 @@ def print_summary(statistics: dict[str, Any]) -> None:
             f"{performance.get('completion_tokens') or 0} completion) over "
             f"{performance.get('llm_calls') or 0} LLM calls, "
             f"{total_tokens / answered:.0f} per question | {thinking}"
+        )
+    truncated = performance.get("llm_output_truncated_count") or 0
+    if truncated:
+        print(
+            f"Token ceiling cut off {truncated} question(s): raise LLM_MAX_TOKENS or leave it "
+            "unset. Their answers were never written, so this accuracy is partly a measurement "
+            "of the ceiling."
         )
     if performance["failed_count"]:
         print(f"Failed samples: {performance['failed_ids']}")

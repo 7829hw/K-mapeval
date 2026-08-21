@@ -1072,6 +1072,14 @@ the answer is what gets truncated. The agent then sees an empty or half-finished
 records an `answer_parse_failure`, which reads in the report as the architecture failing to answer.
 A cap that changes an accuracy has to be reported alongside it, exactly like the iteration budget.
 
+That last failure mode is now named rather than silent. A completion that comes back with
+`finish_reason="length"` raises `LLMOutputTruncatedError`, both agents record it as
+`llm_output_truncated`, and the run statistics carry `llm_output_truncated_count` with a summary
+line pointing at the setting. It is never retried -- the ceiling is a setting, so the second
+attempt meets the same one -- and the tokens the truncated call burned are still added to the
+question's cost, since they were spent. Without this the row read `answer_parse_failure`, which is
+the same label a genuinely confused agent earns.
+
 ### One step budget, not two
 
 `REACT_MAX_ITERATIONS` and `MAX_REASONING_STEPS` were two names for the same quantity — how many

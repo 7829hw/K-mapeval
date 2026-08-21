@@ -11,7 +11,12 @@ from src.agent.base import AgentResult, BenchmarkAgent
 from src.config import Settings
 from src.dataset import BenchmarkItem
 from src.evaluator import Evaluator
-from src.llm import LLMUnavailableError, OpenAIChatClient
+from src.llm import (
+    LLMOutputTruncatedError,
+    LLMUnavailableError,
+    OpenAIChatClient,
+    TokenUsage,
+)
 from src.tools import ToolRegistry
 from tests.test_tools_and_agents import FakeProvider
 
@@ -61,10 +66,10 @@ def install(client: OpenAIChatClient, script: list[Any]) -> ScriptedCompletions:
     return completions
 
 
-def completion(content: str) -> Any:
-    message = type("Message", (), {"content": content, "tool_calls": None})()
-    choice = type("Choice", (), {"message": message})()
-    return type("Completion", (), {"choices": [choice]})()
+def completion(content: str, *, finish_reason: str = "stop", **usage: Any) -> Any:
+    message = type("Message", (), {"content": content, "tool_calls": None, **usage})()
+    choice = type("Choice", (), {"message": message, "finish_reason": finish_reason})()
+    return type("Completion", (), {"choices": [choice], "usage": None})()
 
 
 def test_transient_endpoint_errors_are_retried_instead_of_failing_the_question() -> None:
@@ -403,3 +408,89 @@ def test_a_blank_or_zero_ceiling_means_no_ceiling_not_a_budget_of_zero(blank: An
 
     settings = Settings(_env_file=None, llm_api_key="k", llm_model="m", llm_max_tokens=blank)
     assert settings.llm_max_tokens is None
+
+
+def test_a_completion_the_ceiling_cut_off_is_its_own_failure_not_a_bad_answer() -> None:
+    """`finish_reason="length"` means the answer was never written, not that it was wrong.
+
+    Left to flow, the agent would parse an empty or half-finished message and record an
+    `answer_parse_failure`, which reads in a report as the architecture failing to answer.
+    """
+
+    client = build_client(llm_max_tokens=64)
+    install(client, [completion("", finish_reason="length", reasoning="thinking and thinking")])
+
+    with pytest.raises(LLMOutputTruncatedError) as caught:
+        client.chat([{"role": "user", "content": "q"}])
+
+    assert "LLM_MAX_TOKENS=64" in str(caught.value)
+    # The tokens it burned before the cut still belong in the question's cost.
+    assert caught.value.usage.reasoning_chars == len("thinking and thinking")
+
+
+def test_the_servers_own_limit_is_named_when_no_ceiling_was_configured() -> None:
+    client = build_client()
+    install(client, [completion("half an ans", finish_reason="length")])
+
+    with pytest.raises(LLMOutputTruncatedError) as caught:
+        client.chat([{"role": "user", "content": "q"}])
+
+    assert "LLM_MAX_TOKENS" not in str(caught.value)
+    assert "endpoint's own output limit" in str(caught.value)
+
+
+class CeilingLLM:
+    """An endpoint whose every completion runs into the token ceiling."""
+
+    def chat(self, messages: list[dict[str, Any]], *, tools: Any = None) -> Any:
+        raise LLMOutputTruncatedError(
+            "The completion was cut off at LLM_MAX_TOKENS=64 after 64 completion tokens",
+            TokenUsage(completion_tokens=64, total_tokens=64, reasoning_chars=200),
+        )
+
+
+@pytest.mark.parametrize("agent_name", ["react", "spatial"])
+def test_both_agents_blame_the_ceiling_rather_than_their_own_reasoning(agent_name: str) -> None:
+    agent_class = ReactAgent if agent_name == "react" else SpatialAgent
+    agent = agent_class(CeilingLLM(), ToolRegistry(FakeProvider()), max_steps=3)
+
+    result = agent.answer("질문", ["A", "B"])
+
+    assert result.failure_type == "llm_output_truncated"
+    assert result.predicted_answer is None
+    # The truncated call still cost tokens, and the question still has to report them.
+    assert result.completion_tokens == 64
+    assert result.reasoning_chars == 200
+
+
+class TruncatedAgent(BenchmarkAgent):
+    agent_type = "truncated"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def answer(self, question: str, options: list[str]) -> AgentResult:
+        self.calls += 1
+        raise LLMOutputTruncatedError("cut off at LLM_MAX_TOKENS=8", TokenUsage())
+
+
+def test_a_question_the_ceiling_cut_off_is_counted_and_not_asked_again(tmp_path, capsys) -> None:
+    """Retrying is pointless: the ceiling is a setting, so the second attempt hits the same one."""
+
+    agent = TruncatedAgent()
+    items = [
+        BenchmarkItem(id="a", question="q", options=["x", "y"], answer=0, classification="poi")
+    ]
+    report = Evaluator(
+        agent,
+        items,
+        output_dir=None,
+        log_dir=tmp_path / "logs",
+        question_retries=2,
+        question_retry_backoff_seconds=0.001,
+    ).run()
+
+    assert agent.calls == 1
+    assert report.results[0]["failure_type"] == "llm_output_truncated"
+    assert report.statistics["performance"]["llm_output_truncated_count"] == 1
+    assert "raise LLM_MAX_TOKENS" in capsys.readouterr().out

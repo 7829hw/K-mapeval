@@ -18,6 +18,10 @@ from tests.test_tools_and_agents import FakeProvider
 
 def build_client(**overrides: Any) -> OpenAIChatClient:
     settings = Settings(
+        # Never the developer's `.env`: a local LLM_MAX_TOKENS made "no ceiling is sent by
+        # default" fail on one machine and pass on every other. A test asserts what the code
+        # does, not what the machine running it is configured to do.
+        _env_file=None,
         llm_api_key="test-key",
         llm_model="test-model",
         llm_base_url="http://localhost:1/v1",
@@ -397,4 +401,5 @@ def test_a_configured_ceiling_reaches_every_request() -> None:
 def test_a_blank_or_zero_ceiling_means_no_ceiling_not_a_budget_of_zero(blank: Any) -> None:
     """`.env` says "leave this alone" with an empty value, and a reader reaches for 0 to say it."""
 
-    assert Settings(llm_api_key="k", llm_model="m", llm_max_tokens=blank).llm_max_tokens is None
+    settings = Settings(_env_file=None, llm_api_key="k", llm_model="m", llm_max_tokens=blank)
+    assert settings.llm_max_tokens is None

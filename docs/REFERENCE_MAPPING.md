@@ -678,6 +678,97 @@ One family keeps pointing the other way, and it is the one worth reporting: Spat
 composes, executes and reports a number; ReAct reads the options, finds the map silent and picks
 the refusal.
 
+## The v3 run, and why 89/98 is not this repository's number
+
+`reports/test_20260820T114441Z.json` and `test_20260820T120113Z.json` read ReAct 89/100 and
+Spatial-Agent 98/100. Both were run against `dataset/seoul_kmapeval_v3_mcq_100.jsonl`, which is the
+*compositional* benchmark and not the MapEval-method one; `main.py --dataset` defaults to v4 and
+those two runs overrode it. Four properties of v3 make that pair unreportable as an architecture
+result, and they are worth writing down because three of them survive into v4 in weaker form.
+
+1. **Seven families, not a hundred questions.** v3 draws from seven templates and both agents
+   saturate five of them: `trip_finish_time` 16/16 and 16/16, `poi_bearing_and_distance` 14/14 and
+   14/14, `trip_latest_departure` 14/14 and 13/14. The effective sample is the family count, so
+   the interval around 98/100 is nothing like the interval around 98 independent trials.
+2. **The wrong options sit outside the measurement.** `_time_options` places them 85 to 200
+   minutes from the gold and `_survives_traffic` *discards* any row whose answer could flip under a
+   second traffic sample. Thirty of the hundred rows are that family. Any agent that computes the
+   legs at all answers them; the question grades whether the arithmetic happened, not whether it
+   was right.
+3. **The gold and the run read the same bytes.** `data/benchmark_core.py` builds every gold through
+   `src.tools.kakao.KakaoMapProvider` against `data/kakao_cache.db`, which is the same cache file
+   and the same TTL the evaluation uses. `seoul_kmapeval_v3_000` was answered with **0 API calls
+   and 8 cache hits** — the very responses its `leg_s` was computed from. This is deliberate ("a
+   wrong answer means the agent, never a source mismatch"), and the cost of it is that the whole
+   provider-disagreement error class, which is where a human-curated gold like MapEval's puts real
+   agents, cannot occur here.
+4. **v3 has no `poi` class and no unanswerable rows.** Those are upstream's two weakest classes
+   (53.1% and the 20 rows it excludes). v4 fixes the composition — its `mapeval_class` mix is
+   28/22/22/21/7 against upstream's 27.7/22.3/22.0/21.3/6.7 — and v3 does not have it.
+
+`_select_option` also carries a deterministic override, `_computed_clock_option`, that outranks the
+generation stage whenever every option is a wall clock and the graph computed exactly one. It
+decided **27 of the 100** answers in that Spatial-Agent run. On this run it agreed with the
+generation stage's own answer text on all 27, so it did not move the score, but it is answer
+selection performed by the harness rather than by the architecture and it should be reported
+whenever the trace shows `"selection_method": "computed_clock"`.
+
+## No held-out split, and what v5 is for
+
+The deeper problem is not any one family. `src/agent/spatial.py`'s grounding stage, its
+`ANALYSIS_PROMPT` intent rules and its operator contracts were each edited in response to specific
+misses on these same hundred rows — the source comments name the questions, and the commit log
+reads as a sequence of them. That is legitimate development, and `src/agent/react.py` is explicitly
+protected from it ("do not tune it against benchmark results"), which means the *gap* between the
+two agents is partly a gap between a tuned system and an untuned one. Nothing in this repository
+has ever been measured on a sample it had not already been fixed against.
+
+Two things follow, and both are now runnable:
+
+- `data/build_mapeval_benchmark.py` and `data/build_mapeval_v5_benchmark.py` take `--seed` and
+  `--id-prefix`. A build under a seed nothing under `src/` has seen draws a different sample from
+  the same 12,138-place pool and is a **held-out** set. Report its number separately; it is the
+  first accuracy here that is not also a training-set accuracy.
+- `data/build_mapeval_v5_benchmark.py` keeps v4's method and class proportions and replaces the
+  three things that made v4 easier than MapEval-API, each read off `MapEval-API.jsonl` itself:
+
+  | property | upstream | v4 | v5 |
+  | --- | --- | --- | --- |
+  | option spacing | `['18 mins','19 mins','20 mins','21 mins']` | clocks 90–195 min apart, lengths 28–75% apart | tight options, built only from reproducible measures (straight line, DISTANCE-priority length, turn counts, orderings by length) |
+  | nearby shape | "the **second** nearest park", "within **500 meters** of" | nearest-of-a-subtype, answered by taking row 0 | `nearby_second_nearest`, `nearby_within_radius` — the nearest right-kind place is a distractor |
+  | unanswerable | "the most beautiful route", "best for fresh seafood" | "Kakao has no rating column", one fact learned once | `unanswerable_subjective` — a ranking no map publishes, over four real neighbours |
+
+  It also restores `trip_optimal_order`, which is upstream's signature trip shape and the class it
+  scores 55.2% on, and drops `trip_arrival_clock`, whose options cannot be tightened: a Kakao
+  duration is a live estimate (3,243 s and then 4,337 s for the same route), so a clock question is
+  only gradeable with options spaced past that spread, and options spaced past that spread are what
+  made the family free. Ordering in v5 is by **road length at DISTANCE priority** rather than by
+  duration for the same reason, which is a deviation from upstream's "most optimized order" and
+  belongs in the write-up.
+
+### What building v5 cost, and the two defects it exposed
+
+Built against live Kakao on 2026-08-20: **100/100 rows, 4,887 API calls**, class mix 28/22/22/21/7
+against upstream's 27.7/22.3/22.0/21.3/6.7, gold positions 28/23/28/21. Two things only a real
+build could show, both now fixed in the builder:
+
+- **A category rotation keyed on `len(made)` deadlocks.** `nearby_second_nearest` picked its Kakao
+  category by how many rows it had already produced, so the first category with no usable
+  neighbourhood anywhere pinned every remaining anchor to itself: 2 rows of 6, after 3,389 Kakao
+  calls. Rotating by the anchor being tried costs a barren category one anchor instead of the
+  family. `nearby_within_radius` and `unanswerable_subjective` carried the same latent bug.
+- **"Which of these is within 500 m" is the nearest-of-a-type question wearing a hat.** With
+  exactly one option inside the radius, the one inside is necessarily the nearest of the four, so
+  an agent that ranks and reports row 0 answers it without ever reading the radius — precisely the
+  shortcut the family was added to punish. It is asked as a *count* instead ("다음 네 약국 중 …
+  몇 곳인가요"), with one, two or three of the four inside, so every option has to be measured and
+  the options are a value rather than a name. The count ladder must not be shuffled, which is why
+  `finalize` now takes its `ordered` families as an argument.
+
+The first defect is worth generalizing: every family in `data/build_*.py` that rotates a category,
+a complaint or a cuisine by `len(made)` has it, and it shows up as a family that quietly returns
+fewer rows than its quota rather than as an error.
+
 ### The floor found a second answer key, and v4 has it too
 
 v5's first floor came back **36/100**, and three families sat well above the 25% chance rate:

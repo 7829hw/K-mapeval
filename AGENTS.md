@@ -69,10 +69,23 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   fixed ladder must be able to answer each rung, and should spend its rows across them the way
   `trip_feasible_count` does — keying the answer on a loop index spends them wherever the loop
   happened to succeed.
+- Every benchmark in `dataset/` has been tuned against, so an accuracy on one is a training-set
+  accuracy. Build a held-out set with `--seed`/`--id-prefix` on a builder, change nothing under
+  `src/` afterwards, and report that number separately. The reference point is upstream
+  Spatial-Agent's own 71.07% on MapEval-API, which `docs/REFERENCE_MAPPING.md` records together
+  with the configuration it was measured in.
 
 ## Benchmarks
 
-- `dataset/seoul_kmapeval_v4_mcq_100.jsonl`: current MapEval-method reproduction benchmark.
+- `dataset/seoul_kmapeval_v5_mcq_100.jsonl`: v4's method at MapEval-API's own difficulty (tight
+  options over reproducible measures, ordinal and membership `nearby`, subjective `unanswerable`,
+  `trip_optimal_order`). Built by `data/build_mapeval_v5_benchmark.py`.
+- `dataset/seoul_kmapeval_v5h_holdout_100.jsonl`: the same builder under seed 613829, 99 rows, no
+  question and almost no place in common with v5. **Held out** — nothing under `src/` has been
+  tuned against it, and it is the only set here whose accuracy is not also a training-set
+  accuracy. Keep it that way: if a run on it exposes an agent bug, fix the bug against v5 and
+  rebuild the holdout under another seed before quoting it again.
+- `dataset/seoul_kmapeval_v4_mcq_100.jsonl`: MapEval-method reproduction benchmark.
 - `dataset/seoul_kmapeval_v3_mcq_100.jsonl`: compositional architecture benchmark.
 - `dataset/seoul_mapeval_v1_mcq_100.jsonl`: context/hybrid evidence benchmark.
 - `dataset/seoul_kmapeval_v2_mcq_100.jsonl`: superseded benchmark retained for historical runs.

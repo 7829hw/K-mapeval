@@ -62,6 +62,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Concurrent question/LLM sessions (default: BENCHMARK_CONCURRENCY or 4)",
     )
+    result.add_argument(
+        "--repeats",
+        type=int,
+        default=1,
+        help=(
+            "How many times to run each agent over the dataset (default: 1). The LLM endpoint is "
+            "not reproducible even at temperature 0, so one pass is one draw; repeats print the "
+            "spread and every pass writes its own report."
+        ),
+    )
     return result
 
 
@@ -155,7 +165,7 @@ def resolve_provider_kind(requested: str, dataset: list) -> str:
     return "hybrid" if with_context == len(dataset) else "kakao"
 
 
-def run(agent_type: str, args: argparse.Namespace) -> dict:
+def run(agent_type: str, args: argparse.Namespace, repeat: int = 1, repeats: int = 1) -> dict:
     settings = Settings()
     settings.require_llm()
     dataset = load_dataset(args.dataset)
@@ -198,6 +208,13 @@ def run(agent_type: str, args: argparse.Namespace) -> dict:
             # while `--agent both` is halfway through would otherwise be recorded as the code
             # that answered the second half.
             "code_revision": CODE_REVISION,
+            # Which pass of a repeated measurement this is. The endpoint is not reproducible even
+            # at temperature 0 -- no sampling parameter reaches it -- so a lone accuracy is one
+            # draw from a spread that has measured wider than the differences these runs are
+            # asked about. A report that does not say which pass it was cannot be pooled with its
+            # siblings afterwards.
+            "repeat_index": repeat,
+            "repeat_count": repeats,
         },
         question_retries=settings.benchmark_question_retries,
         question_retry_backoff_seconds=settings.benchmark_question_retry_backoff_seconds,
@@ -236,6 +253,34 @@ def _code_revision() -> str | None:
 # Read once, at import: this is the revision whose code this process is running.
 CODE_REVISION = _code_revision()
 
+LABELS = {"react": "ReAct", "spatial_agent": "Spatial-Agent"}
+
+
+def _report_passes(passes: dict[str, list[float]]) -> None:
+    """Print every pass and its spread, never a single number standing in for the measurement.
+
+    The spread is the point. This endpoint answers the same request differently at temperature 0 —
+    no sampling parameter reaches it — and two no-tool floor runs over one benchmark came back
+    24/100 and 32/100, wider than any architecture difference measured here. A summary line that
+    prints one accuracy per agent invites exactly the comparison the spread does not support.
+    """
+
+    for agent_type, accuracies in passes.items():
+        label = LABELS.get(agent_type, agent_type)
+        joined = ", ".join(f"{value:.3f}" for value in accuracies)
+        if len(accuracies) == 1:
+            print(f"{label} accuracy={joined} (one pass; the spread is unmeasured)")
+            continue
+        low, high = min(accuracies), max(accuracies)
+        mean = sum(accuracies) / len(accuracies)
+        print(f"{label} accuracy: {joined} | mean={mean:.3f} spread={high - low:.3f}")
+    if len(passes) == 2 and all(len(values) > 1 for values in passes.values()):
+        widest = max(max(values) - min(values) for values in passes.values())
+        means = [sum(values) / len(values) for values in passes.values()]
+        gap = abs(means[0] - means[1])
+        verdict = "inside" if gap <= widest else "outside"
+        print(f"Mean gap {gap:.3f} is {verdict} the widest single-agent spread {widest:.3f}")
+
 
 def main() -> None:
     args = build_parser().parse_args()
@@ -244,14 +289,16 @@ def main() -> None:
         if args.agent == "both"
         else ("spatial_agent" if args.agent == "spatial" else "react",)
     )
-    summaries: dict[str, dict] = {agent_type: run(agent_type, args) for agent_type in agent_types}
-    if len(summaries) == 2:
-        print(
-            "ReAct accuracy="
-            f"{summaries['react']['overall_answer_accuracy']['accuracy']:.3f} | "
-            "Spatial-Agent accuracy="
-            f"{summaries['spatial_agent']['overall_answer_accuracy']['accuracy']:.3f}"
-        )
+    if args.repeats < 1:
+        raise ValueError("--repeats must be at least 1")
+    passes: dict[str, list[float]] = {agent_type: [] for agent_type in agent_types}
+    for repeat in range(1, args.repeats + 1):
+        for agent_type in agent_types:
+            if args.repeats > 1:
+                print(f"\n=== {agent_type}, pass {repeat}/{args.repeats}")
+            statistics = run(agent_type, args, repeat=repeat, repeats=args.repeats)
+            passes[agent_type].append(statistics["overall_answer_accuracy"]["accuracy"])
+    _report_passes(passes)
 
 
 if __name__ == "__main__":

@@ -61,6 +61,10 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   prompting-only, and include the no-tool floor when interpreting accuracy.
 - Decode at `temperature=0`, which is what both upstreams do. Sending no temperature leaves the
   endpoint's default in force, and two floor runs over one benchmark then differed by 11 points.
+- The LLM endpoint is not reproducible even greedily — no sampling parameter fixes it, and a
+  100-question run carries a spread of about ±8 points. Run each configuration several times and
+  read any difference against that spread; a single-run comparison of two architectures is not a
+  result. See `docs/REFERENCE_MAPPING.md`.
 - Run `python data/audit_dataset.py <dataset>` after every build and before the floor. It exits
   non-zero on a second answer key: a gold sitting at a fixed rank once the options are sorted, an
   option that can never be the answer, a gold whose text appears in its own question, duplicate

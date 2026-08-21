@@ -817,3 +817,35 @@ about are inside the spread just measured.
 `LLM_TEMPERATURE` overrides it. Anything quoted from before this change should be re-run, and a
 report that compares two architectures should say which temperature produced it.
 
+### And temperature was not the whole of it: this endpoint is not reproducible at all
+
+Setting it to 0 did not settle the floor either — two more runs over the identical file gave
+**24/100** and **32/100**. Probing the endpoint directly, six identical requests at
+`temperature=0` returned four distinct answers, and nothing fixed it:
+
+| request | distinct answers in 5 calls |
+| --- | --- |
+| `temperature=0` | 5 |
+| `temperature=0, seed=12345` | 3 |
+| `temperature=0, top_p=1, top_k=1` | 3 |
+| `temperature=0, seed=12345, top_p=1, top_k=1` | 4 |
+
+No sampling parameter reaches it, so the variation is not sampling. `nvidia/Qwen3.6-35B-A3B-NVFP4`
+is a mixture-of-experts model served behind a reverse proxy: expert routing and reduction order
+shift with whatever else is in the batch, and a proxy may be spreading requests over replicas. The
+practical consequence is the same either way.
+
+**A single run of 100 questions on this deployment carries a spread of roughly ±8 points.** That is
+wider than every architecture difference this repository has reported — ReAct 89 against
+Spatial-Agent 98 on v3 is 9 points, 87 against 91 on v4 is 4 — and the McNemar tests in the
+sections above were computed on one draw each, so they measure disagreement between two agents on a
+single sample and not the instability of either. No comparison here is safe until each
+configuration is run several times and the difference is read against the repeat-to-repeat spread.
+Report *k* runs, not one.
+
+`data/build_mapeval_benchmark.py` has not been re-run under a held-out seed yet. The build loop
+that v4 established applies unchanged — build, measure the no-tool floor with `data/measure_no_tool_floor.py`, drop any family
+whose floor is high, and only then run the agents. `poi_address_district` is the family to watch
+there, since a model may know a district without a map; it already rejects any place whose name
+carries its own district, and the floor is what decides whether that is enough.
+

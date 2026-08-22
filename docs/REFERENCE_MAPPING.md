@@ -1324,3 +1324,28 @@ are questions where reading results one at a time beats composing a graph.
 without one an accuracy of 49 has no scale — the Qwen floor was 24–32/100 on v5 and says nothing
 about Gemma. The spread is also unmeasured here; a hundred questions now costs minutes, so
 `--repeats 3` is affordable and a single pass is not a result.
+
+### The no-tool floor for this model
+
+Same model, same options, no tools, closed book, two passes each
+(`data/measure_no_tool_floor.py`, 32 workers). Nothing unparsed and nothing failed in six passes.
+
+| | floor (2 passes) | ReAct | Spatial-Agent | what the map explains |
+| --- | --- | --- | --- | --- |
+| **v5** | 22, 26 | 49 | 75 | +25 / +51 |
+| **v6** | 28, 31 | 34 | 62 | **+4** / +32 |
+| **v7** | 29, 31 | 46 | 74 | +16 / +44 |
+
+The floors sit at or just above the chance rate of 25, and the chosen-option histograms are flat
+(`{0: 14, 1: 27, 2: 35, 3: 24}` is typical), so there is no position prior and no family answerable
+from the model's own knowledge. Family by family the pattern is what the design intended: 1/11 on
+`poi_distance_difference`, 0–2/8 on `routing_detour_cost`, 0/6 on `nearby_second_nearest`, 1/10 on
+`nearby_clinic_subtype`. The one high cell, `unanswerable_subjective` 4/4, is correct by
+construction — the gold is a refusal, and refusing is exactly what a closed book should do.
+
+**The v6 line is the one to read twice.** ReAct scores 34 against a floor of 28–31: the map
+explains about four questions out of a hundred, which is inside the floor's own two-pass spread.
+On v6 the reference baseline is, within noise, a model answering from its own knowledge with the
+tools adding nothing. That is a statement about the benchmark as much as about the agent — v6 is
+hard enough that the tool-calling loop cannot convert its evidence into answers — and it is why v7
+exists. On v7 the same agent recovers to +16 while Spatial-Agent holds +44.

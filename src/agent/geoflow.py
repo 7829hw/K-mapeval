@@ -686,13 +686,21 @@ def build_concept_graph(analysis: dict[str, Any]) -> ConceptGraph:
     return ConceptGraph(nodes=nodes, edges=tuple(dict.fromkeys(edges)))
 
 
-def factorize_geoflow(analysis: dict[str, Any], payload: dict[str, Any]) -> FactorizedGeoFlow:
+def factorize_geoflow(
+    analysis: dict[str, Any], payload: dict[str, Any], *, strict_types: bool = True
+) -> FactorizedGeoFlow:
     """Map concept graph G to an executable operator-concept hypergraph G'.
 
     Each operator hyperedge records input concepts, literal factor parameters, and one or more
     output bindings.  Analysis concepts that supply a radius, direction, category, or other
     literal argument are factor inputs; they must not be fabricated as operator outputs merely
     to satisfy connectivity.
+
+    `strict_types=False` skips the concept-level role-ordering rule, the same way
+    `normalize_and_validate_graph` skips the node-level one. They are one rule applied to two
+    graphs, and only half of it was skippable when the lenient pass was added -- so three of the
+    seven Spatial-Agent failures in the first run on the new model were still this port refusing a
+    plan for a reason upstream does not have.
     """
 
     raw_steps = payload.get("graph") if payload.get("graph") is not None else payload.get("steps")
@@ -1426,7 +1434,7 @@ def normalize_and_validate_graph(
         for source, target in concept_edges:
             source_role = str(concept_by_id[source].get("role") or "support")
             target_role = str(concept_by_id[target].get("role") or "support")
-            if _violates_procedural_order(source_role, target_role):
+            if strict_types and _violates_procedural_order(source_role, target_role):
                 raise ValueError(
                     f"Concept role ordering violation: {source} ({source_role}) -> "
                     f"{target} ({target_role})"

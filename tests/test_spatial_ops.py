@@ -2377,3 +2377,147 @@ def test_a_lenient_pass_skips_our_own_rules_and_keeps_every_structural_one() -> 
     }
     with pytest.raises(ValueError, match="Measure"):
         normalize_and_validate_graph(no_measure, max_steps=8, strict_types=False)
+
+
+def test_the_concept_role_rule_is_skipped_leniently_like_the_node_one() -> None:
+    """One rule applied to two graphs; both halves have to be skippable or neither is.
+
+    Real analysis and plan from `seoul_kmapeval_v6_004`, one of three questions the first run on
+    the new model still lost to `Concept role ordering violation` -- raised during factorization,
+    where the node-level flag never reached. The plan runs perfectly well: grounding is what
+    introduces the offending edge, and upstream annotates functional roles without enforcing any
+    ordering between them.
+    """
+
+    from src.agent.spatial import _factorize_validate_plan
+
+    analysis = {
+            "intent": "nearby",
+            "concepts": [
+                    {
+                            "id": "anchor",
+                            "text": "노량진만나로 골목형상점가",
+                            "concept_type": "location",
+                            "role": "extent",
+                            "attributes": {},
+                            "depends_on": []
+                    },
+                    {
+                            "id": "target_type",
+                            "text": "내과",
+                            "concept_type": "object",
+                            "role": "support",
+                            "attributes": {},
+                            "depends_on": [
+                                    "anchor"
+                            ]
+                    },
+                    {
+                            "id": "candidates",
+                            "text": (
+                                "['동작고려의원', '김영내과의원', "
+                                "'이용국내과의원', '기쁨준내과의원']"
+                            ),
+                            "concept_type": "location",
+                            "role": "measure",
+                            "attributes": {
+                                    "rank": "third_nearest"
+                            },
+                            "depends_on": [
+                                    "anchor",
+                                    "target_type"
+                            ]
+                    }
+            ],
+            "measure": "nearby",
+            "target_type": None
+    }
+
+    graph = [
+            {
+                    "id": "all_locations",
+                    "operator": "batch_geocode",
+                    "arguments": {
+                            "place_names": [
+                                    "동작고려의원",
+                                    "김영내과의원",
+                                    "이용국내과의원",
+                                    "기쁨준내과의원"
+                            ],
+                            "anchor": "노량진만나로 골목형상점가"
+                    },
+                    "depends_on": [],
+                    "output_type": "object",
+                    "role": "extent",
+                    "concept_ids": [
+                            "anchor",
+                            "candidates"
+                    ]
+            },
+            {
+                    "id": "distances",
+                    "operator": "pairwise_distances",
+                    "arguments": {
+                            "pairs": [
+                                    {
+                                            "place_a": "$all_locations.0.place",
+                                            "place_b": "$all_locations.1.place",
+                                            "label": "동작고려의원"
+                                    },
+                                    {
+                                            "place_a": "$all_locations.0.place",
+                                            "place_b": "$all_locations.2.place",
+                                            "label": "김영내과의원"
+                                    },
+                                    {
+                                            "place_a": "$all_locations.0.place",
+                                            "place_b": "$all_locations.3.place",
+                                            "label": "이용국내과의원"
+                                    },
+                                    {
+                                            "place_a": "$all_locations.0.place",
+                                            "place_b": "$all_locations.4.place",
+                                            "label": "기쁨준내과의원"
+                                    }
+                            ]
+                    },
+                    "depends_on": [
+                            "all_locations"
+                    ],
+                    "output_type": "field",
+                    "role": "support",
+                    "concept_ids": [
+                            "anchor",
+                            "candidates"
+                    ]
+            },
+            {
+                    "id": "third_nearest",
+                    "operator": "identity_measure",
+                    "arguments": {
+                            "value": "third_nearest_candidate_by_distance"
+                    },
+                    "depends_on": [
+                            "distances"
+                    ],
+                    "output_type": "object",
+                    "role": "measure",
+                    "concept_ids": [
+                            "candidates"
+                    ]
+            }
+    ]
+
+    question = (
+        "지금 노량진만나로 골목형상점가에 있습니다. 어제부터 배탈이 나서 계속 속이 안 좋습니다. "
+        "여기서 세 번째로 가까운 내과는 다음 중 어디인가요?"
+    )
+    options = ["동작고려의원", "김영내과의원", "이용국내과의원", "기쁨준내과의원"]
+
+    with pytest.raises(ValueError, match="Concept role ordering violation"):
+        _factorize_validate_plan(analysis, {"graph": graph}, question, options, "nearby", 15)
+
+    _, steps, _ = _factorize_validate_plan(
+        analysis, {"graph": graph}, question, options, "nearby", 15, strict_types=False
+    )
+    assert [step["id"] for step in steps] == ["all_locations", "distances", "third_nearest"]

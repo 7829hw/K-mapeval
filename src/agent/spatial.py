@@ -409,20 +409,34 @@ class SpatialAgent(BenchmarkAgent):
                     fallback_graph = _bind_prevalidated_template(
                         intent, question, options, _extract_anchor(question, intent)
                     )
+                    fallback_failed = False
                     if fallback_graph:
                         trace.append(
                             {"stage": "template_fallback", "graph": fallback_graph}
                         )
-                        factorized, steps, constraints = _factorize_validate_plan(
-                            analysis,
-                            {"graph": fallback_graph},
-                            question,
-                            options,
-                            intent,
-                            max(self.max_steps, len(fallback_graph)),
-                            expand_retrieval=False,
-                        )
-                    else:
+                        try:
+                            factorized, steps, constraints = _factorize_validate_plan(
+                                analysis,
+                                {"graph": fallback_graph},
+                                question,
+                                options,
+                                intent,
+                                max(self.max_steps, len(fallback_graph)),
+                                expand_retrieval=False,
+                            )
+                        except ValueError as fallback_error:
+                            # A prevalidated template that does not fit this question either is
+                            # not a reason to stop: the planner's own graph has not been tried
+                            # under upstream's rules yet.
+                            trace.append(
+                                {
+                                    "stage": "template_fallback",
+                                    "status": "invalid",
+                                    "error": str(fallback_error),
+                                }
+                            )
+                            fallback_failed = True
+                    if not fallback_graph or fallback_failed:
                         # Nothing prevalidated fits this intent, so the choice is between the
                         # planner's own graph and no answer at all. Upstream has no type or role
                         # check to fail in the first place -- it would have executed this graph --
@@ -648,7 +662,7 @@ def _factorize_validate_plan(
         expand_retrieval=expand_retrieval,
         inferred_type=analysis.get("target_type"),
     )
-    factorized = factorize_geoflow(analysis, {"graph": grounded})
+    factorized = factorize_geoflow(analysis, {"graph": grounded}, strict_types=strict_types)
     # The planner budget above governs what the planner authored. Retrieval fan-out added
     # during grounding is deterministic and gets its own allowance on top of it.
     steps, constraints = normalize_and_validate_graph(

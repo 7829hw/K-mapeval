@@ -1281,3 +1281,46 @@ ceiling near 16,384** (working calls top out at 5,854, spirals start above 60,00
 budget left where it is, and Spatial-Agent's concurrency reduced if 504s persist — its calls are an
 order of magnitude longer than ReAct's, so twelve of them at once is not the same load as twelve
 ReAct workers.
+
+## A second model, and the first sweep where nothing was lost to the endpoint
+
+`google/gemma-4-E4B-it-qat-w4a16-ct` in place of `nvidia/Qwen3.6-35B-A3B-NVFP4`, revision
+`a5742a3`, `--react-tools reference`, `--provider kakao`, temperature 0, 15 steps, concurrency 32,
+one pass each. **These numbers may not be pooled with the Qwen ones**; report metadata carries
+`llm_model` so the two families stay separable.
+
+| | ReAct (reference) | Spatial-Agent |
+| --- | --- | --- |
+| **v5** | 49/100 | 75/100 |
+| **v6** | 34/100 | 62/100 |
+| **v7** | 46/100 | 74/100 |
+
+The serving problems that dominated the last three days are simply absent: no truncation, no 504,
+one context overflow across six runs, and a hundred questions in three to seven minutes instead of
+hours. Gemma does not emit a chain of thought, so there is nothing to spiral — the 60k-token
+completions, the gateway timeouts and the retry storms were all one model's thinking budget meeting
+a proxy. What is left is 7 `iteration_limit` on v6 and 1 on v7, which are the benchmark working as
+intended, and 7 Spatial-Agent graph failures across the three runs, three of which were still this
+port's own concept-level role rule (fixed in `16e73c1`, after these runs).
+
+Spatial-Agent leads ReAct by 26, 28 and 28 points. The per-family split says where:
+
+| v5 family | ReAct | Spatial-Agent |
+| --- | --- | --- |
+| `poi_straight_distance_tight` | **0/11** | **11/11** |
+| `routing_turn_count` | 1/7 | 6/7 |
+| `routing_distance_via` | 3/8 | 8/8 |
+| `nearby_second_nearest` | 6/6 | 2/6 |
+| `trip_feasible_count` | 7/7 | 4/7 |
+
+`poi_straight_distance_tight` is the sharpest result in this repository so far: eleven questions
+answerable by a haversine over two resolved coordinates, which the graph gets right every time and
+the tool-calling loop gets wrong every time. The same shape repeats on v7 —
+`poi_distance_difference` 3/11 against 10/11, `routing_turn_count_via` 1/7 against 7/7. The two
+families running the other way are worth as much: an ordinal over neighbours and a stay-time count
+are questions where reading results one at a time beats composing a graph.
+
+**What is missing before any of this is quotable.** There is no no-tool floor for this model, and
+without one an accuracy of 49 has no scale — the Qwen floor was 24–32/100 on v5 and says nothing
+about Gemma. The spread is also unmeasured here; a hundred questions now costs minutes, so
+`--repeats 3` is affordable and a single pass is not a result.

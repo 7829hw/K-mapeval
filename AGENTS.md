@@ -75,6 +75,9 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
 - Use 0-based option indices in datasets, predictions, logs, and reports. The answer wire format is
   `^^N^^`.
 - Never special-case a question ID or option string, and never hardcode an answer.
+- A loop that used its whole step budget without answering is `iteration_limit`, not
+  `answer_parse_failure`: it is still a miss, exactly as upstream counts it, but the report has to
+  say the budget ended it so a family that cannot be answered within the budget is visible.
 - Send no `max_tokens`: the output ceiling belongs to the vLLM deployment, which is also what both
   upstreams do. A completion it cut off is `llm_output_truncated`, never `answer_parse_failure` --
   the question was not answered badly, it was not allowed to finish. Do not retry it, and keep its

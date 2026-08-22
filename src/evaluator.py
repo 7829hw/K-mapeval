@@ -24,6 +24,9 @@ PROVIDER_FAILURE = "provider_failure"
 # A token ceiling cut the completion off. Never retried: the ceiling is a setting, so asking the
 # same question again under it only spends the tokens again.
 TRUNCATION_FAILURE = "llm_output_truncated"
+# The loop used its whole step budget without reaching an answer. A miss, the way upstream counts
+# it, but not an unreadable answer and not the map's fault.
+ITERATION_LIMIT_FAILURE = "iteration_limit"
 # Provider errors that say the API could not answer right now, as opposed to answering that the
 # place does not exist. Only these are worth asking again for; a PlaceNotFoundError is evidence.
 TRANSIENT_PROVIDER_ERRORS = ("ProviderTimeoutError", "ProviderRateLimitError")
@@ -440,6 +443,10 @@ def calculate_statistics(results: list[dict[str, Any]]) -> dict[str, Any]:
             # Questions the serving side's output limit ended rather than the map or the model.
             # An accuracy with any of these in it is partly a measurement of that limit.
             "llm_output_truncated_count": failure_types[TRUNCATION_FAILURE],
+            # Questions that ran out of steps before answering. Read beside the step budget in the
+            # metadata: a family whose questions need more tool calls than the budget allows is
+            # measuring the budget, not the architecture.
+            "iteration_limit_count": failure_types[ITERATION_LIMIT_FAILURE],
             # Summed over the questions, so a run can be read as "how much did it look up".
             "tool_calls": sum(int(row.get("tool_calls") or 0) for row in results),
             "api_calls": sum(int(row.get("api_calls") or 0) for row in results),
@@ -514,6 +521,12 @@ def print_summary(statistics: dict[str, Any]) -> None:
             f"The endpoint's output limit cut off {truncated} question(s): their answers were "
             "never written, so this accuracy is partly a measurement of that limit. Raise it on "
             "the serving side."
+        )
+    stopped = performance.get("iteration_limit_count") or 0
+    if stopped:
+        print(
+            f"Ran out of steps on {stopped} question(s) without answering. Upstream counts these "
+            "as misses; check whether the family can be answered within the step budget at all."
         )
     if performance["failed_count"]:
         print(f"Failed samples: {performance['failed_ids']}")

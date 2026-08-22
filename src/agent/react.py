@@ -99,6 +99,7 @@ class ReactAgent(BenchmarkAgent):
         failure_message: str | None = None
         reasoning_steps = 0
         usage = TokenUsage()
+        stopped_at_budget = False
         try:
             for _ in range(self.max_steps):
                 reasoning_steps += 1
@@ -134,6 +135,7 @@ class ReactAgent(BenchmarkAgent):
                     )
             if not final_text:
                 if not self.force_final_answer:
+                    stopped_at_budget = True
                     final_text = self.ITERATION_LIMIT_OUTPUT
                 else:
                     messages.append(
@@ -161,7 +163,15 @@ class ReactAgent(BenchmarkAgent):
         predicted = parse_answer(final_text, option_count=len(options))
         if predicted is None and failure_type is None:
             provider_failure = find_provider_failure(trace)
-            if provider_failure:
+            if stopped_at_budget:
+                # Ahead of the provider check on purpose: the budget is what ended the question,
+                # and one failed lookup among fifteen observations does not mean the map could
+                # not answer it. Still a miss, exactly as upstream counts it -- but a miss for a
+                # reason a report can act on, where `answer_parse_failure` said the agent wrote
+                # something unreadable and 18 of v6's rows were labelled that way.
+                failure_type = "iteration_limit"
+                failure_message = self.ITERATION_LIMIT_OUTPUT
+            elif provider_failure:
                 failure_type = "provider_failure"
                 failure_message = provider_failure
             else:

@@ -263,11 +263,41 @@ def test_react_running_out_of_iterations_answers_nothing() -> None:
     )
     result = agent.answer("질문", ["A", "B", "C", "D"])
     assert result.predicted_answer is None
-    assert result.failure_type == "answer_parse_failure"
+    # Its own failure type: a miss, the way upstream counts it, but not an unreadable answer.
+    assert result.failure_type == "iteration_limit"
     assert result.response == ReactAgent.ITERATION_LIMIT_OUTPUT
     # Two iterations, two LLM calls: the stop costs none.
     assert result.reasoning_steps == 2
     assert not llm.responses
+
+
+def test_running_out_of_steps_is_not_reported_as_the_map_failing() -> None:
+    """One failed lookup among many observations does not make the budget stop a provider failure.
+
+    Measured on v6: `trip_optimal_order_four` needs five route legs per candidate order and five
+    place ids before that, so a 15-iteration budget cannot finish one -- and a provider error
+    somewhere in those fifteen observations would have relabelled the whole question as the map
+    being unable to answer it.
+    """
+
+    llm = QueuedLLM(
+        [
+            LLMResponse("", (LLMToolCall("call-1", "directions", {"origin_id": "p1"}),)),
+            LLMResponse("", (LLMToolCall("call-2", "place_search", {"place_name": "경복궁"}),)),
+        ]
+    )
+    agent = ReactAgent(
+        llm,
+        ToolRegistry(FakeProvider()),
+        max_steps=2,
+        single_action=True,
+        force_final_answer=False,
+    )
+
+    result = agent.answer("질문", ["A", "B", "C", "D"])
+
+    assert any(entry.get("status") == "error" for entry in result.trace)
+    assert result.failure_type == "iteration_limit"
 
 
 def test_the_native_loop_stays_available_as_the_ablation_it_is() -> None:

@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict
 
 from src.agent.base import BenchmarkAgent
 from src.dataset import BenchmarkItem
-from src.llm import LLMOutputTruncatedError, LLMUnavailableError
+from src.llm import LLMContextOverflowError, LLMOutputTruncatedError, LLMUnavailableError
 from src.logging import log_agent_result, log_trace_entry, query_log
 
 INFRASTRUCTURE_FAILURE = "llm_unavailable"
@@ -24,6 +24,8 @@ PROVIDER_FAILURE = "provider_failure"
 # A token ceiling cut the completion off. Never retried: the ceiling is a setting, so asking the
 # same question again under it only spends the tokens again.
 TRUNCATION_FAILURE = "llm_output_truncated"
+# The prompt outgrew the context window. Never retried either: the same prompt is the same length.
+CONTEXT_OVERFLOW_FAILURE = "llm_context_overflow"
 # The loop used its whole step budget without reaching an answer. A miss, the way upstream counts
 # it, but not an unreadable answer and not the map's fault.
 ITERATION_LIMIT_FAILURE = "iteration_limit"
@@ -319,6 +321,8 @@ class Evaluator:
                 failure_type = INFRASTRUCTURE_FAILURE
             elif isinstance(exc, LLMOutputTruncatedError):
                 failure_type = TRUNCATION_FAILURE
+            elif isinstance(exc, LLMContextOverflowError):
+                failure_type = CONTEXT_OVERFLOW_FAILURE
             else:
                 failure_type = "agent_reasoning_failure"
             return self._failed_row(
@@ -443,6 +447,8 @@ def calculate_statistics(results: list[dict[str, Any]]) -> dict[str, Any]:
             # Questions the serving side's output limit ended rather than the map or the model.
             # An accuracy with any of these in it is partly a measurement of that limit.
             "llm_output_truncated_count": failure_types[TRUNCATION_FAILURE],
+            # Questions whose prompt outgrew the context window before the model could answer.
+            "llm_context_overflow_count": failure_types[CONTEXT_OVERFLOW_FAILURE],
             # Questions that ran out of steps before answering. Read beside the step budget in the
             # metadata: a family whose questions need more tool calls than the budget allows is
             # measuring the budget, not the architecture.
@@ -521,6 +527,13 @@ def print_summary(statistics: dict[str, Any]) -> None:
             f"The endpoint's output limit cut off {truncated} question(s): their answers were "
             "never written, so this accuracy is partly a measurement of that limit. Raise it on "
             "the serving side."
+        )
+    overflowed = performance.get("llm_context_overflow_count") or 0
+    if overflowed:
+        print(
+            f"The prompt outgrew the context window on {overflowed} question(s): the model never "
+            "saw the whole question. Widen the window on the serving side or shorten what the "
+            "agent carries into a call."
         )
     stopped = performance.get("iteration_limit_count") or 0
     if stopped:

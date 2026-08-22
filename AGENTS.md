@@ -81,7 +81,8 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
 - Send no `max_tokens`: the output ceiling belongs to the vLLM deployment, which is also what both
   upstreams do. A completion it cut off is `llm_output_truncated`, never `answer_parse_failure` --
   the question was not answered badly, it was not allowed to finish. Do not retry it, and keep its
-  tokens in the question's cost.
+  tokens in the question's cost. A prompt that outgrew the window before the model could start is
+  `llm_context_overflow`, also not retried; both counts belong beside the accuracy.
 - Missing or weak evidence must fail explicitly. Do not invent measurements, silently choose the
   least-bad match, or collapse distinct `ProviderError` subclasses into agent reasoning failures.
 - Route map access through the registry/provider so tool calls, API calls, and cache deltas remain

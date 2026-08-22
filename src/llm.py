@@ -30,6 +30,18 @@ class LLMUnavailableError(RuntimeError):
     """
 
 
+class LLMContextOverflowError(RuntimeError):
+    """The prompt alone was longer than the model's context window.
+
+    The other half of `LLMOutputTruncatedError`: there the window ran out while the answer was
+    being written, here it was gone before the model could start. The endpoint answers 400, which
+    is a status we never retry -- correctly, since the same prompt is the same length next time --
+    and it arrived as a `BadRequestError` the agents recorded as `agent_reasoning_failure`. On the
+    v6 run that was 5 of Spatial-Agent's 12, each one a question whose execution trace grew past
+    65536 tokens before the evaluation stage could read it.
+    """
+
+
 class LLMOutputTruncatedError(RuntimeError):
     """A token ceiling ended the completion before the model finished writing it.
 
@@ -88,6 +100,21 @@ class TokenUsage:
             reasoning_tokens=reasoning,
             reasoning_chars=self.reasoning_chars + other.reasoning_chars,
         )
+
+
+# What a server says when the prompt does not fit. vLLM writes the first, OpenAI the second.
+CONTEXT_OVERFLOW_MARKERS = ("maximum context length", "context_length_exceeded")
+
+
+def _context_overflow(exc: APIStatusError) -> LLMContextOverflowError | None:
+    """The same 400 the endpoint sends for a malformed request, when it means "too long"."""
+
+    text = str(exc).lower()
+    if not any(marker in text for marker in CONTEXT_OVERFLOW_MARKERS):
+        return None
+    return LLMContextOverflowError(
+        f"The prompt was longer than the model's context window: {exc}"
+    )
 
 
 def _token_usage(completion: Any, message: Any) -> TokenUsage:
@@ -204,6 +231,9 @@ class OpenAIChatClient:
                 last_error = exc
             except APIStatusError as exc:
                 if exc.status_code in REQUEST_STATUS_CODES:
+                    overflow = _context_overflow(exc)
+                    if overflow is not None:
+                        raise overflow from exc
                     raise
                 last_error = exc
             if attempt < self._max_retries:

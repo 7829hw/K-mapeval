@@ -10,7 +10,13 @@ from src.agent.base import (
     find_provider_failure,
     format_question,
 )
-from src.llm import ChatClient, LLMOutputTruncatedError, LLMUnavailableError, TokenUsage
+from src.llm import (
+    ChatClient,
+    LLMContextOverflowError,
+    LLMOutputTruncatedError,
+    LLMUnavailableError,
+    TokenUsage,
+)
 from src.parsing import parse_answer
 from src.tools import ToolRegistry
 
@@ -157,6 +163,9 @@ class ReactAgent(BenchmarkAgent):
             failure_type = "llm_output_truncated"
             failure_message = f"{type(exc).__name__}: {exc}"
             usage += exc.usage
+        except LLMContextOverflowError as exc:
+            failure_type = "llm_context_overflow"
+            failure_message = f"{type(exc).__name__}: {exc}"
         except Exception as exc:
             failure_type = "agent_reasoning_failure"
             failure_message = f"{type(exc).__name__}: {exc}"

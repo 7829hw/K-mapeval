@@ -12,6 +12,7 @@ from src.config import Settings
 from src.dataset import BenchmarkItem
 from src.evaluator import Evaluator
 from src.llm import (
+    LLMContextOverflowError,
     LLMOutputTruncatedError,
     LLMUnavailableError,
     OpenAIChatClient,
@@ -36,11 +37,11 @@ def build_client(**overrides: Any) -> OpenAIChatClient:
     return OpenAIChatClient(settings)
 
 
-def status_error(code: int) -> APIStatusError:
+def status_error(code: int, message: str = "boom") -> APIStatusError:
     request = httpx.Request("POST", "http://localhost:1/v1/chat/completions")
-    response = httpx.Response(code, request=request, json={"error": {"message": "boom"}})
+    response = httpx.Response(code, request=request, json={"error": {"message": message}})
     error_type = BadRequestError if code == 400 else APIStatusError
-    return error_type("boom", response=response, body=None)
+    return error_type(message, response=response, body=None)
 
 
 class ScriptedCompletions:
@@ -465,3 +466,47 @@ def test_a_question_the_ceiling_cut_off_is_counted_and_not_asked_again(tmp_path,
     assert report.results[0]["failure_type"] == "llm_output_truncated"
     assert report.statistics["performance"]["llm_output_truncated_count"] == 1
     assert "output limit" in capsys.readouterr().out
+
+
+def test_a_prompt_too_long_for_the_window_is_its_own_failure_not_a_malformed_request() -> None:
+    """The endpoint says 400 for both, and only one of them is the agent's mistake.
+
+    A ReAct trace and a Spatial-Agent execution log both grow with the question; when one grows
+    past the window the model never sees it, which is not the same finding as an agent that
+    reasoned badly.
+    """
+
+    client = build_client()
+    script = install(
+        client,
+        [
+            status_error(
+                400,
+                "This model's maximum context length is 65536 tokens. However, you requested 0 "
+                "output tokens and your prompt contains at least 65537 input tokens",
+            )
+        ],
+    )
+
+    with pytest.raises(LLMContextOverflowError) as caught:
+        client.chat([{"role": "user", "content": "q"}])
+
+    assert "context window" in str(caught.value)
+    # The same prompt is the same length next time, so it is asked exactly once.
+    assert script.calls == 1
+
+
+class OverflowingLLM:
+    def chat(self, messages: list[dict[str, Any]], *, tools: Any = None) -> Any:
+        raise LLMContextOverflowError("The prompt was longer than the model's context window")
+
+
+@pytest.mark.parametrize("agent_name", ["react", "spatial"])
+def test_both_agents_blame_the_window_rather_than_their_own_reasoning(agent_name: str) -> None:
+    agent_class = ReactAgent if agent_name == "react" else SpatialAgent
+    agent = agent_class(OverflowingLLM(), ToolRegistry(FakeProvider()), max_steps=3)
+
+    result = agent.answer("질문", ["A", "B"])
+
+    assert result.failure_type == "llm_context_overflow"
+    assert result.predicted_answer is None

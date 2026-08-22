@@ -101,6 +101,10 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   options. Every one of those shipped in a benchmark here before the script existed.
 - A numeric option set must not put the gold at a fixed rank once the options are sorted. Use
   `straddling_multipliers`; a fixed multiplier tuple is a second answer key.
+- A family also has to be answerable *within the step budget*, on the tool contract the baseline
+  runs. Count the calls before shipping one: v6's four-stop trip families need about twenty
+  one-leg `Directions` calls against langchain's fifteen iterations, and every row of both ended on
+  `iteration_limit` with ReAct scoring 0/15. A family the budget cannot finish measures the budget.
 - Every rung a question offers has to be reachable *and* reached. A family whose options are a
   fixed ladder must be able to answer each rung, and should spend its rows across them the way
   `trip_feasible_count` does — keying the answer on a loop index spends them wherever the loop
@@ -115,8 +119,9 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
 
 - `dataset/seoul_kmapeval_v6_mcq_100.jsonl`: v5's families each raised one step (composition or
   ordinality) and the radius family's word order fixed. Built by
-  `data/build_mapeval_v6_benchmark.py`; passes `data/audit_dataset.py`. **Not yet measured** —
-  no agent run and no no-tool floor, so it has no accuracy to quote.
+  `data/build_mapeval_v6_benchmark.py`; passes `data/audit_dataset.py`. Measured once (ReAct
+  54/100, Spatial-Agent 60/100), but its two four-stop trip families are unanswerable inside the
+  reference baseline's step budget, so quote v7 instead. No no-tool floor.
 - `dataset/seoul_kmapeval_v5_mcq_100.jsonl`: v4's method at MapEval-API's own difficulty (tight
   options over reproducible measures, ordinal and membership `nearby`, subjective `unanswerable`,
   `trip_optimal_order`). Built by `data/build_mapeval_v5_benchmark.py`.

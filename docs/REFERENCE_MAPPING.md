@@ -1090,3 +1090,82 @@ takes nothing away from the comparison, but a plan that used to be rejected as t
 run. And `native` ReAct's loop went from 8 iterations to 15; it was always the stronger-than-paper
 ablation, and this makes it stronger still. Reports carry `max_reasoning_steps`, so neither
 change is invisible after the fact.
+
+## What the v5 and v6 runs measured
+
+One pass per agent, `--react-tools reference`, `--provider kakao`, temperature 0, 15 reasoning
+steps, code revision `bb40d56`. Read every difference below against the ±8-point spread this
+endpoint carries: these are single draws.
+
+| | ReAct (reference) | Spatial-Agent |
+| --- | --- | --- |
+| **v5** | **57/100** | **84/100** |
+| **v6** | 54/100 | 60/100 |
+
+v5 by class — ReAct against Spatial-Agent: direction 10/10 vs 10/10, distance 7/11 vs 11/11,
+nearby 21/31 vs 22/31, radius 2/4 vs 2/4, routing 8/22 vs **22/22**, trip 9/22 vs **17/22**. The
+routing and trip columns are the paper's own claim about composed retrieval, on questions tight
+enough to punish accumulating legs by hand.
+
+**v6's ReAct number is not a measurement of ReAct.** Eighteen of its hundred questions ended on the
+step budget without answering, against zero on v5, and twelve of those are the two four-stop trip
+families:
+
+| family | rows | tool calls (median/max) | ReAct |
+| --- | --- | --- | --- |
+| `trip_optimal_order_four` | 8 | 15 / 15 | 0/8 |
+| `trip_total_distance_four` | 7 | 15 / 15 | 0/7 |
+
+Every row hit the cap exactly. Under the reference contract `Directions` answers one leg per call
+and the structured-chat parser takes one action per iteration, so a four-stop round trip needs five
+place ids and up to fifteen distinct legs across three candidate orders — twenty calls against
+langchain's budget of fifteen. The family measures the budget. `dataset/seoul_kmapeval_v7_mcq_100.jsonl`
+walks both back to three stops; nothing else about v6 changed.
+
+Both runs predate the failure types that name these, so the counts here are recomputed from the
+rows — a budget stop by `llm_calls == 15` with no answer, a window overflow by the endpoint's own
+400 text:
+
+| | v5 ReAct | v5 Spatial | v6 ReAct | v6 Spatial |
+| --- | --- | --- | --- | --- |
+| `iteration_limit` | 0 | – | **18** | – |
+| `answer_parse_failure` | 4 | 0 | 6 | 0 |
+| `provider_failure` | 7 | 0 | 3 | 0 |
+| `llm_output_truncated` | 3 | 2 | 3 | 6 |
+| `llm_context_overflow` | 0 | 3 | 0 | 5 |
+| `agent_reasoning_failure` | 0 | 0 | 0 | 7 |
+
+### The 64k window bit in two different ways, and neither is "the question needs 64k of thought"
+
+- **Truncation (14 rows across the four runs).** One completion ran 60–62k *completion* tokens with
+  240–280k characters of thinking behind it, and the window ran out while the answer was being
+  written. That is a reasoning spiral, not a large prompt: four of Spatial-Agent's six v6
+  truncations are `routing_detour_cost`, one family.
+- **Prompt overflow (8 rows, all Spatial-Agent).** `your prompt contains at least 65537 input
+  tokens` — the execution trace outgrew the window before the evaluation stage could read it. These
+  arrive as a 400 and were being recorded as `agent_reasoning_failure`, which read as the
+  architecture being confused by a question it had never been shown.
+
+### Four of Spatial-Agent's v6 failures are our validator, not its planner
+
+Of the seven `agent_reasoning_failure` rows, four are the same rejected plan:
+
+```
+dist1..dist3  haversine_distance  -> amount
+max_dist      select_max          -> object      # the farthest one
+answer        match_distance_options(distance=$max_dist)   # rejected: wants an amount
+```
+
+The plan is right; `select_max` returns the chosen item and the matcher wants its measure. **The
+type check that rejects it has no upstream counterpart** — there is no output-type compatibility
+check anywhere in `~/spatial-agent`, so upstream would have executed these graphs. One more row
+(`Concept role ordering violation`) is likewise a rule only this port has. That makes four of ten
+`poi_farthest_of_three` losses ours rather than the architecture's, and it is an open deviation.
+
+The remaining two are a real limit of the formalism. Asked for a difference of two distances, the
+planner emitted `identity_measure` with `value: "$dist1.distance_m - $dist2.distance_m"` — an
+arithmetic expression as a *string*, because no subtraction operator exists here or upstream
+(`pairwise_extremes` and `compare_routes` are the closest). `identity_measure` passes its value
+through, so even with the type check gone that string is never evaluated. `poi_distance_difference`
+can only be answered by the evaluation-stage LLM doing the arithmetic, which is presumably how the
+seven it did get right were answered.

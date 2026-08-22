@@ -79,7 +79,10 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   `answer_parse_failure`: it is still a miss, exactly as upstream counts it, but the report has to
   say the budget ended it so a family that cannot be answered within the budget is visible.
 - Send no `max_tokens`: the output ceiling belongs to the vLLM deployment, which is also what both
-  upstreams do. A completion it cut off is `llm_output_truncated`, never `answer_parse_failure` --
+  upstreams do. It has to sit above the architectures' working range and below a reasoning spiral:
+  measured here, a ReAct call writes ~340 completion tokens and a Spatial-Agent planner call ~3,600
+  (max 5,854), while a spiral runs past 60,000. A 5,100-token ceiling scored Spatial-Agent 10/100
+  by truncating 67 of its questions. Check `llm_output_truncated_count` before reading an accuracy. A completion it cut off is `llm_output_truncated`, never `answer_parse_failure` --
   the question was not answered badly, it was not allowed to finish. Do not retry it, and keep its
   tokens in the question's cost. A prompt that outgrew the window before the model could start is
   `llm_context_overflow`, also not retried; both counts belong beside the accuracy.

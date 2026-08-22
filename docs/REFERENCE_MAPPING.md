@@ -1188,3 +1188,62 @@ arithmetic expression as a *string*, because no subtraction operator exists here
 through, so even with the type check gone that string is never evaluated. `poi_distance_difference`
 can only be answered by the evaluation-stage LLM doing the arithmetic, which is presumably how the
 seven it did get right were answered.
+
+## What v6 and v7 measured, once the validator stopped costing rows
+
+All at revision `c3f8914`, `--react-tools reference`, `--provider kakao`, temperature 0, 15
+reasoning steps, one pass each. The ±8-point spread applies to every cell.
+
+| | ReAct (reference) | Spatial-Agent |
+| --- | --- | --- |
+| **v6** | 53/100 | 73/100 |
+| **v7** | 62/100 | *see below* |
+
+**The v7 rebuild did what it was for.** ReAct's budget stops fell from 18 to 11 and its `trip`
+class went 5/22 to 13/22: the two families that scored 0/8 and 1/7 with every row pinned at fifteen
+tool calls now score 4/8 and 5/7. Those rows measure the architecture again.
+
+**What the validator fix bought, and what is noise.** v6 Spatial-Agent moved 60 → 73 on the same
+dataset, so the rows can be compared one by one: six of the seven the fix targeted came back (three
+of four `select_max`, both arithmetic-as-a-string rows, the role-ordering row), and
+`agent_reasoning_failure` went to zero. But twenty-two rows flipped wrong-to-right and **nine
+flipped right-to-wrong**, so the honest reading is "about six to eight rows from the fix, the rest
+inside the spread". A single pass cannot separate them further.
+
+### The tail that stopped a run finishing, and what it cost
+
+The first v7 Spatial-Agent attempt was killed after two and a half hours with 65 questions
+answered, 12 in flight and 23 never started. Every one of the twelve was blocked at the same place
+— the planner call — and four had been there over 70 minutes. The logs end the same way:
+
+```
+LLMUnavailableError: LLM endpoint failed after 9 attempts: InternalServerError: Error code: 504
+```
+
+The reverse proxy kills a long generation with 504. Nine attempts at a request whose *length* is
+the objection cost 95 minutes per question and answered none of them; `llm_unavailable` is
+retryable, so each was then asked up to twice more. `LLM_RETRY_TIME_BUDGET_SECONDS` now bounds one
+completion by the clock rather than by the attempt count.
+
+### A serving-side output cap has to sit above the work, and 5k does not
+
+With the proxy timeouts gone the next two v7 Spatial-Agent runs finished in forty minutes — and
+scored **10/100 and 11/100**, with 67 and 68 questions ending in `llm_output_truncated`. The
+deployment had been given an output ceiling of about 5,100 tokens per completion, and that is not
+above this architecture's working range. It is inside it:
+
+| | working call (correct rows) | a spiral |
+| --- | --- | --- |
+| ReAct | median 340, p90 567, max 1,164 | 66,730 / 74,705 / 67,782 |
+| Spatial-Agent | median 3,640, p90 4,647, max 5,854 | 60,000+ |
+
+ReAct writes a tool call; Spatial-Agent writes a whole graph and the reasoning behind it, an order
+of magnitude more per call. A 5,100-token ceiling barely touches the first and cuts off most of the
+second — which is exactly what the two runs show, and why they measure the ceiling rather than the
+architecture. Neither number is quotable.
+
+The gap between honest work (≤6k) and a spiral (≥60k) is wide enough that any ceiling in the
+12k–32k range separates them. **16,384** is roughly three times Spatial-Agent's largest observed
+working call and still ends a spiral at a quarter of its cost. Whatever is chosen, it belongs in
+the write-up beside the accuracy: a run whose `llm_output_truncated_count` is not near zero is
+partly a measurement of the ceiling.

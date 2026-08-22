@@ -2242,3 +2242,138 @@ def test_option_totals_take_the_matrix_node_a_planner_referenced() -> None:
     }
     totals = ops.aggregate_route_groups(routes=node, groups=[[0], [1]])
     assert [entry["duration_s"] for entry in totals["option_totals"]] == [1, 2]
+
+
+def test_the_farthest_of_three_plan_validates_and_runs() -> None:
+    """The plan v6 lost four rows to, end to end: pick the largest distance, then match options.
+
+    `select_max` returns the winning *record*, and `match_distance_options` reads metres off a
+    record perfectly well -- so the only thing that ever refused this graph was the declared-type
+    table saying "object" where the operator says "whatever carries a measurement". Upstream has
+    no such table at all.
+    """
+
+    from src.agent.geoflow import normalize_and_validate_graph
+    from src.tools import SpatialOperatorRegistry
+
+    graph = {
+        "graph": [
+            {
+                "id": "places",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["A", "B", "C", "D"], "anchor": "A"},
+                "role": "extent",
+            },
+            {
+                "id": "d1",
+                "operator": "haversine_distance",
+                "arguments": {"place_a": "$places.0.place", "place_b": "$places.1.place"},
+                "depends_on": ["places"],
+                "role": "condition",
+            },
+            {
+                "id": "d2",
+                "operator": "haversine_distance",
+                "arguments": {"place_a": "$places.0.place", "place_b": "$places.2.place"},
+                "depends_on": ["places"],
+                "role": "condition",
+            },
+            {
+                "id": "farthest",
+                "operator": "select_max",
+                "arguments": {"items": ["$d1", "$d2"], "key": "distance_m"},
+                "depends_on": ["d1", "d2"],
+                "role": "condition",
+            },
+            {
+                "id": "answer",
+                "operator": "match_distance_options",
+                "arguments": {"distance": "$farthest", "options": ["약 1.0km", "약 9.0km"]},
+                "depends_on": ["farthest"],
+                "role": "measure",
+            },
+        ]
+    }
+
+    steps, _ = normalize_and_validate_graph(graph, max_steps=10)
+    assert [step["id"] for step in steps][-1] == "answer"
+
+    ops = SpatialOperatorRegistry()
+    farthest = ops.invoke(
+        "select_max",
+        {"items": [{"distance_m": 1000.0}, {"distance_m": 9100.0}], "key": "distance_m"},
+    )
+    matched = ops.invoke(
+        "match_distance_options",
+        {"distance": farthest, "options": ["약 1.0km", "약 9.0km"]},
+    )
+    assert matched["best_option"] == 1
+    assert matched["computed_distance_m"] == 9100.0
+
+
+def test_a_lenient_pass_skips_our_own_rules_and_keeps_every_structural_one() -> None:
+    """The two rules upstream does not have must not be able to lose a graph that would run.
+
+    Everything about whether the graph *can* execute -- unknown operators, dependencies that are
+    not nodes, cycles, a graph with no Measure -- still refuses it, leniently or not.
+    """
+
+    from src.agent.geoflow import normalize_and_validate_graph
+
+    typed_wrong = {
+        "graph": [
+            {
+                "id": "distance",
+                "operator": "haversine_distance",
+                "arguments": {
+                    "place_a": {"latitude": 37.0, "longitude": 127.0},
+                    "place_b": {"latitude": 37.1, "longitude": 127.1},
+                },
+                "role": "extent",
+            },
+            {
+                "id": "totals",
+                "operator": "sum_route_metrics",
+                "arguments": {"routes": "$distance"},
+                "depends_on": ["distance"],
+                "role": "measure",
+            },
+        ]
+    }
+    with pytest.raises(ValueError, match="Type compatibility"):
+        normalize_and_validate_graph(typed_wrong, max_steps=8)
+    steps, _ = normalize_and_validate_graph(typed_wrong, max_steps=8, strict_types=False)
+    assert [step["id"] for step in steps] == ["distance", "totals"]
+
+    unknown_operator = {
+        "graph": [
+            {
+                "id": "a",
+                "operator": "teleport",
+                "arguments": {},
+                "role": "extent",
+            },
+            {
+                "id": "b",
+                "operator": "match_options",
+                "arguments": {"options": [], "places": "$a"},
+                "depends_on": ["a"],
+                "role": "measure",
+            },
+        ]
+    }
+    with pytest.raises(ValueError):
+        normalize_and_validate_graph(unknown_operator, max_steps=8, strict_types=False)
+
+    no_measure = {
+        "graph": [
+            {
+                "id": "places",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["A"]},
+                "role": "extent",
+            }
+        ]
+    }
+    with pytest.raises(ValueError, match="Measure"):
+        normalize_and_validate_graph(no_measure, max_steps=8, strict_types=False)

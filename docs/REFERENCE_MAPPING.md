@@ -1159,8 +1159,27 @@ answer        match_distance_options(distance=$max_dist)   # rejected: wants an 
 The plan is right; `select_max` returns the chosen item and the matcher wants its measure. **The
 type check that rejects it has no upstream counterpart** — there is no output-type compatibility
 check anywhere in `~/spatial-agent`, so upstream would have executed these graphs. One more row
-(`Concept role ordering violation`) is likewise a rule only this port has. That makes four of ten
-`poi_farthest_of_three` losses ours rather than the architecture's, and it is an open deviation.
+(`Concept role ordering violation`) is likewise a rule only this port has. That made four of ten
+`poi_farthest_of_three` losses ours rather than the architecture's.
+
+Closed in two steps, neither of which touches how a plan is authored:
+
+- **The declared-type table must not be stricter than the operator it describes.**
+  `match_distance_options` reads metres off a number *or* any record carrying
+  `distance_m`/`distance`/`value`/`amount`/`meters`/`distance_km` (`_distance_value`), and said so
+  before this benchmark existed — the entry claiming it accepts only `amount` and `proportion` was
+  a second, wrong description of the same operator. Widened to everything that can carry a
+  measurement. This alone makes the four `select_max` graphs valid on the first pass.
+- **Neither local rule may lose a graph that would have run.** `normalize_and_validate_graph`
+  takes `strict_types=False`, which keeps every structural rule — unknown operator, a dependency
+  that is not a node, a cycle, no Measure node, the step budget — and skips output-type
+  compatibility and role ordering. The agent uses it as the last thing it tries: plan, repair,
+  prevalidated template, and then the planner's own graph under the rules upstream actually has.
+  Whatever is really wrong with such a graph now surfaces as the step that could not execute,
+  which is a finding about the architecture instead of about our validator.
+
+Both rules stay on by default, because their message is what the repair round is handed to work
+with — a diagnostic upstream does without, and worth keeping as long as it cannot cost a question.
 
 The remaining two are a real limit of the formalism. Asked for a difference of two distances, the
 planner emitted `identity_measure` with `value: "$dist1.distance_m - $dist2.distance_m"` — an

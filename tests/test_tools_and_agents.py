@@ -352,6 +352,46 @@ def test_spatial_agent_runs_paper_aligned_pipeline() -> None:
     assert result.api_calls == 1
 
 
+def test_a_plan_only_our_own_rules_reject_still_gets_executed() -> None:
+    """Last resort before giving a question up: run it the way upstream would.
+
+    Upstream has no output-type check and no role-ordering rule, so a graph they refuse is a graph
+    upstream would have executed. On v6 that lost Spatial-Agent five questions outright -- four of
+    them a correct `select_max` plan -- and each was recorded as the architecture reasoning badly.
+    Structural rules still refuse; these two only get to inform the repair round.
+    """
+
+    typed_wrong = (
+        '{"graph":[{"id":"s1","operator":"place_search","arguments":{"query":"경복궁"},'
+        '"role":"extent"},'
+        '{"id":"s2","operator":"sum_route_metrics","arguments":{"routes":"$s1"},'
+        '"depends_on":["s1"],"role":"measure"}]}'
+    )
+    llm = QueuedLLM(
+        [
+            LLMResponse('{"intent":"poi"}'),
+            LLMResponse(typed_wrong),
+            LLMResponse(typed_wrong),  # the repair round does not fix it either
+            LLMResponse('{"predicted_option":1,"confidence":0.9,"reason":"evidence"}'),
+        ]
+    )
+
+    result = SpatialAgent(llm, ToolRegistry(FakeProvider()), max_steps=4).answer(
+        "질문", ["A", "B"]
+    )
+
+    assert result.failure_type is None
+    assert result.predicted_answer == 1
+    stages = [entry["stage"] for entry in result.trace]
+    assert "repair" in stages and "execute" in stages
+    lenient = [
+        entry
+        for entry in result.trace
+        if entry["stage"] == "validate" and entry.get("status") == "lenient"
+    ]
+    assert lenient and "Type compatibility" in lenient[0]["error"]
+
+
 def test_registry_returns_error_observation_instead_of_raising() -> None:
     registry = ToolRegistry(FakeProvider())
     execution = registry.invoke("nearby_places", {"center": "경복궁"})

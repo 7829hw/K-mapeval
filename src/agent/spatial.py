@@ -405,22 +405,46 @@ class SpatialAgent(BenchmarkAgent):
                         intent,
                         self.max_steps,
                     )
-                except ValueError:
+                except ValueError as repair_error:
                     fallback_graph = _bind_prevalidated_template(
                         intent, question, options, _extract_anchor(question, intent)
                     )
-                    if not fallback_graph:
-                        raise
-                    trace.append({"stage": "template_fallback", "graph": fallback_graph})
-                    factorized, steps, constraints = _factorize_validate_plan(
-                        analysis,
-                        {"graph": fallback_graph},
-                        question,
-                        options,
-                        intent,
-                        max(self.max_steps, len(fallback_graph)),
-                        expand_retrieval=False,
-                    )
+                    if fallback_graph:
+                        trace.append(
+                            {"stage": "template_fallback", "graph": fallback_graph}
+                        )
+                        factorized, steps, constraints = _factorize_validate_plan(
+                            analysis,
+                            {"graph": fallback_graph},
+                            question,
+                            options,
+                            intent,
+                            max(self.max_steps, len(fallback_graph)),
+                            expand_retrieval=False,
+                        )
+                    else:
+                        # Nothing prevalidated fits this intent, so the choice is between the
+                        # planner's own graph and no answer at all. Upstream has no type or role
+                        # check to fail in the first place -- it would have executed this graph --
+                        # so we do too, with every structural rule still in force. Whatever is
+                        # actually wrong with it now shows up as the step that could not run,
+                        # which is a finding about the architecture rather than about us.
+                        trace.append(
+                            {
+                                "stage": "validate",
+                                "status": "lenient",
+                                "error": str(repair_error),
+                            }
+                        )
+                        factorized, steps, constraints = _factorize_validate_plan(
+                            analysis,
+                            plan,
+                            question,
+                            options,
+                            intent,
+                            self.max_steps,
+                            strict_types=False,
+                        )
             trace.append({"stage": "factorize", **factorized.as_dict()})
             trace.append(
                 {
@@ -606,6 +630,7 @@ def _factorize_validate_plan(
     max_steps: int,
     *,
     expand_retrieval: bool = True,
+    strict_types: bool = True,
 ):
     raw_steps = plan.get("graph") if plan.get("graph") is not None else plan.get("steps")
     if not isinstance(raw_steps, list):
@@ -627,7 +652,9 @@ def _factorize_validate_plan(
     # The planner budget above governs what the planner authored. Retrieval fan-out added
     # during grounding is deterministic and gets its own allowance on top of it.
     steps, constraints = normalize_and_validate_graph(
-        factorized.as_dict(), max_steps=max(max_steps, len(grounded))
+        factorized.as_dict(),
+        max_steps=max(max_steps, len(grounded)),
+        strict_types=strict_types,
     )
     return factorized, steps, constraints
 

@@ -216,10 +216,15 @@ OPERATOR_INPUT_TYPES: dict[str, dict[str, frozenset[str]]] = {
         "places": frozenset({"object"}),
         "anchor": frozenset({"object", "location"}),
     },
-    # A share is a number, and a question whose options are percentages matches it the same way a
-    # distance question matches metres. Refusing it sent a correctly-composed brand-share plan to
-    # the failure column.
-    "match_distance_options": {"distance": frozenset({"amount", "proportion"})},
+    # Anything that can carry a measurement, because that is what the operator reads:
+    # `_distance_value` takes a number or pulls `distance_m`/`distance`/`value`/`amount`/`meters`/
+    # `distance_km` off a record, and says so plainly when the record holds none. A share is a
+    # number like a distance is, and `select_max` over three haversine results returns the winning
+    # *record*, not its metres -- a correct plan that this line refused on four of v6's rows
+    # before it was widened, and a brand-share plan before that.
+    "match_distance_options": {
+        "distance": frozenset({"amount", "proportion", "object", "field"})
+    },
     "match_type_options": {"place": frozenset({"object", "location"})},
     "events_from_objects": {"objects": frozenset({"object"})},
     "filter_events": {"events": frozenset({"event"})},
@@ -1105,8 +1110,19 @@ def _unique_id(prefix: str, known_ids: set[str]) -> str:
 
 
 def normalize_and_validate_graph(
-    payload: dict[str, Any], *, max_steps: int
+    payload: dict[str, Any], *, max_steps: int, strict_types: bool = True
 ) -> tuple[list[dict[str, Any]], dict[str, bool]]:
+    """Normalize a planner graph and refuse the ones that cannot run.
+
+    `strict_types=False` keeps every structural rule -- an unknown operator, a dependency that is
+    not a node, a cycle, a graph with no Measure -- and skips the two that are this port's own
+    invention: declared output-type compatibility and functional-role ordering. Upstream has
+    neither (there is no type check anywhere in `spatial-agent`), so a graph they reject is a
+    graph upstream would have executed, and refusing it measures our validator rather than the
+    architecture. They stay on by default because their message is what the repair round is given
+    to work with; the lenient pass is the last thing tried before a question is given up on.
+    """
+
     raw_steps = payload.get("graph")
     if raw_steps is None:
         raw_steps = payload.get("steps")
@@ -1232,12 +1248,14 @@ def normalize_and_validate_graph(
                 )
             step["depends_on"] = resolvable
         for dependency in step["depends_on"]:
-            if _violates_procedural_order(by_id[dependency]["role"], step["role"]):
+            if strict_types and _violates_procedural_order(
+                by_id[dependency]["role"], step["role"]
+            ):
                 raise ValueError(
                     f"Role ordering violation: {dependency} ({by_id[dependency]['role']}) -> "
                     f"{step['id']} ({step['role']})"
                 )
-        accepted_inputs = OPERATOR_INPUT_TYPES.get(step["operator"], {})
+        accepted_inputs = OPERATOR_INPUT_TYPES.get(step["operator"], {}) if strict_types else {}
         for argument_name, references in _references_by_argument(step["arguments"]).items():
             accepted = accepted_inputs.get(argument_name)
             if not accepted:

@@ -167,6 +167,11 @@ when the user explicitly asks for live execution.
 - Add regression tests for changed behavior. Keep live-API tests separate and optional.
 - When changing `Place` or `Route`, update every provider normalizer, cached payload, and cache
   schema version.
+- The declared-type table in `OPERATOR_INPUT_TYPES` describes what an operator's implementation
+  accepts; when the two disagree the implementation is right, and a plan the executor could have
+  run must never be refused for it. Output-type compatibility and role ordering are this port's
+  own rules — upstream has neither — so they inform the repair round and are skipped
+  (`strict_types=False`) on the last attempt before a question is given up on.
 - When adding or renaming a Spatial-Agent operator, update its implementation,
   `OPERATOR_CONTRACTS`/input types, `GRAPH_PROMPT`, argument normalization, and composition tests.
 - Preserve explicit provider-versus-agent failure types and per-question metrics/log fields.

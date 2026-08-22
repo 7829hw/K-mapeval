@@ -1247,3 +1247,37 @@ The gap between honest work (≤6k) and a spiral (≥60k) is wide enough that an
 working call and still ends a spiral at a quarter of its cost. Whatever is chosen, it belongs in
 the write-up beside the accuracy: a run whose `llm_output_truncated_count` is not near zero is
 partly a measurement of the ceiling.
+
+### Third configuration: no ceiling, and the clock takes the rows instead
+
+`reports/test_20260822T140526Z.json` — v7 Spatial-Agent, ceiling removed again (the cut-offs it
+does record sit at 61.9k–62.6k, i.e. the context window). It scored **56/100 with 28 questions lost
+before they could be answered**: 20 `llm_unavailable`, every one of them a 504 after
+`LLM_RETRY_TIME_BUDGET_SECONDS` expired on the first attempt, tried three times; 5
+`llm_output_truncated`; 3 `llm_context_overflow`.
+
+Where the 20 landed is the finding:
+
+| family | lost to 504 | scored | same families in the v6 run |
+| --- | --- | --- | --- |
+| `poi_distance_difference` | 10 of 11 | 1/11 | 7/11 |
+| `routing_detour_cost` | 8 of 8 | 0/8 | 6/8 |
+| `nearby_subtype_kth` | 2 of 10 | 4/10 | 8/10 |
+
+The first two are the families that ask for a **difference** — via length minus direct length, one
+distance minus another — which is the composition the operator vocabulary cannot express and where
+the planner has been observed writing arithmetic into a string. Those are the calls that spiral,
+and with no ceiling a spiral runs until either the window (62k) or the proxy (504) stops it. The
+third row is the caution against reading this as purely architectural: `nearby_subtype_kth` does
+not spiral and still lost two questions, so healthy calls were being killed as well.
+
+So 56/100 is a floor rather than a score: the architecture's v7 number is somewhere between 56 and
+84 depending on 28 questions that were never answered. And the retry budget cuts both ways — it is
+what let the run finish at all, and it is also what converts a slow-but-answerable call into a lost
+row. It needs the output ceiling in place to stop firing.
+
+The configuration these three runs argue for, all of it measured rather than guessed: **an output
+ceiling near 16,384** (working calls top out at 5,854, spirals start above 60,000), the retry
+budget left where it is, and Spatial-Agent's concurrency reduced if 504s persist — its calls are an
+order of magnitude longer than ReAct's, so twelve of them at once is not the same load as twelve
+ReAct workers.

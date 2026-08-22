@@ -117,6 +117,10 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
 
 ## Benchmarks
 
+- `dataset/seoul_kmapeval_v7_mcq_100.jsonl`: v6 with its two four-stop trip families walked back
+  to three stops, because at four the reference baseline runs out of iterations before it can
+  finish one. Built by `data/build_mapeval_v7_benchmark.py`; passes `data/audit_dataset.py`. Shares
+  a generator with v6 but only 18 rows: the draws are live and the cache had expired.
 - `dataset/seoul_kmapeval_v6_mcq_100.jsonl`: v5's families each raised one step (composition or
   ordinality) and the radius family's word order fixed. Built by
   `data/build_mapeval_v6_benchmark.py`; passes `data/audit_dataset.py`. Measured once (ReAct

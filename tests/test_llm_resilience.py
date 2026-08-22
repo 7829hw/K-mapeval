@@ -510,3 +510,29 @@ def test_both_agents_blame_the_window_rather_than_their_own_reasoning(agent_name
 
     assert result.failure_type == "llm_context_overflow"
     assert result.predicted_answer is None
+
+
+def test_retrying_stops_when_the_time_budget_runs_out_not_when_the_attempts_do() -> None:
+    """A gateway timeout costs its whole timeout on every attempt, so counting attempts is no bound.
+
+    Measured on the v7 Spatial-Agent run: nine attempts against 504s took 95 minutes per question
+    and answered none of them, while twelve workers doing the same thing stopped the run finishing.
+    """
+
+    client = build_client(llm_max_retries=8, llm_retry_time_budget_seconds=0.05)
+    script = install(client, [status_error(504, "gateway timeout")] * 9)
+
+    with pytest.raises(LLMUnavailableError) as caught:
+        client.chat([{"role": "user", "content": "q"}])
+
+    assert "did not answer within" in str(caught.value)
+    # It gave up on the budget, long before the ninth attempt.
+    assert script.calls < 9
+
+
+def test_a_short_outage_is_still_waited_out_inside_the_budget() -> None:
+    client = build_client(llm_max_retries=8, llm_retry_time_budget_seconds=60)
+    script = install(client, [status_error(503), status_error(502), completion("^^1^^")])
+
+    assert client.chat([{"role": "user", "content": "q"}]).content == "^^1^^"
+    assert script.calls == 3

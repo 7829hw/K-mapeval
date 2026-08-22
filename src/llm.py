@@ -186,6 +186,7 @@ class OpenAIChatClient:
         self._temperature = settings.llm_temperature
         self._max_retries = settings.llm_max_retries
         self._backoff = settings.llm_retry_backoff_seconds
+        self._retry_budget = settings.llm_retry_time_budget_seconds
 
     def chat(
         self,
@@ -223,6 +224,16 @@ class OpenAIChatClient:
         return LLMResponse(message.content or "", tuple(calls), usage)
 
     def _request_with_retries(self, kwargs: dict[str, Any]) -> Any:
+        """Ask until the endpoint answers, the attempts run out, or the time budget does.
+
+        The time budget is the one that matters for a gateway timeout. Waiting out a 502 while a
+        proxy reloads costs a second an attempt; waiting out a 504 costs whatever the gateway was
+        willing to spend before giving up, on every attempt, for a request whose length is the
+        thing it objected to. Nine of those is an hour and a half spent re-asking a question that
+        cannot fit.
+        """
+
+        started = time.monotonic()
         last_error: Exception | None = None
         for attempt in range(self._max_retries + 1):
             try:
@@ -236,8 +247,17 @@ class OpenAIChatClient:
                         raise overflow from exc
                     raise
                 last_error = exc
-            if attempt < self._max_retries:
-                time.sleep(self._retry_delay(attempt))
+            elapsed = time.monotonic() - started
+            if attempt >= self._max_retries:
+                break
+            delay = self._retry_delay(attempt)
+            if elapsed + delay >= self._retry_budget:
+                raise LLMUnavailableError(
+                    f"LLM endpoint did not answer within {self._retry_budget:.0f}s "
+                    f"({attempt + 1} attempt{'s' if attempt else ''}, {elapsed:.0f}s spent, "
+                    f"model={self._model!r}): {type(last_error).__name__}: {last_error}"
+                ) from last_error
+            time.sleep(delay)
         attempts = self._max_retries + 1
         raise LLMUnavailableError(
             f"LLM endpoint failed after {attempts} attempt{'s' if attempts > 1 else ''} "

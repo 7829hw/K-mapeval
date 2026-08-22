@@ -174,6 +174,9 @@ when the user explicitly asks for live execution.
   (`strict_types=False`) on the last attempt before a question is given up on.
 - When adding or renaming a Spatial-Agent operator, update its implementation,
   `OPERATOR_CONTRACTS`/input types, `GRAPH_PROMPT`, argument normalization, and composition tests.
+- Retrying is bounded by `LLM_RETRY_TIME_BUDGET_SECONDS`, not by the attempt count alone. A
+  request the gateway kills for running too long costs its whole timeout every attempt, and
+  re-asking does not make it shorter.
 - Preserve explicit provider-versus-agent failure types and per-question metrics/log fields.
 - Agents build their trace with `self.new_trace()` and only ever append to it: the evaluator
   listens on that append and writes each entry as it happens. Building a trace some other way

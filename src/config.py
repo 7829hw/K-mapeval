@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = Field(default=1800.0, gt=0)
     llm_max_retries: int = Field(default=8, ge=0, le=20)
     llm_retry_backoff_seconds: float = Field(default=5.0, gt=0)
+    # How long we keep asking for one completion before calling the endpoint unavailable. The
+    # attempt count alone is not a bound: a request the gateway kills for running too long takes
+    # its full timeout *every* attempt, so nine attempts at a 504 cost 95 minutes and produced
+    # nothing. Measured on the v7 Spatial-Agent run, six questions did exactly that, and with
+    # question-level retries on top a single question could hold a worker for nearly five hours --
+    # twelve workers doing it is a run that stops finishing rather than a run that is slow.
+    llm_retry_time_budget_seconds: float = Field(default=600.0, gt=0)
     # One budget for every architecture: how many reasoning steps a question may take. For ReAct
     # that is loop iterations, for Spatial-Agent the nodes its authored graph may hold. 15 is
     # langchain's own default, which is what `mapeval-api/Evaluator2.py` runs -- it calls

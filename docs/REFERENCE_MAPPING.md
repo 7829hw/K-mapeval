@@ -1349,3 +1349,40 @@ On v6 the reference baseline is, within noise, a model answering from its own kn
 tools adding nothing. That is a statement about the benchmark as much as about the agent — v6 is
 hard enough that the tool-calling loop cannot convert its evidence into answers — and it is why v7
 exists. On v7 the same agent recovers to +16 while Spatial-Agent holds +44.
+
+## Three passes each, and the first comparison this repository can defend
+
+`google/gemma-4-E4B-it-qat-w4a16-ct`, revision `49721ca`, `--react-tools reference`,
+`--provider kakao`, temperature 0, `MAX_REASONING_STEPS=15`, `--repeats 3`. Floors are the two
+closed-book passes from the section above.
+
+| | floor | ReAct (reference) | Spatial-Agent | gap |
+| --- | --- | --- | --- | --- |
+| **v5** | 24 (22, 26) | **53.0** (50, 54, 55) | **77.3** (76, 76, 80) | 24.3 |
+| **v6** | 29.5 (28, 31) | **39.3** (37, 39, 42) | **70.0** (67, 70, 73) | 30.7 |
+| **v7** | 30 (29, 31) | **43.3** (38, 45, 47) | **68.3** (65, 69, 71) | 25.0 |
+
+Over the floor: ReAct +29.0, +9.8, +13.3; Spatial-Agent +53.3, +40.5, +38.3.
+
+**Every single-agent spread is 4 to 9 points and every gap is 24 to 31.** That is the first result
+here that a repeated measurement supports: the difference between the architectures is three to
+seven times the run-to-run noise of either one, on three benchmarks, against a measured floor. Up
+to now every comparison in this file was a single draw from a distribution wide enough to contain
+the thing being compared.
+
+The v6 line still says what it said with one pass: ReAct at 39.3 against a floor of 29.5 gains
+about ten questions from having a map, where Spatial-Agent gains forty. A tool-calling loop with
+fifteen iterations and one action per iteration cannot convert v6's evidence into answers.
+
+Nine Spatial-Agent runs — nine hundred questions — produced eight failures in total: two plans
+larger than the step budget (18 and 21 operators), two invented operator names (`select_by_index`,
+`sum_amounts` — the arithmetic gap again), one node missing an argument, one node whose operator
+was a *list*, one context overflow and one 62k-token truncation. No role-ordering violations at
+all, which is `16e73c1` holding.
+
+**What these numbers still are not.** All three benchmarks have been tuned against — `src/` changed
+in response to what v5 and v6 showed — so these are training-set accuracies. `dataset/seoul_kmapeval_v5h_holdout_100.jsonl`
+predates most of that code and has never been run on this model. A held-out number, built from the
+v7 builder under a fresh seed and run once with nothing changed afterwards, is the one thing
+missing before any of this is quotable as a general claim rather than a result on these hundred
+questions.

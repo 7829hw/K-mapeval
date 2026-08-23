@@ -1521,3 +1521,59 @@ above. `select` and `select_routes` (2 plans) name no operation precisely enough
 48.0/70.7 are now what the code at `0aabaa9` scored on it, not a held-out number for the code that
 exists today. Quoting a holdout again means drawing one under a new seed and leaving `src/` alone
 afterwards.
+
+## The second holdout, run on the code that has the arithmetic
+
+`dataset/seoul_kmapeval_v7h2_holdout_100.jsonl`, the v7 builder under seed 481203: one question in
+common with v7, one with v7h, 36 of 231 place names shared with v7 and 31 with v7h. Clean on the
+first `audit_dataset.py` draw, radius ladder included. Built and run at `38566f3` with nothing
+under `src/` changed in between. Same configuration throughout: `--react-tools reference`,
+`--provider kakao`, temperature 0, `MAX_REASONING_STEPS=15`, `--repeats 3`.
+
+| | floor | ReAct (reference) | Spatial-Agent | gap |
+| --- | --- | --- | --- | --- |
+| v7 (tuned, `49721ca`) | 30 (29, 31) | 43.3 (38, 45, 47) | 68.3 (65, 69, 71) | 25.0 |
+| v7h (holdout, `0aabaa9`) | 29.5 (29, 30) | 48.0 (52, 45, 47) | 70.7 (66, 73, 73) | 22.7 |
+| **v7h2 (holdout, `38566f3`)** | 25.5 (25, 26) | **45.7** (43, 48, 46) | **72.3** (77, 71, 69) | **26.7** |
+
+Over the floor: ReAct +20.2, Spatial-Agent +46.8. The gap is 26.7 against a widest single-agent
+spread of 8 — the same three-to-one relationship the tuned sets and the first holdout showed, now
+on a third independent draw.
+
+**What the operator fix demonstrably changed is the failure count, not the accuracy.**
+Spatial-Agent's `agent_reasoning_failure` count over three passes went from 7 in 300 questions on
+v7h to 2 in 300 here, and that drop is attributable because the causes were code-level: an operator
+that did not exist, or a required argument the executor would have accepted. The accuracy moved
+70.7 → 72.3, which is inside the eight-point spread, so at a hundred questions a run this size
+cannot separate the fix from noise. Two recovered failures are worth at most two points, which is
+exactly what "inside the spread" means. The honest claim is the narrow one: the planner stopped
+losing questions to a missing operator; whether that is worth measurable accuracy needs more rows
+than this.
+
+The operators are not decorative. Across the run's 600 logs `select_by_index` appears in 68,
+`difference` in 57 and `sum_amounts` in 43, and they execute — `difference` completed 48 times,
+`sum_amounts` 32, `select_by_index` 14. Both remaining Spatial-Agent failures are genuine planner
+errors, not gaps: one graph whose concept factorization never bound its anchor, and one that
+emitted `sum_amounts` with `"arguments": {}` — no arguments at all, correctly refused.
+
+| class | rows | ReAct | Spatial-Agent |
+| --- | --- | --- | --- |
+| distance | 63 | 25.4% | **71.4%** |
+| routing | 66 | 33.3% | **87.9%** |
+| radius | 12 | 41.7% | 75.0% |
+| trip | 66 | 59.1% | **75.8%** |
+| nearby | 93 | 59.1% | 59.1% |
+
+`nearby` lands on exactly the same number for both architectures, and it is Spatial-Agent's worst
+class on both holdouts (58.1%, 59.1%). Whatever the graph buys, it does not buy this: on questions
+that rank retrieved POIs the two architectures are indistinguishable, and both sit about thirty
+points over the floor. That is where the next real gain is, and it is not an operator gap — the
+ordinal operator now exists and gets used.
+
+Comparisons *between* v7h and v7h2 by class are not available: they are different draws, so a class
+moving twelve points between them says as much about which questions were drawn as about the code.
+Only the failure counts, whose causes are code-level, carry across.
+
+Cost, three passes each: ReAct 2,441 LLM calls for 4.18M tokens at 35.9s a question;
+Spatial-Agent 925 calls for 5.55M tokens at 62.5s — a third the calls, larger ones, about twice
+the wall clock, the same shape as v7h.

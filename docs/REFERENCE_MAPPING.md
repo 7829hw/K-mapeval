@@ -1630,3 +1630,45 @@ replacement chain returns the right option on real coordinates. Whether it moves
 measurement, not a claim. And the diagnosis began in the v7h2 class breakdown, so **v7h2 is spent
 too** — 45.7/72.3 belong to `38566f3`. A number for the code with this template needs a third
 draw.
+
+### Measured: the ordinal families, before and after
+
+Eighteen questions (`nearby_kth_nearest` ×8, `nearby_subtype_kth` ×10) from v7, Spatial-Agent
+only, three passes at `c393db5` against the same eighteen pooled over every earlier v7 run.
+
+| | plans | take a k-th | end on `nearest` | accuracy |
+| --- | --- | --- | --- | --- |
+| before (≤ `49721ca`) | 130 | **0** | 26 | **31.7%** (40/126) |
+| after (`c393db5`) | 53 | **52** | 1 | **79.6%** (43/54) |
+
+Per family: `nearby_kth_nearest` 23.2% → 83.3%, `nearby_subtype_kth` 38.6% → 76.7%. ReAct's
+standing number on the same eighteen is 60.0%, so the family flips from Spatial-Agent scoring half
+of ReAct to scoring well above it.
+
+**The template did this, not the operator.** The two landed in separate commits and there is a run
+between them: v7h2 at `38566f3` had `select_by_index` and no ordinal template, and scored 25.0% on
+`nearby_kth_nearest` — indistinguishable from the 23.2% before the operator existed. An operator
+the retrieval stage never suggests using is not reachable. The mechanism is visible in the shapes:
+no plan in 130 took a k-th of anything, and 52 of 53 do now.
+
+Two things this measurement does *not* support:
+
+**Retrieval is still not the norm.** Only 12 of 53 plans call `nearby_places`; the rest copy the
+template's shape — `nearest -> select_by_index -> match_options` — while still geocoding the four
+option names as their candidate set. The shape is what moved the number, not the retrieval the
+template was written to teach.
+
+**And it did not have to be.** Ranking only the options answers `nearby_kth_nearest` correctly
+whenever all k−1 nearer places happen to be among the three decoys, which is
+`C(m−k, 4−k) / C(m−1, 3)` for a pool of m. Over v7's eight rows that is **56.2%** — because k is 2
+in seven of the eight. `kth = 2 + (index % 3)` keys the ordinal on the anchor *loop index*, so k is
+spent wherever the loop happened to succeed rather than across the three values, which is the
+defect `AGENTS.md` already names for rung ladders: "keying the answer on a loop index spends them
+wherever the loop happened to succeed". The family is weaker than it was designed to be, and a
+build that draws k the way `trip_feasible_count` spends its rungs would make the difference between
+ranking the options and ranking the neighbourhood matter as much as it should. Recorded here, not
+fixed: changing it means rebuilding v7.
+
+One new failure appeared, `llm_context_overflow` on one question of fifty-four. Retrieving a
+neighbourhood puts more evidence in the graph and therefore in later prompts. One in fifty-four is
+worth watching rather than acting on, but it is the first overflow any of these runs has produced.

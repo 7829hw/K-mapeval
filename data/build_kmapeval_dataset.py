@@ -20,8 +20,9 @@ every one of the defects it looks for has shipped in a benchmark here before it 
 
 **Know what v6's families cost the baseline.** Two of them -- `trip_optimal_order_four` and
 `trip_total_distance_four` -- need about twenty one-leg `Directions` calls, against langchain's
-fifteen iterations. Every row of both ended on `iteration_limit` with ReAct scoring 0/15, which
-measures the step budget rather than the agent, and that is why v7 exists and why
+fifteen iterations. Over four passes at that budget ReAct scored 14/60 on them and 24 of those 60
+rows ended on `iteration_limit`; one pass at a budget of 30 scored 6/15 with none. So those rows
+measure the step budget more than they measure the agent, which is why v7 exists and why
 `docs/REFERENCE_MAPPING.md` quotes v7 instead of v6. A set built here inherits them. To draw v6's
 method without them, use `data/build_mapeval_v7_benchmark.py`, which is the same families with
 those two walked back to three stops; it now takes `--count` and a clock seed as well.

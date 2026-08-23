@@ -106,8 +106,12 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   `straddling_multipliers`; a fixed multiplier tuple is a second answer key.
 - A family also has to be answerable *within the step budget*, on the tool contract the baseline
   runs. Count the calls before shipping one: v6's four-stop trip families need about twenty
-  one-leg `Directions` calls against langchain's fifteen iterations, and every row of both ended on
-  `iteration_limit` with ReAct scoring 0/15. A family the budget cannot finish measures the budget.
+  one-leg `Directions` calls against langchain's fifteen iterations. Over four passes at that
+  budget ReAct scored 14/60 on them with 24 of those 60 rows stopped by `iteration_limit`; one
+  pass at 30 scored 6/15 with none. The budget is most of what that family measures, though
+  "unanswerable" overstated it. Raising the budget is still the wrong repair: 15 is langchain's
+  default and therefore the baseline's, it is the one budget both architectures answer under, and
+  the same pass moved the whole benchmark 38.0% to 38.0%.
 - Every rung a question offers has to be reachable *and* reached. A family whose options are a
   fixed ladder must be able to answer each rung, and should spend its rows across them the way
   `trip_feasible_count` does — keying the answer on a loop index spends them wherever the loop
@@ -141,8 +145,9 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
 - `dataset/seoul_kmapeval_v6_mcq_100.jsonl`: v5's families each raised one step (composition or
   ordinality) and the radius family's word order fixed. Built by
   `data/build_mapeval_v6_benchmark.py`; passes `data/audit_dataset.py`. Measured once (ReAct
-  54/100, Spatial-Agent 60/100), but its two four-stop trip families are unanswerable inside the
-  reference baseline's step budget, so quote v7 instead. No no-tool floor.
+  54/100, Spatial-Agent 60/100), but its two four-stop trip families spend most of the reference
+  baseline's step budget — ReAct 14/60 over four passes, 24 rows stopped by it — so quote v7
+  instead. No no-tool floor.
 - `dataset/seoul_kmapeval_v5_mcq_100.jsonl`: v4's method at MapEval-API's own difficulty (tight
   options over reproducible measures, ordinal and membership `nearby`, subjective `unanswerable`,
   `trip_optimal_order`). Built by `data/build_mapeval_v5_benchmark.py`.
@@ -161,7 +166,7 @@ for how many questions, and a clock seed so every run is a fresh draw. The versi
 (`build_mapeval_v5/v6/v7_benchmark.py`) exist to reproduce their benchmarks of record and default
 to the seed that does; v5 and v7 take `--count` and a clock seed too, and refuse to overwrite an
 existing file without `--force`. A set from the standard builder inherits v6's two four-stop trip
-families, which the reference baseline cannot finish inside fifteen iterations — draw from the v7
+families, which spend most of the reference baseline's fifteen iterations — draw from the v7
 builder instead when that matters.
 
 Use `python main.py --help` for current CLI defaults instead of copying them into documentation.

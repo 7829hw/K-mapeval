@@ -1801,3 +1801,43 @@ Cost is unchanged in shape: ReAct 2,510 calls for 4.24M tokens at 36.5s a questi
 
 **v7h3 is spent the moment `src/` or `data/` changes again.** As of `8797217` it is the only
 holdout number that belongs to the current code.
+
+## Would a bigger step budget fix it? Measured, on a run that already exists
+
+`MAX_REASONING_STEPS` is configurable, so the obvious question about v6's four-stop trip families
+is whether raising it repairs them. The record already answers it: among the v6 ReAct runs on
+`google/gemma-4-E4B-it-qat-w4a16-ct` there are four passes at the default 15 and one at 30.
+
+| | four-stop families | overall | `iteration_limit` | LLM calls per pass |
+| --- | --- | --- | --- | --- |
+| budget 15 (4 passes) | 14/60 = **23.3%** | 38.0% (34, 42, 39, 37) | 24 | 849 |
+| budget 30 (1 pass) | 6/15 = **40.0%** | 38.0% (38) | **0** | 849 |
+
+**The budget was real, and repairing it changed nothing that matters.** Those two families nearly
+double and every `iteration_limit` disappears, which confirms the budget was what capped them. The
+whole benchmark lands on 38.0% either way, inside the four-pass spread of 34–42, because the
+families are fifteen rows in a hundred and ReAct still answers only 40% of them with twice the
+budget. One pass at 30 is one draw; 6/15 carries a wide interval.
+
+Three reasons it stays at 15 anyway:
+
+- **It is the baseline's configuration, not a tuning knob.** 15 is langchain's own default, which
+  is what the reference baseline runs. A larger budget is a stronger-than-paper baseline — a
+  labelled ablation whose number cannot be pooled with the default runs or set beside upstream
+  Spatial-Agent's 71.07%.
+- **It is one budget, not ReAct's.** The same setting bounds the nodes Spatial-Agent's planner may
+  author, so a run at 30 has moved both architectures at once and is not a controlled comparison
+  of either.
+- **Longer loops crowd the context window.** Each iteration carries another observation into the
+  prompt, and the worst prompt in the v7h3 run already reached 68,430 tokens against a 65,536
+  window with eight questions lost to `llm_context_overflow`.
+
+Shrinking the family, which is what v7 did, keeps the baseline faithful *and* leaves a family that
+discriminates. Raising the budget keeps a family the paper's configuration cannot run and that a
+doubled budget still answers at 40%.
+
+**A correction to this file's own record.** The step-budget invariant said "every row of both ended
+on `iteration_limit` with ReAct scoring 0/15". Pooled over four passes it is 24 of 60 rows and
+14/60 correct. The invariant stands — the budget is most of what that family measures — but
+"unanswerable" came from one early run and overstated it. `AGENTS.md` and
+`data/build_kmapeval_dataset.py` are corrected to match.

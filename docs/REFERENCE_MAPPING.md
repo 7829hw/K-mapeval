@@ -1446,3 +1446,78 @@ back empty, which leaves "네 곳" the only feasible rung — 1 through 3 each n
 radius and 4 needs none — and the family shipped a ladder whose third rung could never be the
 answer. The generator now keeps scanning while a rung is uncovered. This is the invariant working:
 the audit caught, before any agent ran, exactly the class of defect that used to ship.
+
+## The arithmetic gap, and closing it
+
+Across every run in `logs/`, Spatial-Agent's planner named an operator that does not exist 21
+times. The names scatter but the intents do not:
+
+| intent | names written | events |
+| --- | --- | --- |
+| take the k-th of a ranking | `select_by_index` ×6, `select_second_closest`, `select_second_nearest`, `select_second_min`, `select_subset`, `select` | 11 |
+| add measurements | `sum_amounts` ×4, `calculate_path_distance` ×2, `calculate_total_distance`, `sum_distances` | 8 |
+| subtract measurements | `subtraction`, `calculate_difference`, `subtract` | 3 |
+
+The operator set really did have those holes. `sort_by` orders a list and `select_min`/`select_max`
+take an end off it, so an ordinal question — "the second closest" — had no operator to finish on.
+`sum_route_metrics` totals a route list and `aggregate_route_groups` totals route indexes per
+option, but a graph that had already reduced each leg to an amount had nothing that could add two
+numbers. And nothing anywhere subtracted, though a detour cost and "how much farther" are both
+subtractions and both are families in these benchmarks.
+
+Three operators close them:
+
+- `select_by_index(items, index, key?, descending?) -> object`. The index is **0-based**, which is
+  what the planners themselves wrote — `index: 1` for the second closest, `2` for the third. An
+  index past the end fails rather than clamping: the nearest place is not the second nearest.
+- `sum_amounts(amounts, key?) -> amount`. Route-shaped records total `distance_m` and `duration_s`
+  together. A sum of durations reports `duration_s` and no `value`, so a plan that pipes seconds
+  into `match_distance_options` fails where it stands instead of answering in the wrong unit.
+  Elements that are text — `["dist_A_C", "dist_C_B"]`, node ids a planner forgot to mark with `$` —
+  fail rather than adding up as zero.
+- `difference(minuend, subtrahend) -> amount`. Keeps `difference` signed and reports `value` as the
+  magnitude, because a numeric option states the ordering in words and leaves the number positive.
+
+Three smaller things came out of fixing it, and two of them were pre-existing:
+
+**The declared table was stricter than the implementation, again.** `_normalize_arguments` accepts
+several spellings per slot, but the required-argument check only looked for the canonical one, so
+`sum_amounts(items=[$leg1, $leg2])` — which the executor would have run — was refused as "missing
+arguments: amounts". `REQUIRED_ARGUMENT_ALIASES` now lists the same spellings the normalizer takes.
+The same defect was already sitting under `select_min`/`select_max`, whose contract required a
+`key` the implementation defaults.
+
+**A ranking with no key named ranked by nothing.** Forty-five calls in `logs/` write
+`select_max(items=[$d1, $d2, $d3])` with no key. The normalizer defaulted to `"value"`, which a
+`haversine_distance` record does not carry, so the operator raised "No item contains comparable
+key: value". It now infers the measurement the records actually hold. This had to be fixed *with*
+the contract relaxation rather than after it: without it, relaxing the contract would have moved
+the same loss from validation, where a repair round could still save it, to execution, where
+nothing can.
+
+**`select_min(items, index=1)` is an ordinal, not a minimum.** Both `seoul_kmapeval_v7h_001` and
+`_010` wrote exactly that. Accepting the plan while dropping `index` would have returned the
+*nearest* candidate to a question asking which is second nearest — a confident wrong answer, which
+is worse than the refusal it replaced. An explicit `index` on either selector now routes to
+`select_by_index`.
+
+`OPERATOR_SYNONYMS` maps `subtraction`, `subtract`, `calculate_difference` and `sum_distances` onto
+the operators that do the work, rewritten once in `normalize_and_validate_graph` so the executor is
+handed the canonical name and there is no second table to keep in step. `select_second_closest` and
+its kin are deliberately **not** there: turning that name into `select_by_index(index=1)` means
+reading an ordinal out of an identifier, and a question answered one rung off looks exactly like one
+answered wrongly. The prompt now says the name does not exist and points at the operator that does.
+
+Replaying every compose stage in `logs/` that named an invented operator — 17 distinct plans — five
+now validate and execute where none of them could. Six distinct questions across all recorded runs
+ended on a cause this removes. What is left is deliberate: `calculate_path_distance` and
+`calculate_total_distance` (3 plans) want a trip total keyed by stop *names*, which
+`aggregate_route_groups` already computes from route indexes — a second operator for the same job
+would compete with the one the trip families currently answer through, and the prompt now points at
+it instead. `select_second_min` and `select_second_nearest` (2 plans) are the name-parsing cases
+above. `select` and `select_routes` (2 plans) name no operation precisely enough to implement.
+
+**This spends the holdout.** `src/` changed in response to what `seoul_kmapeval_v7h` showed, so
+48.0/70.7 are now what the code at `0aabaa9` scored on it, not a held-out number for the code that
+exists today. Quoting a holdout again means drawing one under a new seed and leaving `src/` alone
+afterwards.

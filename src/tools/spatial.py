@@ -64,6 +64,7 @@ class SpatialOperatorRegistry:
         "select_min",
         "select_max",
         "sort_by",
+        "select_by_index",
         "compare_routes",
         "filter_routes",
         "extract_distance",
@@ -71,6 +72,8 @@ class SpatialOperatorRegistry:
         "filter_places",
         "steps_analysis",
         "sum_route_metrics",
+        "sum_amounts",
+        "difference",
         "aggregate_route_groups",
         "merge_places",
         "match_options",
@@ -329,6 +332,45 @@ class SpatialOperatorRegistry:
             reverse=descending,
         )
 
+    @classmethod
+    def select_by_index(
+        cls,
+        items: Any,
+        index: int,
+        key: str | None = None,
+        descending: bool = False,
+    ) -> dict[str, Any]:
+        """The k-th item of a ranked collection, which nothing else here could reach.
+
+        `sort_by` orders a list and `select_min`/`select_max` take an end off it, so an ordinal
+        question -- "the second closest", "the third furthest" -- had no operator to finish on.
+        Planners wrote one anyway: across the runs in `logs/` they invented `select_by_index` six
+        times and `select_second_closest`, `select_second_nearest`, `select_second_min` and
+        `select_subset` once each, which is eleven questions lost to a missing operator rather
+        than to reasoning.
+
+        `index` is 0-based, like every other index in this project, so the second item is index 1
+        -- and that is what the planners themselves wrote when they invented the name. An index
+        outside the collection fails rather than clamping to an end: the nearest item is not the
+        second nearest, and answering as though it were is a fabricated measurement.
+        """
+
+        collection = _amount_collection(items)
+        if key is not None:
+            collection = cls.sort_by(collection, key, descending)
+        if not collection:
+            raise ValueError("select_by_index received an empty collection")
+        position = int(index)
+        if not -len(collection) <= position < len(collection):
+            raise ValueError(
+                f"select_by_index({position}) is outside a collection of {len(collection)}; "
+                "the index is 0-based, so the second item is index 1"
+            )
+        chosen = collection[position]
+        if isinstance(chosen, dict):
+            return {"selected_index": position, **chosen}
+        return {"selected_index": position, "value": chosen}
+
     @staticmethod
     def compare_routes(routes: list[dict[str, Any]], metric: str = "distance_m") -> dict[str, Any]:
         if metric not in {"distance_m", "duration_s"}:
@@ -457,6 +499,75 @@ class SpatialOperatorRegistry:
             "distance_m": sum(int(route["distance_m"]) for route in routes),
             "duration_s": sum(int(route["duration_s"]) for route in routes),
         }
+
+    @staticmethod
+    def sum_amounts(amounts: Any, key: str | None = None) -> dict[str, Any]:
+        """Add measurements that separate nodes produced.
+
+        `sum_route_metrics` totals a route list and `aggregate_route_groups` totals route indexes
+        per option, but a graph that measured two legs with `extract_distance` and wanted their
+        total had nothing to add them with. Planners invented `sum_amounts` in four questions and
+        `calculate_total_distance`/`calculate_path_distance` in three more.
+
+        A sum of seconds is not a sum of metres, so the result carries `duration_s` without
+        `value`: `match_distance_options` reads `value` as metres, and a plan that pipes a
+        duration into it has to fail where it stands rather than answer in the wrong unit.
+        """
+
+        values = _amount_collection(amounts)
+        if not values:
+            raise ValueError("sum_amounts received nothing to add")
+        records = [item for item in values if isinstance(item, dict)]
+        result: dict[str, Any] = {"count": len(values)}
+        if key is None and len(records) == len(values):
+            # Route-shaped records carry both metrics, and a trip total wants each of them.
+            for metric in ("distance_m", "duration_s"):
+                if all(metric in item for item in records):
+                    result[metric] = float(
+                        sum(_amount_number(item[metric], where="sum_amounts") for item in records)
+                    )
+        addends = [_amount_number(item, key, where="sum_amounts") for item in values]
+        total = float(sum(addends))
+        result["addends"] = addends
+        result["total"] = total
+        kind = _amount_kind(key, values)
+        if kind == "distance" and "distance_m" not in result:
+            result["distance_m"] = total
+        if "distance_m" in result:
+            result["distance_km"] = result["distance_m"] / 1000
+        if kind != "duration":
+            result["value"] = total
+        return result
+
+    @staticmethod
+    def difference(minuend: Any, subtrahend: Any, key: str | None = None) -> dict[str, Any]:
+        """One measurement less another, which the operator set had no way to express.
+
+        A detour cost is a subtraction and so is "how much farther is A than B"; both families
+        exist in these benchmarks and both had to be composed out of operators that only ever
+        added. Planners wrote `subtraction` and `calculate_difference` instead.
+
+        `difference` keeps the sign so a plan can tell which way round it subtracted, while
+        `value` carries the magnitude: an option states the ordering in words -- "약 3.2km 더
+        멀다" -- and leaves the number positive, so a graph that happened to subtract the other
+        way would otherwise match no option at all.
+        """
+
+        first = _amount_number(minuend, key, where="difference")
+        second = _amount_number(subtrahend, key, where="difference")
+        signed = first - second
+        magnitude = abs(signed)
+        result: dict[str, Any] = {
+            "minuend": first,
+            "subtrahend": second,
+            "difference": signed,
+            "absolute_difference": magnitude,
+            "value": magnitude,
+        }
+        if _amount_kind(key, [minuend, subtrahend]) == "distance":
+            result["distance_m"] = magnitude
+            result["distance_km"] = magnitude / 1000
+        return result
 
     @staticmethod
     def aggregate_route_groups(
@@ -1229,9 +1340,86 @@ def _normalize_arguments(name: str, arguments: dict[str, Any]) -> dict[str, Any]
                 }
         raise ValueError(f"{name} requires place_a/place_b or two coordinate pairs")
 
+    if name == "select_by_index":
+        items = next(
+            (
+                args[key]
+                for key in ("items", "list", "candidates", "values", "places", "routes")
+                if key in args
+            ),
+            None,
+        )
+        if items is None:
+            raise ValueError("select_by_index requires items")
+        # Only aliases that mean the same thing. `rank`, `k` and `position` read as 1-based to
+        # about as many writers as read them 0-based, and an ordinal question answered one place
+        # off is indistinguishable from one answered wrongly.
+        index = next((args[key] for key in ("index", "i") if key in args), None)
+        if index is None:
+            raise ValueError(
+                "select_by_index requires a 0-based index; the second item is index 1"
+            )
+        normalized: dict[str, Any] = {"items": items, "index": index}
+        for optional in ("key", "descending"):
+            if optional in args:
+                normalized[optional] = args[optional]
+        return normalized
+
+    if name == "sum_amounts":
+        amounts = next(
+            (
+                args[key]
+                for key in (
+                    "amounts",
+                    "items",
+                    "values",
+                    "inputs",
+                    "distances",
+                    "legs",
+                    "routes",
+                    "numbers",
+                )
+                if key in args
+            ),
+            None,
+        )
+        if amounts is None:
+            raise ValueError("sum_amounts requires a list of amounts")
+        return {"amounts": amounts, **({"key": args["key"]} if "key" in args else {})}
+
+    if name == "difference":
+        optional_key = {"key": args["key"]} if "key" in args else {}
+        for first, second in (
+            ("minuend", "subtrahend"),
+            ("a", "b"),
+            ("first", "second"),
+            ("left", "right"),
+            ("value_a", "value_b"),
+            ("amount1", "amount2"),
+            ("x", "y"),
+        ):
+            if first in args and second in args:
+                return {
+                    "minuend": args[first],
+                    "subtrahend": args[second],
+                    **optional_key,
+                }
+        pair = next(
+            (args[key] for key in ("values", "amounts", "items", "inputs") if key in args),
+            None,
+        )
+        if isinstance(pair, list) and len(pair) == 2:
+            return {"minuend": pair[0], "subtrahend": pair[1], **optional_key}
+        raise ValueError(
+            "difference requires two measurements, as minuend/subtrahend or a two-element list"
+        )
+
     if name in {"select_min", "select_max"}:
         if "items" in args:
-            return {"items": args["items"], "key": args.get("key", "value")}
+            return {
+                "items": args["items"],
+                "key": args.get("key") or _ranking_key(args["items"]),
+            }
         source = next(
             (args[key] for key in ("values", "inputs", "list", "candidates") if key in args),
             None,
@@ -1461,6 +1649,85 @@ def _duration_value(value: Any) -> float:
     if isinstance(value, list) and len(value) == 1:
         return _duration_value(value[0])
     return float(value)
+
+
+_DISTANCE_KEYS = ("distance_m", "distance", "meters", "distance_km", "km")
+_DURATION_KEYS = ("duration_s", "duration", "seconds")
+_GENERIC_AMOUNT_KEYS = ("value", "amount", "total")
+
+
+def _amount_collection(value: Any) -> list[Any]:
+    """The measurements a planner meant, however it wrapped them."""
+
+    if isinstance(value, dict):
+        for key in (
+            "amounts",
+            "items",
+            "values",
+            "routes",
+            "legs",
+            "inputs",
+            "distances",
+            "numbers",
+            "list",
+        ):
+            found = value.get(key)
+            if isinstance(found, list):
+                return found
+        return [value]
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _amount_number(value: Any, key: str | None = None, *, where: str) -> float:
+    """One measurement, read off a number or off whatever record carries it."""
+
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            raise ValueError(
+                f"{where} received {value!r}, which is text rather than a measurement. A `$node` "
+                "reference that never resolved adds up to nothing, so this fails instead of "
+                "counting it as zero."
+            ) from None
+    if isinstance(value, dict):
+        if key is not None:
+            if key not in value:
+                raise ValueError(f"{where}: no {key!r} among {sorted(value)[:8]}")
+            return _amount_number(value[key], where=where)
+        for candidate in ("distance_m", "duration_s", *_GENERIC_AMOUNT_KEYS):
+            if candidate in value:
+                return _amount_number(value[candidate], where=where)
+        for candidate in ("distance_km", "km"):
+            if candidate in value:
+                return _amount_number(value[candidate], where=where) * 1000
+        raise ValueError(f"{where}: no measurement among {sorted(value)[:8]}")
+    if value is None or isinstance(value, bool):
+        raise ValueError(f"{where} received {value!r}, which is not a measurement")
+    return float(value)
+
+
+def _amount_kind(key: str | None, values: list[Any]) -> str:
+    """Whether a set of amounts is metres, seconds, or plain numbers.
+
+    A route record carries both, and distance wins there because `_amount_number` reads it first.
+    """
+
+    if key is not None:
+        if key in _DISTANCE_KEYS:
+            return "distance"
+        if key in _DURATION_KEYS:
+            return "duration"
+        return "plain"
+    for item in values:
+        if isinstance(item, dict):
+            if any(name in item for name in _DISTANCE_KEYS):
+                return "distance"
+            if any(name in item for name in _DURATION_KEYS):
+                return "duration"
+    return "plain"
 
 
 def _distance_value(value: Any) -> float:
@@ -1724,6 +1991,28 @@ def _cardinal_direction(value: str) -> str:
         return aliases[normalized]
     except KeyError as exc:
         raise ValueError("direction must be north/east/south/west (북쪽/동쪽/남쪽/서쪽)") from exc
+
+
+def _ranking_key(items: Any) -> str:
+    """The key a ranking meant when the planner spelled none.
+
+    `select_min`/`select_max` fall back to `"value"`, and a list of `haversine_distance` records
+    carries no `value` -- so a graph that ranked three measured distances without naming the key
+    raised "No item contains comparable key: value" and lost the question. Forty-five calls in
+    `logs/` are written that way. The measurement the records actually carry is the one they
+    meant; there is nothing else in them to rank by, and refusing the plan instead only moved the
+    same loss earlier.
+    """
+
+    if not isinstance(items, list):
+        return "value"
+    records = [item for item in items if isinstance(item, dict)]
+    if not records:
+        return "value"
+    for candidate in ("distance_m", "duration_s", "value", "amount", "total", "rating"):
+        if all(_has_comparable(item, candidate) for item in records):
+            return candidate
+    return "value"
 
 
 def _comparison_value_path(items: list[dict[str, Any]]) -> str:

@@ -109,9 +109,10 @@ OPERATOR_CONTRACTS: dict[str, OperatorContract] = {
     "filter_by_direction": OperatorContract("object", ("center", "places", "direction")),
     "nearest": OperatorContract("object", ("anchor", "candidates")),
     "within_radius": OperatorContract("object", ("center", "candidates", "radius_m")),
-    "select_min": OperatorContract("object", ("items", "key")),
-    "select_max": OperatorContract("object", ("items", "key")),
+    "select_min": OperatorContract("object", ("items",)),
+    "select_max": OperatorContract("object", ("items",)),
     "sort_by": OperatorContract("object", ("items", "key")),
+    "select_by_index": OperatorContract("object", ("items", "index")),
     "compare_routes": OperatorContract("object", ("routes",)),
     "filter_routes": OperatorContract("field", ("routes", "keyword")),
     "extract_distance": OperatorContract("amount", ("route",)),
@@ -119,6 +120,8 @@ OPERATOR_CONTRACTS: dict[str, OperatorContract] = {
     "filter_places": OperatorContract("object", ("places",)),
     "steps_analysis": OperatorContract("field", ("route",)),
     "sum_route_metrics": OperatorContract("amount", ("routes",)),
+    "sum_amounts": OperatorContract("amount", ("amounts",)),
+    "difference": OperatorContract("amount", ("minuend", "subtrahend")),
     "aggregate_route_groups": OperatorContract("amount", ("routes", "groups")),
     "merge_places": OperatorContract("object", ("items",)),
     "match_options": OperatorContract("object", ("options", "places")),
@@ -141,6 +144,63 @@ OPERATOR_CONTRACTS: dict[str, OperatorContract] = {
     ),
     "tsp_tw": OperatorContract("network", ("nodes", "distance_matrix")),
 }
+
+# Names planners wrote for an operation that now exists, mapped onto the operator that does it.
+# Only exact synonyms belong here -- same operation, arguments `_normalize_arguments` already
+# accepts. `select_second_closest` and its kin are deliberately absent: turning that name into
+# `select_by_index(index=1)` means reading an ordinal out of an identifier, and a question
+# answered one rung off is indistinguishable from one answered wrongly.
+OPERATOR_SYNONYMS: dict[str, str] = {
+    "subtraction": "difference",
+    "subtract": "difference",
+    "calculate_difference": "difference",
+    "sum_distances": "sum_amounts",
+}
+
+
+# The declared table must never be stricter than the implementation. `_normalize_arguments` in
+# `src.tools.spatial` accepts several spellings for the same slot, but the required-argument check
+# only ever looked for the canonical one -- so a plan the executor would have run was refused
+# before it ran. `sum_amounts(items=[$leg1, $leg2])` was written exactly that way and lost its
+# question to "missing arguments: amounts". These are the same spellings the normalizer accepts.
+REQUIRED_ARGUMENT_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
+    "select_min": {"items": ("values", "inputs", "list", "candidates")},
+    "select_max": {"items": ("values", "inputs", "list", "candidates")},
+    "select_by_index": {
+        "items": ("list", "candidates", "values", "places", "routes"),
+        "index": ("i",),
+    },
+    "sum_amounts": {
+        "amounts": ("items", "values", "inputs", "distances", "legs", "routes", "numbers"),
+    },
+    "difference": {
+        "minuend": (
+            "a",
+            "first",
+            "left",
+            "value_a",
+            "amount1",
+            "x",
+            "values",
+            "amounts",
+            "items",
+            "inputs",
+        ),
+        "subtrahend": (
+            "b",
+            "second",
+            "right",
+            "value_b",
+            "amount2",
+            "y",
+            "values",
+            "amounts",
+            "items",
+            "inputs",
+        ),
+    },
+}
+
 
 OPERATOR_INPUT_TYPES: dict[str, dict[str, frozenset[str]]] = {
     "identity_measure": {
@@ -203,6 +263,15 @@ OPERATOR_INPUT_TYPES: dict[str, dict[str, frozenset[str]]] = {
     "select_min": {"items": frozenset(CORE_CONCEPTS)},
     "select_max": {"items": frozenset(CORE_CONCEPTS)},
     "sort_by": {"items": frozenset(CORE_CONCEPTS)},
+    "select_by_index": {"items": frozenset(CORE_CONCEPTS)},
+    # Arithmetic reads a number off whatever carries one -- a route field, a measured
+    # amount, a place record with a distance on it -- so nothing is refused here that the
+    # implementation would have run.
+    "sum_amounts": {"amounts": frozenset(CORE_CONCEPTS)},
+    "difference": {
+        "minuend": frozenset(CORE_CONCEPTS),
+        "subtrahend": frozenset(CORE_CONCEPTS),
+    },
     "compare_routes": {"routes": frozenset({"field"})},
     "filter_routes": {"routes": frozenset({"field"})},
     "extract_distance": {"route": frozenset({"field"})},
@@ -1157,6 +1226,7 @@ def normalize_and_validate_graph(
             raise ValueError(f"Duplicate GeoFlow node id: {step_id}")
         seen.add(step_id)
         operator = str(raw.get("operator") or "")
+        operator = OPERATOR_SYNONYMS.get(operator, operator)
         contract = OPERATOR_CONTRACTS.get(operator)
         if contract is None:
             raise ValueError(f"Unknown GeoFlow operator: {operator}")
@@ -1165,7 +1235,23 @@ def normalize_and_validate_graph(
             arguments = raw.get("params")
         if not isinstance(arguments, dict):
             raise ValueError(f"GeoFlow node {step_id} arguments must be an object")
-        missing = [name for name in contract.required_arguments if name not in arguments]
+        # `select_min(items, index=1)` is an ordinal, not a minimum, and both questions that
+        # wrote it meant the second nearest place. The index is explicit, so honouring it is not
+        # reading intent out of a name -- and dropping it would answer with the *nearest* place,
+        # which is a confident wrong answer where the old contract at least failed and went to
+        # the repair round.
+        if operator in {"select_min", "select_max"} and "index" in arguments:
+            arguments = dict(arguments)
+            if operator == "select_max":
+                arguments.setdefault("descending", True)
+            operator = "select_by_index"
+        aliases = REQUIRED_ARGUMENT_ALIASES.get(operator, {})
+        missing = [
+            name
+            for name in contract.required_arguments
+            if name not in arguments
+            and not any(alias in arguments for alias in aliases.get(name, ()))
+        ]
         if missing:
             raise ValueError(f"GeoFlow node {step_id} is missing arguments: {', '.join(missing)}")
         if operator == "place_search" and not (

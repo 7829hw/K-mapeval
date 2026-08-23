@@ -129,6 +129,16 @@ Exact operator contracts:
   matches
 - within_radius(center, candidates, radius_m) -> object
 - select_min/select_max(items,key), sort_by(items,key), compare_routes(routes,metric) -> object
+- select_by_index(items,index,key?,descending?) -> object; the k-th item of a ranked list.
+  index is 0-based, so the second closest is index 1 and the third is 2. This is how an
+  ordinal question ends — sort_by or nearest first, then this. There is no
+  select_second_* operator and no rank argument
+- sum_amounts(amounts,key?) -> amount; adds measurements several nodes each produced, such
+  as two extract_distance legs of a via-route. Route-shaped records total distance_m and
+  duration_s together. For per-option route totals use aggregate_route_groups instead
+- difference(minuend,subtrahend) -> amount; subtracts one measurement from another, for a
+  detour cost or how much farther one place is than another. Reports `difference` signed
+  and `value` as the magnitude, which is what a numeric option carries
 - filter_routes(routes,keyword,include=true) -> field
 - extract_distance(route), extract_duration(route) -> amount
 - filter_places(places,min_rating?,price_levels?,required_types?,open_now?) -> object

@@ -2568,3 +2568,314 @@ def test_a_node_that_names_no_operator_is_the_planners_failure_not_a_crash() -> 
         _factorize_validate_plan(
             analysis, {"graph": graph}, "서울역에서 경복궁까지?", ["1km", "2km"], "distance", 15
         )
+
+
+def test_the_second_closest_plan_validates_and_runs() -> None:
+    """The ordinal plan the planner kept writing against an operator set that had no k-th.
+
+    Replayed from `seoul_kmapeval_v7h_010`'s compose stage: geocode the anchor and the four
+    options, measure each anchor-to-option distance, sort them, and take index 1. Every node of
+    it existed except the last, and `Unknown GeoFlow operator: select_by_index` ended the
+    question. Six questions across these runs died on that name and three more on
+    `select_second_closest`, `select_second_nearest` and `select_second_min`.
+    """
+
+    from src.agent.geoflow import normalize_and_validate_graph
+
+    graph = {
+        "graph": [
+            {
+                "id": "all_places",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["anchor", "A", "B", "C"], "anchor": "anchor"},
+                "role": "extent",
+            },
+            {
+                "id": "all_distances",
+                "operator": "pairwise_distances",
+                "arguments": {
+                    "pairs": [
+                        {"place_a": "$all_places.0.place", "place_b": "$all_places.1.place"},
+                        {"place_a": "$all_places.0.place", "place_b": "$all_places.2.place"},
+                        {"place_a": "$all_places.0.place", "place_b": "$all_places.3.place"},
+                    ]
+                },
+                "depends_on": ["all_places"],
+                "role": "support",
+            },
+            {
+                "id": "sorted_distances",
+                "operator": "sort_by",
+                "arguments": {"items": "$all_distances", "key": "distance_m"},
+                "depends_on": ["all_distances"],
+                "role": "support",
+            },
+            {
+                "id": "second_closest",
+                "operator": "select_by_index",
+                "arguments": {"items": "$sorted_distances", "index": 1},
+                "depends_on": ["sorted_distances"],
+                "role": "support",
+            },
+            {
+                "id": "measure",
+                "operator": "identity_measure",
+                "arguments": {"value": "$second_closest"},
+                "depends_on": ["second_closest"],
+                "role": "measure",
+            },
+        ]
+    }
+
+    steps, _ = normalize_and_validate_graph(graph, max_steps=15)
+    assert [step["id"] for step in steps][-1] == "measure"
+
+    ops = SpatialOperatorRegistry()
+    measured = [
+        {"pair_index": 0, "label": "A", "distance_m": 900.0},
+        {"pair_index": 1, "label": "B", "distance_m": 300.0},
+        {"pair_index": 2, "label": "C", "distance_m": 600.0},
+    ]
+    ordered = ops.invoke("sort_by", {"items": measured, "key": "distance_m"})
+    second = ops.invoke("select_by_index", {"items": ordered, "index": 1})
+    # 0-based: the nearest is index 0, so "두 번째로 가까운" is index 1.
+    assert second["label"] == "C"
+    assert second["selected_index"] == 1
+    assert ops.invoke("select_by_index", {"items": ordered, "index": 0})["label"] == "B"
+
+
+def test_an_ordinal_past_the_end_of_the_list_fails_instead_of_clamping() -> None:
+    """The nearest place is not the second nearest, and answering as if it were invents evidence."""
+
+    ops = SpatialOperatorRegistry()
+    with pytest.raises(ValueError, match="0-based"):
+        ops.invoke("select_by_index", {"items": [{"distance_m": 5.0}], "index": 1})
+
+
+def test_two_measured_legs_add_up_to_the_via_route_total() -> None:
+    """`sum_amounts` closes the gap between measuring legs and answering with their total.
+
+    `sum_route_metrics` needs a route list and `aggregate_route_groups` needs route indexes, so a
+    graph that had already reduced each leg to an amount with `extract_distance` had nothing left
+    that could add two numbers. This is the plan from `seoul_kmapeval_v7h_052`, whose planner
+    wrote `sum_amounts(items=[$leg1_distance_m, $leg2_distance_m])`.
+    """
+
+    ops = SpatialOperatorRegistry()
+    total = ops.invoke("sum_amounts", {"items": [{"distance_m": 4200.0}, {"distance_m": 3400.0}]})
+    assert total["distance_m"] == 7600.0
+    assert total["value"] == 7600.0
+
+    matched = ops.invoke(
+        "match_distance_options",
+        {"distance": total, "options": ["약 5.0km", "약 7.6km", "약 9.9km"]},
+    )
+    assert matched["best_option"] == 1
+
+
+def test_a_route_shaped_sum_keeps_both_metrics_and_a_duration_sum_is_not_a_distance() -> None:
+    """Seconds are not metres, and the result must not let a plan spend them as though they were."""
+
+    ops = SpatialOperatorRegistry()
+    both = ops.invoke(
+        "sum_amounts",
+        {
+            "routes": [
+                {"distance_m": 1200, "duration_s": 300},
+                {"distance_m": 800, "duration_s": 200},
+            ]
+        },
+    )
+    assert (both["distance_m"], both["duration_s"]) == (2000.0, 500.0)
+
+    seconds = ops.invoke("sum_amounts", {"amounts": [{"duration_s": 300}, {"duration_s": 200}]})
+    assert seconds["total"] == 500.0
+    assert "value" not in seconds and "distance_m" not in seconds
+    with pytest.raises(ValueError, match="measured distance"):
+        ops.invoke("match_distance_options", {"distance": seconds, "options": ["약 1.0km"]})
+
+
+def test_a_detour_cost_is_a_subtraction_the_operator_set_could_not_express() -> None:
+    """`difference` keeps the sign and reports the magnitude, which is what an option carries."""
+
+    ops = SpatialOperatorRegistry()
+    detour = ops.invoke("difference", {"a": {"distance_m": 9100.0}, "b": {"distance_m": 5900.0}})
+    assert detour["difference"] == 3200.0
+    assert detour["value"] == 3200.0
+
+    # Subtracted the other way round, the option it matches is the same one.
+    reversed_order = ops.invoke("difference", {"values": [{"distance_m": 5900.0}, 9100.0]})
+    assert reversed_order["difference"] == -3200.0
+    assert reversed_order["value"] == 3200.0
+    matched = ops.invoke(
+        "match_distance_options",
+        {"distance": reversed_order, "options": ["약 1.2km", "약 3.2km"]},
+    )
+    assert matched["best_option"] == 1
+
+
+def test_an_unresolved_reference_is_not_quietly_summed_as_zero() -> None:
+    """One planner wrote `sum_amounts(amounts=["dist_A_C", "dist_C_B"])` -- names, not values.
+
+    Those are node ids that were never marked with `$`, so nothing resolved them and they arrive
+    as text. Adding them as zeroes would answer the question with a total of nothing.
+    """
+
+    ops = SpatialOperatorRegistry()
+    with pytest.raises(ValueError, match="never resolved"):
+        ops.invoke("sum_amounts", {"amounts": ["dist_A_C", "dist_C_B"]})
+
+
+def test_a_synonym_for_a_now_existing_operator_resolves_to_it() -> None:
+    """`calculate_difference` and `subtraction` are the same operation under another name.
+
+    Both were written by planners before `difference` existed. The rewrite happens once, in
+    `normalize_and_validate_graph`, so the executor is handed the canonical name and there is no
+    second table to keep in step. Names that would need an ordinal read out of them --
+    `select_second_closest` -- are deliberately not here.
+    """
+
+    from src.agent.geoflow import OPERATOR_SYNONYMS, normalize_and_validate_graph
+
+    graph = {
+        "graph": [
+            {
+                "id": "where",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["X", "Y", "Z"], "anchor": "X"},
+                "role": "extent",
+            },
+            {
+                "id": "a",
+                "operator": "haversine_distance",
+                "arguments": {"place_a": "$where.0.place", "place_b": "$where.1.place"},
+                "depends_on": ["where"],
+                "role": "condition",
+            },
+            {
+                "id": "b",
+                "operator": "haversine_distance",
+                "arguments": {"place_a": "$where.0.place", "place_b": "$where.2.place"},
+                "depends_on": ["where"],
+                "role": "condition",
+            },
+            {
+                "id": "gap",
+                "operator": "calculate_difference",
+                "arguments": {"a": "$a", "b": "$b"},
+                "depends_on": ["a", "b"],
+                "role": "measure",
+            },
+        ]
+    }
+    steps, _ = normalize_and_validate_graph(graph, max_steps=10)
+    assert steps[-1]["operator"] == "difference"
+    assert "select_second_closest" not in OPERATOR_SYNONYMS
+
+
+def test_the_required_argument_check_accepts_every_spelling_the_operator_does() -> None:
+    """A plan the executor would have run must not be refused for how it spelled a slot.
+
+    `sum_amounts(items=[...])` is what the planner wrote in `seoul_kmapeval_v7h_052`, and the
+    canonical name is `amounts`. The same defect was already sitting under `select_min`, whose
+    contract required a `key` the implementation defaults and an `items` the implementation
+    accepts as `values`, `inputs`, `list` or `candidates`.
+    """
+
+    from src.agent.geoflow import normalize_and_validate_graph
+
+    def measure(operator: str, arguments: dict) -> dict:
+        return {
+            "graph": [
+                {
+                    "id": "where",
+                    "operator": "batch_geocode",
+                    "arguments": {"place_names": ["X", "Y"], "anchor": "X"},
+                    "role": "extent",
+                },
+                {
+                    "id": "m",
+                    "operator": operator,
+                    "arguments": arguments,
+                    "depends_on": ["where"],
+                    "role": "measure",
+                },
+            ]
+        }
+
+    for operator, arguments in (
+        ("sum_amounts", {"items": [1, 2]}),
+        ("sum_amounts", {"legs": [1, 2]}),
+        ("select_min", {"values": [3, 1]}),
+        ("select_by_index", {"candidates": [1, 2], "i": 1}),
+        ("difference", {"a": 5, "b": 2}),
+    ):
+        steps, _ = normalize_and_validate_graph(measure(operator, arguments), max_steps=5)
+        assert steps[-1]["operator"] in {operator, "difference"}
+
+    ops = SpatialOperatorRegistry()
+    assert ops.invoke("sum_amounts", {"items": [1, 2]})["total"] == 3.0
+    assert ops.invoke("select_min", {"values": [3, 1]})["value"] == 1
+
+
+def test_a_ranking_without_a_named_key_ranks_by_the_measurement_it_was_given() -> None:
+    """Relaxing the contract must not turn a repairable plan into an executed failure.
+
+    `select_max`'s contract used to require a `key` the implementation defaults, so a plan that
+    omitted it was refused at validation and went to the repair round. Now that the required
+    check accepts what the implementation accepts, the implementation has to actually handle the
+    omission -- otherwise the same plan reaches execution and dies there instead, which is worse.
+    Forty-five calls across `logs/` rank measured distances with no key spelled out.
+    """
+
+    ops = SpatialOperatorRegistry()
+    measured = [{"distance_m": 900.0}, {"distance_m": 2400.0}, {"distance_m": 1500.0}]
+    assert ops.invoke("select_max", {"items": measured})["distance_m"] == 2400.0
+    assert ops.invoke("select_min", {"items": measured})["distance_m"] == 900.0
+    # An explicit key still wins over the inferred one.
+    rated = [{"distance_m": 900.0, "rating": 4.8}, {"distance_m": 2400.0, "rating": 2.1}]
+    assert ops.invoke("select_max", {"items": rated, "key": "rating"})["rating"] == 4.8
+
+
+def test_a_minimum_asked_for_by_index_is_an_ordinal_not_a_minimum() -> None:
+    """Both `seoul_kmapeval_v7h_001` and `_010` wrote `select_min(items=..., index=1)`.
+
+    The old contract refused those for a missing `key`, which sent them to the repair round.
+    Accepting them without honouring `index` would be worse than either: the plan would run and
+    return the *nearest* candidate for a question asking which is second nearest, and a wrong
+    answer given confidently is not a failure anybody can see.
+    """
+
+    from src.agent.geoflow import normalize_and_validate_graph
+
+    graph = {
+        "graph": [
+            {
+                "id": "geo",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["anchor", "A", "B"], "anchor": "anchor"},
+                "role": "extent",
+            },
+            {
+                "id": "ranked",
+                "operator": "nearest",
+                "arguments": {"anchor": "$geo.0.place", "candidates": "$geo"},
+                "depends_on": ["geo"],
+                "role": "support",
+            },
+            {
+                "id": "final_selection",
+                "operator": "select_min",
+                "arguments": {"items": "$ranked.candidates", "index": 1},
+                "depends_on": ["ranked"],
+                "role": "measure",
+            },
+        ]
+    }
+    steps, _ = normalize_and_validate_graph(graph, max_steps=10)
+    assert steps[-1]["operator"] == "select_by_index"
+    assert steps[-1]["arguments"]["index"] == 1
+
+    ops = SpatialOperatorRegistry()
+    ranked = [{"distance_m": 300.0}, {"distance_m": 600.0}, {"distance_m": 900.0}]
+    assert ops.invoke("select_by_index", {"items": ranked, "index": 1})["distance_m"] == 600.0

@@ -1672,3 +1672,48 @@ fixed: changing it means rebuilding v7.
 One new failure appeared, `llm_context_overflow` on one question of fifty-four. Retrieving a
 neighbourhood puts more evidence in the graph and therefore in later prompts. One in fifty-four is
 worth watching rather than acting on, but it is the first overflow any of these runs has produced.
+
+### (b) Raising retrieval adoption changed the mechanism and not the number
+
+Three passes of the same eighteen v7 ordinal questions, three times, one change each:
+
+| | offered the template | retrieved | accuracy | spread | failures |
+| --- | --- | --- | --- | --- | --- |
+| `c393db5` template only | 40/54 | 13/54 | 79.6% | 11.1 | 1 overflow |
+| + both intents, + supersedes | **54/54** | **33/54** | 74.1% | 11.1 | **6** (5 overflow) |
+| + retrieval depth 15 | 54/54 | 30/54 | 75.9% | 5.6 | **0** |
+
+Every one of those accuracies is inside the others' spread. **Raising retrieval adoption from 13
+to 30 of 54 produced no measurable accuracy change.**
+
+What it did produce, at first, was a new failure mode. Forty-five place records travel from
+`nearby_places` through `nearest` into every later prompt: the median question reached 27k prompt
+tokens against a 65,536 window and five of fifty-four died of `llm_context_overflow` — not
+answered badly, not allowed to finish. The template's example asked for 45 because that is the
+tool's maximum, and the planner then wrote 100 in fourteen plans. Asking for 15 — k plus margin,
+which is what an ordinal needs — took the median to 23k and the failures to zero, and the planner
+copies the number: 27 of 30 retrievals now ask for 15. The worst single prompt is still 68k, so
+the risk is reduced rather than removed.
+
+Two mechanisms were worth fixing on their own evidence, independent of the accuracy:
+
+- The Analysis stage labelled 14 of these 54 questions `poi` and the rest `nearby`, and the
+  template was gated on `nearby` alone, so those 14 were handed `Geocode-Batch-Compare` — which
+  spans four intents and shows the option-ranking shape. A template gated on one intent label is
+  gated on that stage guessing right.
+- Of the 40 that *were* offered it, 27 still built `Geocode-Batch-Compare`'s shape, because it sat
+  beside it as the second example. A worked example that answers a different question is worse
+  than no second example. Templates now name what they supersede for a question shape, and
+  suppression runs only downward from the winner, so a superlative question keeps
+  `Geocode-Batch-Compare` in front where it belongs.
+
+Prose was not the lever, and it is worth recording why. `GRAPH_PROMPT` already said, in as many
+words, "four named options are not a candidate set, they are answer texts, and geocoding them and
+taking the nearest answers 'which of these is closest' instead of the question asked" — and 41 of
+53 plans geocoded the options anyway. What moved behaviour both times was the worked example the
+retrieval stage hands over, not the paragraph above it.
+
+**Why the number did not move is the finding.** The family is answerable from the option list
+alone often enough — 56.2% by construction on v7's eight `nearby_kth_nearest` rows — that
+retrieving cannot show an advantage over not retrieving. That is a defect in the benchmark, not in
+the agent, and it is what (c) addresses.

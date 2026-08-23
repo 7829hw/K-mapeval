@@ -473,8 +473,8 @@ TEMPLATES = {
         # another for a question shape, the loser is dropped rather than offered beside it.
         "supersedes": ("geocode_compare",),
         "pattern": (
-            "nearby_places(center, category/keyword) -> nearest -> select_by_index(k-1) -> "
-            "match_options"
+            "nearby_places(center, category/keyword, limit≈15) -> nearest -> select_by_index(k-1) "
+            "-> match_options"
         ),
         "example": {
             "graph": [
@@ -492,7 +492,14 @@ TEMPLATES = {
                     "arguments": {
                         "center": "$anchor.0.place",
                         "query": "편의점",
-                        "limit": 45,
+                        # Retrieve as deep as the ordinal needs, not as deep as the tool allows.
+                        # The example asked for 45 and the planner then wrote 100 (clamped to 45)
+                        # in fourteen plans: 45 place records travel through `nearest` into every
+                        # later prompt, which pushed the median question to 27k tokens and the
+                        # worst to 68k against a 65,536 window -- five of fifty-four questions
+                        # died of `llm_context_overflow` rather than of anything they got wrong.
+                        # A k-th nearest question needs k plus margin.
+                        "limit": 15,
                     },
                     "depends_on": ["anchor"],
                     "output_type": "object",

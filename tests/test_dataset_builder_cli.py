@@ -148,3 +148,21 @@ def test_relabelling_the_tuned_set_is_still_refused(tmp_path: Path) -> None:
             canonical_out=tmp_path / "fake.jsonl",
             argv=["--seed", "999", "--id-prefix", "held-out"],
         )
+
+
+def test_the_standard_builder_draws_the_families_the_baseline_can_finish() -> None:
+    """v7's method is the standard, and the reason is a step budget, not a preference.
+
+    v6's `trip_optimal_order_four` and `trip_total_distance_four` need about twenty one-leg
+    `Directions` calls against langchain's fifteen iterations, so under `--react-tools reference`
+    they measure the budget. A three-pass ablation at a budget of 30 took the first from 2/24 to
+    21/24. Three stops is what v5 measured and what discriminated. This is one import line away
+    from silently reverting, so it is pinned.
+    """
+
+    import build_kmapeval_dataset
+
+    names = {name for name, _, _ in build_kmapeval_dataset.FAMILIES}
+    assert {"trip_optimal_order", "trip_total_distance"} <= names
+    assert not {"trip_optimal_order_four", "trip_total_distance_four"} & names
+    assert sum(quota for *_, quota in build_kmapeval_dataset.FAMILIES) == 100

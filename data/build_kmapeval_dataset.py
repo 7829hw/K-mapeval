@@ -1,11 +1,11 @@
-"""The standard K-MapEval dataset builder: v6's families, any size, a fresh draw every run.
+"""The standard K-MapEval dataset builder: v7's families, any size, a fresh draw every run.
 
-v6's generation method is the one this project settled on, and v7 is that method with its two
-four-stop trip families walked back to three so the reference baseline can finish them inside
-fifteen iterations. Those two builders exist to reproduce two specific benchmarks of record, and
-they default to the seed that reproduces them. This one is for building *new* sets: it takes the
-question count directly and draws its seed from the clock, so two runs are two samples rather than
-the same hundred questions twice.
+v7's generation method is the one this project settled on. It is v6's twelve families unchanged
+plus v6's two trip families walked back from four stops to three, because at four stops the
+reference baseline runs out of iterations before it can finish one. `build_mapeval_v6/v7_...py`
+exist to reproduce two specific benchmarks of record and default to the seed that reproduces them.
+This one is for building *new* sets: it takes the question count directly and draws its seed from
+the clock, so two runs are two samples rather than the same hundred questions twice.
 
     python data/build_kmapeval_dataset.py --count 200
     python data/build_kmapeval_dataset.py --count 50 --out dataset/pilot.jsonl
@@ -18,26 +18,29 @@ the default filename so a draw worth keeping can be drawn again.
 Run `python data/audit_dataset.py <out>` afterwards. It exits non-zero on a second answer key, and
 every one of the defects it looks for has shipped in a benchmark here before it existed.
 
-**Know what v6's families cost the baseline.** Two of them -- `trip_optimal_order_four` and
-`trip_total_distance_four` -- need about twenty one-leg `Directions` calls, against langchain's
-fifteen iterations. Over four passes at that budget ReAct scored 14/60 on them and 24 of those 60
-rows ended on `iteration_limit`. A three-pass ablation at a budget of 30 clears every
-`iteration_limit` and takes `trip_optimal_order_four` from 2/24 to 21/24 -- but leaves
-`trip_total_distance_four` at 5/21, so only one of the two is a budget story. Either way those
-rows measure something other than the agent, which is why v7 exists and why
-`docs/REFERENCE_MAPPING.md` quotes v7 instead of v6. A set built here inherits them. To draw v6's
-method without them, use `data/build_mapeval_v7_benchmark.py`, which is the same families with
-those two walked back to three stops; it now takes `--count` and a clock seed as well.
+**Why three stops and not four.** Under `--react-tools reference`, `Directions` answers one leg per
+call and the loop takes one action per iteration, so a four-stop round trip needs about twenty
+calls against langchain's fifteen. Over four passes at that budget ReAct scored 14/60 on v6's two
+four-stop families with 24 of those 60 rows stopped by `iteration_limit`. A three-pass ablation at
+a budget of 30 clears every `iteration_limit` and takes `trip_optimal_order_four` from 2/24 to
+21/24 -- so that family was measuring the budget. It also moved Spatial-Agent, because
+`MAX_REASONING_STEPS` bounds planner nodes too, which is why raising the budget is not the repair
+and shrinking the family is. (`trip_total_distance_four` did not move at either budget: it fails on
+arithmetic, not iterations. Three stops is what v5 measured it at, and there it discriminated.)
 """
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
-from benchmark_core import Builder
-from build_mapeval_benchmark import Pool, finalize
-from build_mapeval_v6_benchmark import FAMILIES, SEED, V6_ORDERED_FAMILIES
-from builder_cli import run_builder
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from benchmark_core import Builder  # noqa: E402
+from build_mapeval_benchmark import Pool, finalize  # noqa: E402
+from build_mapeval_v6_benchmark import V6_ORDERED_FAMILIES  # noqa: E402
+from build_mapeval_v7_benchmark import FAMILIES, SEED  # noqa: E402
+from builder_cli import run_builder  # noqa: E402
 
 OUT_PATH = Path(__file__).resolve().parents[1] / "dataset" / "kmapeval_dataset.jsonl"
 
@@ -49,7 +52,7 @@ def main() -> None:
         make_pool=Pool,
         finalize=finalize,
         ordered=V6_ORDERED_FAMILIES,
-        # v6's own seed, so that asking this builder for a hundred questions on that seed still
+        # v7's own seed, so that asking this builder for a hundred questions on that seed still
         # refuses to relabel the tuned set under another id prefix.
         canonical_seed=SEED,
         canonical_prefix="kmapeval",

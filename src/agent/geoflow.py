@@ -461,8 +461,17 @@ TEMPLATES = {
     # what the planner then did.
     "ordinal_nearby": {
         "name": "Retrieve-Rank-Ordinal",
-        "intents": {"nearby"},
+        # The Analysis stage labels these questions `nearby` about three times in four and `poi`
+        # the rest of the time, and the fourteen it called `poi` were offered
+        # `Geocode-Batch-Compare` instead -- which spans four intents and shows the option-ranking
+        # shape. A template gated on one intent label is gated on that stage guessing right.
+        "intents": {"nearby", "poi"},
         "keywords": ("번째", "가까운", "nearest", "second", "third"),
+        # An example that answers a different question is worse than no second example: the
+        # planner copies whichever shape it recognises, and 27 of the 40 plans that were offered
+        # this template still built `Geocode-Batch-Compare`'s. Where one pattern supersedes
+        # another for a question shape, the loser is dropped rather than offered beside it.
+        "supersedes": ("geocode_compare",),
         "pattern": (
             "nearby_places(center, category/keyword) -> nearest -> select_by_index(k-1) -> "
             "match_options"
@@ -736,9 +745,19 @@ def retrieve_templates(intent: str, question: str, *, limit: int = 2) -> list[di
         if score:
             ranked.append((score, key, template))
     ranked.sort(key=lambda item: (-item[0], item[1]))
+    chosen: list[dict[str, Any]] = []
+    blocked: set[str] = set()
+    for _, key, template in ranked:
+        if key in blocked:
+            continue
+        chosen.append(template)
+        # Only a template that already outranked it can supersede one, since `ranked` is sorted.
+        blocked |= set(template.get("supersedes", ()))
+        if len(chosen) >= limit:
+            break
     return [
         {"name": template["name"], "pattern": template["pattern"], "example": template["example"]}
-        for _, _, template in ranked[:limit]
+        for template in chosen
     ]
 
 

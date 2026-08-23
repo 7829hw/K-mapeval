@@ -2940,3 +2940,41 @@ def test_the_ordinal_nearby_chain_lands_on_the_option_the_ranking_names() -> Non
         },
     )
     assert matched["best_option"] == 3
+
+
+def test_the_ordinal_template_is_offered_whichever_intent_the_analysis_guessed() -> None:
+    """Gating a template on one intent label gates it on the Analysis stage guessing right.
+
+    Of 54 ordinal questions the stage called 14 of them `poi` and the rest `nearby`, and the 14
+    were handed `Geocode-Batch-Compare` instead -- which spans four intents and shows exactly the
+    option-ranking shape the ordinal question must not use.
+    """
+
+    from src.agent.geoflow import retrieve_templates
+
+    for intent in ("nearby", "poi"):
+        names = [t["name"] for t in retrieve_templates(intent, "여기서 세 번째로 가까운 내과는?")]
+        assert names[0] == "Retrieve-Rank-Ordinal", intent
+
+
+def test_a_superseded_template_is_not_offered_beside_the_one_that_beat_it() -> None:
+    """A worked example that answers a different question is worse than no second example.
+
+    27 of the 40 plans that were offered the ordinal template still built
+    `Geocode-Batch-Compare`'s shape -- geocode the four options, take the nearest -- because it
+    was sitting right there beside it. Suppression only runs downward: on a superlative question
+    `Geocode-Batch-Compare` wins and keeps its place.
+    """
+
+    from src.agent.geoflow import retrieve_templates
+
+    ordinal = [t["name"] for t in retrieve_templates("nearby", "두 번째로 가까운 편의점은?")]
+    assert "Geocode-Batch-Compare" not in ordinal
+
+    superlative = [t["name"] for t in retrieve_templates("nearby", "가장 가까운 편의점은?")]
+    assert superlative[0] == "Geocode-Batch-Compare"
+    assert "Retrieve-Rank-Ordinal" in superlative
+
+    # A question neither template is about keeps whatever it had.
+    radius = [t["name"] for t in retrieve_templates("nearby", "반경 500m 이내에 약국은 몇 곳?")]
+    assert radius[0] == "Filter-Aggregate-Measure"

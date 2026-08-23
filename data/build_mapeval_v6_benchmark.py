@@ -101,6 +101,8 @@ RADII = (300, 500, 800)
 # Both the pool's coordinates and round-trip name resolution move a place by tens of metres, so a
 # place within this band of the boundary is not reliably on either side of it.
 BOUNDARY_MARGIN_M = 70.0
+# How many anchors the radius-count family may resolve while hunting for an uncovered rung.
+RADIUS_SCAN_LIMIT = 24
 
 
 # ------------------------------------------------------------------ nearby
@@ -290,16 +292,28 @@ def nearby_within_radius_count(
     rng.shuffle(anchors)
     codes = ["BK9", "PM9", "CE7", "CS2"]
     produced_counts: dict[int, int] = {1: 0, 2: 0, 3: 0, 4: 0}
-    made: list[dict] = []
+    made: list[tuple[int, dict]] = []
     used: set[str] = set()
+    scanned = 0
+    # Coverage cannot be left to the draw. Picking the least-used rung only spreads the rungs the
+    # first `count` anchors happen to offer, and under holdout seed 927451 three of them sat in
+    # blocks dense enough that `outside` came back empty -- which leaves "네 곳" the only feasible
+    # rung, since 1 through 3 each need a place beyond the radius and 4 needs none. The draw
+    # shipped a four-rung ladder that could only ever answer three of them, and
+    # `audit_dataset.py` failed it. So keep scanning anchors past `count` while a rung is still
+    # uncovered, and select for coverage afterwards.
     for index, anchor in enumerate(anchors):
-        if len(made) >= count:
+        covered = {rung for rung, _ in made}
+        if len(made) >= count and len(covered) >= min(count, 4):
+            break
+        if scanned >= RADIUS_SCAN_LIMIT:
             break
         if anchor.place_id in used:
             continue
         resolved = builder.as_resolved(anchor)
         if resolved is None:
             continue
+        scanned += 1
         code = _rotate(codes, index)
         radius = RADII[index % len(RADII)]
         try:
@@ -345,29 +359,41 @@ def nearby_within_radius_count(
             continue
         rng.shuffle(listed)
         produced_counts[wanted_inside] += 1
-        made.append(
-            {
-                "question": (
-                    f"{anchor.name}에서 반경 {radius}m 이내에 있는 {NOUNS[code]}은 아래 목록 중 "
-                    f"몇 곳인가요? ({', '.join(place.name for place in listed)})"
-                ),
-                "options": ["한 곳", "두 곳", "세 곳", "네 곳"],
-                "answer": wanted_inside - 1,
-                "classification": "radius",
-                "mapeval_class": "nearby",
-                "template_id": "nearby_within_radius_count",
-                "gold_evidence": {
-                    "anchor": anchor.name,
-                    "category_code": code,
-                    "radius_m": radius,
-                    "listed": [place.name for place in listed],
-                    "listed_m": [round(distance_m(resolved, place)) for place in listed],
-                    "inside": wanted_inside,
-                },
-            }
-        )
+        row = {
+            "question": (
+                f"{anchor.name}에서 반경 {radius}m 이내에 있는 {NOUNS[code]}은 아래 목록 중 "
+                f"몇 곳인가요? ({', '.join(place.name for place in listed)})"
+            ),
+            "options": ["한 곳", "두 곳", "세 곳", "네 곳"],
+            "answer": wanted_inside - 1,
+            "classification": "radius",
+            "mapeval_class": "nearby",
+            "template_id": "nearby_within_radius_count",
+            "gold_evidence": {
+                "anchor": anchor.name,
+                "category_code": code,
+                "radius_m": radius,
+                "listed": [place.name for place in listed],
+                "listed_m": [round(distance_m(resolved, place)) for place in listed],
+                "inside": wanted_inside,
+            },
+        }
+        made.append((wanted_inside, row))
         used.add(anchor.place_id)
-    return made
+
+    # One row per distinct rung first, then fill the remaining slots in draw order.
+    selected: list[dict] = []
+    seen: set[int] = set()
+    for rung, row in made:
+        if rung not in seen:
+            seen.add(rung)
+            selected.append(row)
+    for _, row in made:
+        if len(selected) >= count:
+            break
+        if row not in selected:
+            selected.append(row)
+    return selected[:count]
 
 
 # --------------------------------------------------------------------- poi

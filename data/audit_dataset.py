@@ -40,6 +40,8 @@ MIN_ROWS_FOR_POSITION = 6
 # unused rung is a property of the generator, not of the draw, and four rows are enough to see it.
 # v5's `nearby_within_radius` had exactly four rows and drew its count from three values.
 MIN_ROWS_FOR_LADDER = 4
+# How lopsided a drawn parameter may be before it is not being drawn.
+CONCENTRATION = 0.7
 
 # ... and this many parsed numeric option sets before a constant gold rank is a finding.
 MIN_ROWS_FOR_RANK = 5
@@ -117,6 +119,28 @@ def audit(path: Path) -> list[str]:
                         f"over {len(family_rows)} rows {unused} is never the answer -- a rung "
                         "that cannot be reached is not a choice"
                     )
+
+        # A parameter the family varies has to actually vary. `nearby_kth_nearest` keyed its
+        # ordinal on the anchor loop index -- `kth = 2 + (index % 3)` -- and produced k=2 on
+        # seven of its eight rows, which is the same defect as an unreachable rung except that
+        # no option ever prints k, so nothing that reads the options could see it. The gold
+        # evidence can. A family drawing k uniformly from three values lands 7 of 8 on one of
+        # them about once in three hundred draws, so the threshold is not tight on a fair draw.
+        drawn = [
+            row.get("gold_evidence", {}).get("k")
+            for row in family_rows
+            if isinstance(row.get("gold_evidence"), dict)
+        ]
+        drawn = [value for value in drawn if isinstance(value, int)]
+        if len(drawn) >= MIN_ROWS_FOR_LADDER and len(set(drawn)) > 1:
+            spread = Counter(drawn)
+            value, seen = spread.most_common(1)[0]
+            if seen / len(drawn) > CONCENTRATION:
+                findings.append(
+                    f"{family}: k varies across {sorted(spread)} but {seen} of {len(drawn)} rows "
+                    f"ask for k={value} -- a drawn parameter spent wherever the loop happened to "
+                    "succeed is not drawn"
+                )
 
         ranks: Counter[int] = Counter()
         for row in family_rows:

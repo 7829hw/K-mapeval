@@ -1717,3 +1717,39 @@ retrieval stage hands over, not the paragraph above it.
 alone often enough — 56.2% by construction on v7's eight `nearby_kth_nearest` rows — that
 retrieving cannot show an advantage over not retrieving. That is a defect in the benchmark, not in
 the agent, and it is what (c) addresses.
+
+### (c) The ordinal was indexed, not drawn — and the gate could not see it
+
+Both ordinal families keyed k on the anchor loop index: `kth = 2 + (index % 3)` for
+`nearby_kth_nearest` and `2 + (index % 2)` for `nearby_subtype_kth`. Over v5, v6, v7, v7h and v7h2
+that produced **k=2 on seven of eight rows** every time, which is the same defect `AGENTS.md`
+already names for rung ladders — "keying the answer on a loop index spends them wherever the loop
+happened to succeed" — except that no option ever prints k, so nothing that reads the options
+could see it.
+
+It matters because ranking the four options against each other, which is what the agent does when
+it does not retrieve, answers a k-th question whenever all k−1 nearer places are among the three
+decoys: `C(m−k, 4−k) / C(m−1, 3)`, or 60% at k=2, 30% at k=3, 10% at k=4. A family that is 56%
+answerable without a map cannot show whether an agent used one — which is exactly why (b)'s
+adoption gains had nowhere to appear.
+
+Least-used-first alone did not fix it, and measuring said why: under the 90 m ordinal margin,
+**six of one draw's eight anchors were separable at k=2 only**, because ranks three through five of
+a dense neighbourhood sit within 90 m of each other. There was nothing to choose. The family now
+keeps scanning anchors while a value is short, bounded by `ORDINAL_SCAN_LIMIT`, and fills equal
+quotas at the end with the remainder going to k=2 — the value the city can always supply.
+
+Rebuilt under the same seed: `nearby_kth_nearest` goes from `{2: 7, 3: 1}` to `{2: 4, 3: 2, 4: 2}`
+and its option-only ceiling from **56.2% to 40.0%**; `nearby_subtype_kth` from `{2: 10}` to
+`{2: 5, 3: 5}`. `subtype_counts` was incremented at the point k was chosen rather than the point a
+row was made, so rows that failed their trap or resolvability checks still spent a value; it now
+increments on the success path.
+
+`data/audit_dataset.py` grew the check that would have caught this: for a family whose
+`gold_evidence` carries `k`, more than 70% of rows on one value while the family varies it at all
+is a drawn parameter that is not being drawn. A fair draw over three values lands 7 of 8 on one of
+them about once in three hundred times, so the threshold is not tight. It fires on v5, v6, v7, v7h
+and v7h2 as built, and on nothing else.
+
+The datasets on disk are unchanged — this changes what the builder draws next, which is the third
+holdout.

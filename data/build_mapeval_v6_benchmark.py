@@ -103,6 +103,8 @@ RADII = (300, 500, 800)
 BOUNDARY_MARGIN_M = 70.0
 # How many anchors the radius-count family may resolve while hunting for an uncovered rung.
 RADIUS_SCAN_LIMIT = 24
+# How many anchors the k-th nearest family may build while hunting for a scarce ordinal.
+ORDINAL_SCAN_LIMIT = 24
 
 
 # ------------------------------------------------------------------ nearby
@@ -122,10 +124,18 @@ def nearby_kth_nearest(
     anchors = pool.of("AT4", "CT1", "SW8", "AD5")
     rng.shuffle(anchors)
     codes = ["CE7", "BK9", "PM9", "CS2"]
-    made: list[dict] = []
+    produced_counts: dict[int, int] = {2: 0, 3: 0, 4: 0}
+    made: list[tuple[int, dict]] = []
     used: set[str] = set()
     for index, anchor in enumerate(anchors):
-        if len(made) >= count:
+        # Least-used-first only spreads k across what the anchors in hand can offer, and they
+        # cannot offer much: under a 90 m ordinal margin six of one draw's eight anchors were
+        # separable at k=2 only, because ranks three through five of a dense neighbourhood sit
+        # within 90 m of each other. So keep scanning while a value is still short, and pick the
+        # rows at the end.
+        if len(made) >= count and min(produced_counts.values()) >= count // 4:
+            break
+        if len(made) >= ORDINAL_SCAN_LIMIT:
             break
         if anchor.place_id in used:
             continue
@@ -143,20 +153,35 @@ def nearby_kth_nearest(
             ]
         except Exception:  # noqa: BLE001 - an empty neighbourhood is simply not usable
             continue
-        kth = 2 + (index % 3)
-        if len(found) < kth + 2:
-            continue
         ranked = sorted(found, key=lambda place: distance_m(resolved, place))[:6]
+
         # Only the ranks the ordinal depends on have to be separable: ranks 1..k decide which
         # place is k-th, and rank k+1 has to stay behind it. Demanding the margin between every
         # one of six neighbours -- and that all six round-trip -- produced 0 rows in 8 over 5,889
         # Kakao calls, because a dense city puts four cafes 30 m apart.
-        gaps = [
-            distance_m(resolved, ranked[position + 1]) - distance_m(resolved, ranked[position])
-            for position in range(min(kth, len(ranked) - 1))
-        ]
-        if not gaps or min(gaps) < ORDINAL_MARGIN_M:
+        feasible: list[int] = []
+        for candidate_k in (2, 3, 4):
+            if len(found) < candidate_k + 2:
+                continue
+            gaps = [
+                distance_m(resolved, ranked[position + 1])
+                - distance_m(resolved, ranked[position])
+                for position in range(min(candidate_k, len(ranked) - 1))
+            ]
+            if gaps and min(gaps) >= ORDINAL_MARGIN_M:
+                feasible.append(candidate_k)
+
+        # `kth = 2 + (index % 3)` keyed the ordinal on the anchor loop index, so k was spent
+        # wherever the loop happened to succeed rather than across its three values: seven of
+        # v7's eight rows came out k=2. That matters because ranking the four options against
+        # each other -- which is what the agent does when it does not retrieve -- answers a k-th
+        # question whenever all k-1 nearer places happen to be among the three decoys, and that
+        # is C(m-k, 4-k) / C(m-1, 3): 60% at k=2, 30% at k=3, 10% at k=4. A family that is 56%
+        # answerable without retrieving cannot show whether an agent retrieved. Spend k the way
+        # `trip_feasible_count` spends its rungs instead.
+        if not feasible:
             continue
+        kth = min(feasible, key=lambda k: (produced_counts[k], k))
         gold = ranked[kth - 1]
         decoys = rng.sample([place for place in ranked if place is not gold], 3)
         options = [gold, *decoys]
@@ -167,27 +192,44 @@ def nearby_kth_nearest(
         # neighbour that never reaches the page costs nothing.
         if len(take_resolvable(builder, options, 4)) < 4:
             continue
-        made.append(
-            {
-                "question": (
-                    f"{anchor.name}에서 {ORDINALS[kth]}로 가까운 {NOUNS[code]}은 "
-                    "다음 중 어디인가요?"
-                ),
-                "options": [place.name for place in options],
-                "answer": 0,
-                "classification": "nearby",
-                "mapeval_class": "nearby",
-                "template_id": "nearby_kth_nearest",
-                "gold_evidence": {
-                    "anchor": anchor.name,
-                    "category_code": code,
-                    "k": kth,
-                    "ranked_m": [round(distance_m(resolved, place)) for place in ranked],
-                },
-            }
-        )
+        row = {
+            "question": (
+                f"{anchor.name}에서 {ORDINALS[kth]}로 가까운 {NOUNS[code]}은 "
+                "다음 중 어디인가요?"
+            ),
+            "options": [place.name for place in options],
+            "answer": 0,
+            "classification": "nearby",
+            "mapeval_class": "nearby",
+            "template_id": "nearby_kth_nearest",
+            "gold_evidence": {
+                "anchor": anchor.name,
+                "category_code": code,
+                "k": kth,
+                "ranked_m": [round(distance_m(resolved, place)) for place in ranked],
+            },
+        }
+        made.append((kth, row))
+        produced_counts[kth] += 1
         used.add(anchor.place_id)
-    return made
+
+    # Spend the rows across the values rather than handing them all to whichever the anchors were
+    # generous with. Quotas are equal, and the remainder goes to k=2 because it is the value the
+    # city can always supply.
+    base, remainder = divmod(count, 3)
+    quota = {2: base + remainder, 3: base, 4: base}
+    selected: list[dict] = []
+    for value in (4, 3, 2):
+        for k, row in made:
+            if k == value and quota[value] > 0 and len(selected) < count:
+                quota[value] -= 1
+                selected.append(row)
+    for _, row in made:
+        if len(selected) >= count:
+            break
+        if row not in selected:
+            selected.append(row)
+    return selected[:count]
 
 
 def nearby_subtype_kth(
@@ -204,6 +246,7 @@ def nearby_subtype_kth(
 
     anchors = pool.of("AT4", "CT1", "SW8", "AD5")
     rng.shuffle(anchors)
+    subtype_counts: dict[int, int] = {2: 0, 3: 0}
     made: list[dict] = []
     used: set[str] = set()
     for index, pooled in enumerate(anchors):
@@ -232,7 +275,10 @@ def nearby_subtype_kth(
         ]
         if min(gaps) < 60:
             continue
-        kth = 2 + (index % 2)
+        # Same defect as the family above: the ordinal was keyed on the anchor loop index.
+        # Both values are always available once the four-deep margin holds, so spend the
+        # least-used one.
+        kth = min((2, 3), key=lambda k: (subtype_counts[k], k))
         gold = wanted[kth - 1]
         others = [place for place in wanted[:4] if place is not gold]
         trap = take_resolvable(
@@ -272,6 +318,7 @@ def nearby_subtype_kth(
                 },
             }
         )
+        subtype_counts[kth] += 1
         used.add(pooled.place_id)
     return made
 

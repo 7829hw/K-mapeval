@@ -1753,3 +1753,51 @@ and v7h2 as built, and on nothing else.
 
 The datasets on disk are unchanged — this changes what the builder draws next, which is the third
 holdout.
+
+### (a) The third holdout
+
+`dataset/seoul_kmapeval_v7h3_holdout_100.jsonl`, the v7 builder under seed 750914: three questions
+in common with v7, one with v7h, none with v7h2. Clean on the first audit including the new k
+check. Built and run at `8797217` — the first set drawn for code that has the arithmetic
+operators, the ordinal template, the retrieval depth, and a drawn ordinal.
+
+| | floor | ReAct (reference) | Spatial-Agent | gap |
+| --- | --- | --- | --- | --- |
+| v7h (`0aabaa9`) | 29.5 | 48.0 | 70.7 | 22.7 |
+| v7h2 (`38566f3`) | 25.5 | 45.7 | 72.3 | 26.7 |
+| **v7h3 (`8797217`)** | 23.5 (25, 22) | **51.0** (49, 50, 54) | **72.0** (72, 74, 70) | **21.0** |
+
+Three independent draws, three architectures' worth of code changes between them, and the gap sits
+at 21–27 against single-agent spreads of 4–8. The floor drifted down as the families got harder;
+`nearby_kth_nearest` is now 0/8 closed-book on both passes.
+
+**The ordinal families moved, and are still not solved.**
+
+| | v7h2 (`38566f3`) | v7h3 (`8797217`) | ReAct on v7h3 |
+| --- | --- | --- | --- |
+| `nearby_kth_nearest` | 25.0% | **50.0%** | 62.5% |
+| `nearby_subtype_kth` | 56.7% | **63.3%** | 43.3% |
+
+The comparison understates it if anything: v7h3's `nearby_kth_nearest` is the harder family, with k
+drawn `{2:5, 3:2, 4:1}` instead of `{2:7, 3:1}` and an option-only ceiling of 46.2% rather than
+56.2%. Spatial-Agent doubled on a family that got harder. It is still **below ReAct** there, which
+is worth saying plainly — the five tools and fifteen iterations answer a k-th nearest question
+better than the graph does, and the graph's advantage on this class comes entirely from the subtype
+variant.
+
+`nearby` remains Spatial-Agent's weakest class (62.4%, against 74.6% distance and 90.9% routing),
+but it is no longer tied with ReAct's: 62.4% against 60.2%.
+
+**Retrieval's tax is now the leading failure mode.** Eight of Spatial-Agent's 300 questions ended
+in `llm_context_overflow` and six of those eight are the two ordinal families — the ones that
+retrieve. The median question is 13,581 prompt tokens and only one call in 300 crossed 65,536, so
+this is a tail, not a norm; but it is a tail the ordinal template created, and at eight questions
+it costs about 2.7 points. Lowering retrieval depth from 45 to 15 reduced this and did not remove
+it. The next move on it is architectural — what the graph carries forward into later prompts —
+rather than another number in a template.
+
+Cost is unchanged in shape: ReAct 2,510 calls for 4.24M tokens at 36.5s a question, Spatial-Agent
+919 calls for 6.42M tokens at 71.1s.
+
+**v7h3 is spent the moment `src/` or `data/` changes again.** As of `8797217` it is the only
+holdout number that belongs to the current code.

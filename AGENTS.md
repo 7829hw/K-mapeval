@@ -124,6 +124,13 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   to three stops, because at four the reference baseline runs out of iterations before it can
   finish one. Built by `data/build_mapeval_v7_benchmark.py`; passes `data/audit_dataset.py`. Shares
   a generator with v6 but only 18 rows: the draws are live and the cache had expired.
+- `dataset/seoul_kmapeval_v7h3_holdout_100.jsonl`: the v7 builder under seed 750914, `v7h3` ids.
+  **Held out** — built and run at `8797217`, the first draw for code carrying the arithmetic
+  operators, the ordinal template and a drawn ordinal. Three passes against a floor of 23.5: ReAct
+  51.0, Spatial-Agent 72.0. This is the only holdout number that belongs to the current code, and
+  it is spent the moment `src/` or `data/` changes again.
+- `dataset/seoul_kmapeval_v7h2_holdout_100.jsonl`: seed 481203. Spent — `src/` changed in response
+  to what it showed. ReAct 45.7, Spatial-Agent 72.3 at `38566f3`, floor 25.5.
 - `dataset/seoul_kmapeval_v7h_holdout_100.jsonl`: the v7 builder under seed 927451, `v7h` ids, one
   question and 30 of 236 place names in common with v7. Held out at `0aabaa9` and measured there
   over three passes against a floor of 29.5 — ReAct 48.0, Spatial-Agent 70.7. **That number is

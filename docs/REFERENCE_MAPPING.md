@@ -1802,42 +1802,59 @@ Cost is unchanged in shape: ReAct 2,510 calls for 4.24M tokens at 36.5s a questi
 **v7h3 is spent the moment `src/` or `data/` changes again.** As of `8797217` it is the only
 holdout number that belongs to the current code.
 
-## Would a bigger step budget fix it? Measured, on a run that already exists
+## Would a bigger step budget fix it? Measured as an ablation, three passes a side
 
 `MAX_REASONING_STEPS` is configurable, so the obvious question about v6's four-stop trip families
-is whether raising it repairs them. The record already answers it: among the v6 ReAct runs on
-`google/gemma-4-E4B-it-qat-w4a16-ct` there are four passes at the default 15 and one at 30.
+is whether raising it repairs them. It was first answered from one existing pass at 30; that pass
+was one draw and it read wrong. Both architectures were then run over v6 three times at each
+budget, at revision `ece22ef`, `--provider kakao`, `--react-tools reference`, temperature 0, on
+`google/gemma-4-E4B-it-qat-w4a16-ct`. **Every number below is an ablation and none of it may be
+pooled with a default-budget run.**
 
-| | four-stop families | overall | `iteration_limit` | LLM calls per pass |
-| --- | --- | --- | --- | --- |
-| budget 15 (4 passes) | 14/60 = **23.3%** | 38.0% (34, 42, 39, 37) | 24 | 849 |
-| budget 30 (1 pass) | 6/15 = **40.0%** | 38.0% (38) | **0** | 849 |
+| | overall mean | passes | four-stop (45 rows) | other 85 rows | `iteration_limit` | LLM calls/pass |
+| --- | --- | --- | --- | --- | --- | --- |
+| ReAct @ 15 | **39.0%** | 40, 39, 38 | 8/45 = 17.8% | 109/255 | 19 | 843 |
+| ReAct @ 30 | **47.3%** | 52, 48, 42 | 26/45 = **57.8%** | 116/255 | **0** | 883 |
+| Spatial-Agent @ 15 | **69.0%** | 67, 71, 69 | 22/45 = 48.9% | 185/255 | 0 | 306 |
+| Spatial-Agent @ 30 | **74.0%** | 73, 78, 71 | 28/45 = 62.2% | 194/255 | 0 | 309 |
 
-**The budget was real, and repairing it changed nothing that matters.** Those two families nearly
-double and every `iteration_limit` disappears, which confirms the budget was what capped them. The
-whole benchmark lands on 38.0% either way, inside the four-pass spread of 34–42, because the
-families are fifteen rows in a hundred and ReAct still answers only 40% of them with twice the
-budget. One pass at 30 is one draw; 6/15 carries a wide interval.
+**The budget is binding, and the one-pass reading of it was wrong.** The earlier entry here said
+the whole benchmark landed on 38.0% either way. Over three passes it does not: ReAct moves 39.0 to
+47.3, and the two budgets' run ranges (38–40 against 42–52) do not overlap. `iteration_limit` goes
+to zero, as the single pass had already shown.
 
-Three reasons it stays at 15 anyway:
+**But the gain lives in one family, not two.** Per family, ReAct's `trip_optimal_order_four` goes
+2/24 to **21/24** while `trip_total_distance_four` does not move at all — 6/21 to 5/21. Nothing
+else on the benchmark shifts by more than three rows in ninety. So the budget was the whole story
+for ordering four stops, and none of the story for summing four legs: that family fails on the
+arithmetic ReAct has to do in prose, and twice the iterations buys it nothing. A family that ends
+on `iteration_limit` is not thereby a family the budget explains.
+
+**Raising it moves both architectures, which is the reason it is not a repair.** Spatial-Agent
+gains too — 69.0 to 74.0, and its own `trip_optimal_order_four` 9/24 to 15/24 — because
+`MAX_REASONING_STEPS` bounds the nodes its planner may author as well as ReAct's loop iterations.
+The architecture gap is 30.0 points at budget 15 and 26.7 at budget 30: it is not an artefact of
+the budget, and the budget does not close it.
+
+Three reasons the default stays at 15 anyway:
 
 - **It is the baseline's configuration, not a tuning knob.** 15 is langchain's own default, which
   is what the reference baseline runs. A larger budget is a stronger-than-paper baseline — a
   labelled ablation whose number cannot be pooled with the default runs or set beside upstream
   Spatial-Agent's 71.07%.
 - **It is one budget, not ReAct's.** The same setting bounds the nodes Spatial-Agent's planner may
-  author, so a run at 30 has moved both architectures at once and is not a controlled comparison
-  of either.
+  author, and the table above shows it moving both architectures at once. A run at 30 is not a
+  controlled comparison of either.
 - **Longer loops crowd the context window.** Each iteration carries another observation into the
   prompt, and the worst prompt in the v7h3 run already reached 68,430 tokens against a 65,536
   window with eight questions lost to `llm_context_overflow`.
 
 Shrinking the family, which is what v7 did, keeps the baseline faithful *and* leaves a family that
-discriminates. Raising the budget keeps a family the paper's configuration cannot run and that a
-doubled budget still answers at 40%.
+discriminates — and it is the better repair for the second reason above: v7 changes what the
+question asks, so it moves neither architecture's budget.
 
-**A correction to this file's own record.** The step-budget invariant said "every row of both ended
-on `iteration_limit` with ReAct scoring 0/15". Pooled over four passes it is 24 of 60 rows and
-14/60 correct. The invariant stands — the budget is most of what that family measures — but
-"unanswerable" came from one early run and overstated it. `AGENTS.md` and
-`data/build_kmapeval_dataset.py` are corrected to match.
+**Two corrections to this file's own record.** The step-budget invariant said "every row of both
+ended on `iteration_limit` with ReAct scoring 0/15"; pooled over four passes it is 24 of 60 rows
+and 14/60 correct. And the one-pass ablation entry said a budget of 30 left the benchmark at 38.0%;
+three passes a side say 39.0 to 47.3, concentrated in one of the two families. `AGENTS.md` and
+`data/build_kmapeval_dataset.py` are corrected to match both.

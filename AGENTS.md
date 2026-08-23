@@ -107,11 +107,13 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
 - A family also has to be answerable *within the step budget*, on the tool contract the baseline
   runs. Count the calls before shipping one: v6's four-stop trip families need about twenty
   one-leg `Directions` calls against langchain's fifteen iterations. Over four passes at that
-  budget ReAct scored 14/60 on them with 24 of those 60 rows stopped by `iteration_limit`; one
-  pass at 30 scored 6/15 with none. The budget is most of what that family measures, though
-  "unanswerable" overstated it. Raising the budget is still the wrong repair: 15 is langchain's
-  default and therefore the baseline's, it is the one budget both architectures answer under, and
-  the same pass moved the whole benchmark 38.0% to 38.0%.
+  budget ReAct scored 14/60 on them with 24 of those 60 rows stopped by `iteration_limit`. A
+  three-pass ablation at budget 30 says the budget binds one of the two families and not the
+  other: `trip_optimal_order_four` goes 2/24 to 21/24, `trip_total_distance_four` 6/21 to 5/21,
+  and ReAct overall 39.0% to 47.3% with no `iteration_limit` left. Raising it is still the wrong
+  repair: 15 is langchain's default and therefore the baseline's, and it is *one* budget — the
+  same pass moved Spatial-Agent 69.0% to 74.0%, so it is not a controlled comparison of either
+  architecture. Shrink the family instead, which is what v7 did.
 - Every rung a question offers has to be reachable *and* reached. A family whose options are a
   fixed ladder must be able to answer each rung, and should spend its rows across them the way
   `trip_feasible_count` does — keying the answer on a loop index spends them wherever the loop

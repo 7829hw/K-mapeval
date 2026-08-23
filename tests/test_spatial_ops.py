@@ -2521,3 +2521,50 @@ def test_the_concept_role_rule_is_skipped_leniently_like_the_node_one() -> None:
         analysis, {"graph": graph}, question, options, "nearby", 15, strict_types=False
     )
     assert [step["id"] for step in steps] == ["all_locations", "distances", "third_nearest"]
+
+
+def test_a_node_that_names_no_operator_is_the_planners_failure_not_a_crash() -> None:
+    """Seen once in 900 questions: `"operator": ["extract_distance", "extract_distance", ...]`.
+
+    Grounding looked that list up in a set of operator names and came back as
+    `TypeError: unhashable type: 'list'` -- a crash in our own file, recorded against the agent as
+    an `agent_reasoning_failure` it had to be read to understand.
+    """
+
+    from src.agent.spatial import _factorize_validate_plan
+
+    analysis = {
+        "intent": "distance",
+        "concepts": [
+            {
+                "id": "anchor",
+                "text": "서울역",
+                "concept_type": "location",
+                "role": "extent",
+                "attributes": {},
+                "depends_on": [],
+            }
+        ],
+        "measure": "distance",
+    }
+    graph = [
+        {
+            "id": "places",
+            "operator": "batch_geocode",
+            "arguments": {"place_names": ["서울역", "경복궁"]},
+            "role": "extent",
+            "concept_ids": ["anchor"],
+        },
+        {
+            "id": "legs",
+            "operator": ["extract_distance", "extract_distance"],
+            "arguments": {"routes": "$places"},
+            "depends_on": ["places"],
+            "role": "measure",
+        },
+    ]
+
+    with pytest.raises(ValueError, match="names no operator"):
+        _factorize_validate_plan(
+            analysis, {"graph": graph}, "서울역에서 경복궁까지?", ["1km", "2km"], "distance", 15
+        )

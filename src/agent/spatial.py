@@ -1113,6 +1113,14 @@ def _ground_graph_literals(
     grounded: list[dict[str, Any]] = []
     for step in steps:
         operator = step.get("operator")
+        if not isinstance(operator, str):
+            # A planner that writes `"operator": ["directions", "travel_time"]` is a planner that
+            # failed to plan, and saying so is the whole fix. Left alone it reached a set lookup as
+            # an unhashable list and came back as `TypeError: unhashable type: 'list'` -- a crash
+            # in this file, recorded against the agent as if it had reasoned its way there.
+            raise ValueError(
+                f"GeoFlow node {step.get('id')!r} names no operator: {operator!r}"
+            )
         arguments = _verbatim_place_names(
             dict(step.get("arguments") or step.get("params") or {}),
             question,

@@ -124,6 +124,12 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   to three stops, because at four the reference baseline runs out of iterations before it can
   finish one. Built by `data/build_mapeval_v7_benchmark.py`; passes `data/audit_dataset.py`. Shares
   a generator with v6 but only 18 rows: the draws are live and the cache had expired.
+- `dataset/seoul_kmapeval_v7h_holdout_100.jsonl`: the v7 builder under seed 927451, `v7h` ids, one
+  question and 30 of 236 place names in common with v7. **Held out** — built at `0aabaa9` and run
+  with nothing under `src/` changed afterwards, so its accuracy is the only one here that is not
+  also a training-set accuracy. Three passes against a floor of 29.5: ReAct 48.0, Spatial-Agent
+  70.7. Keep it that way: if a run on it exposes an agent bug, fix the bug against v7 and rebuild
+  the holdout under another seed before quoting it again.
 - `dataset/seoul_kmapeval_v6_mcq_100.jsonl`: v5's families each raised one step (composition or
   ordinality) and the radius family's word order fixed. Built by
   `data/build_mapeval_v6_benchmark.py`; passes `data/audit_dataset.py`. Measured once (ReAct

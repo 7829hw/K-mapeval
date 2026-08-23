@@ -156,6 +156,14 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
 - `dataset/seoul_mapeval_v1_mcq_100.jsonl`: context/hybrid evidence benchmark.
 - `dataset/seoul_kmapeval_v2_mcq_100.jsonl`: superseded benchmark retained for historical runs.
 
+`data/build_kmapeval_dataset.py` is the standard builder for *new* sets: v6's families, `--count`
+for how many questions, and a clock seed so every run is a fresh draw. The versioned builders
+(`build_mapeval_v5/v6/v7_benchmark.py`) exist to reproduce their benchmarks of record and default
+to the seed that does; v5 and v7 take `--count` and a clock seed too, and refuse to overwrite an
+existing file without `--force`. A set from the standard builder inherits v6's two four-stop trip
+families, which the reference baseline cannot finish inside fifteen iterations — draw from the v7
+builder instead when that matters.
+
 Use `python main.py --help` for current CLI defaults instead of copying them into documentation.
 
 ## Setup and checks

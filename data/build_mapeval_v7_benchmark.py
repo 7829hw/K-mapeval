@@ -29,9 +29,6 @@ generator with v6, not a patched copy of it, and the two runs cannot be compared
 
 from __future__ import annotations
 
-import argparse
-import json
-import random
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -44,6 +41,7 @@ from build_mapeval_v5_benchmark import trip_optimal_order  # noqa: E402
 from build_mapeval_v6_benchmark import FAMILIES as V6_FAMILIES  # noqa: E402
 from build_mapeval_v6_benchmark import SEED as V6_SEED  # noqa: E402
 from build_mapeval_v6_benchmark import V6_ORDERED_FAMILIES  # noqa: E402
+from builder_cli import run_builder  # noqa: E402
 
 # v6's seed on purpose; see the module docstring.
 SEED = V6_SEED
@@ -63,48 +61,16 @@ FAMILIES: list[tuple[str, Callable[..., list[dict]], int]] = [
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--families", nargs="*", default=None)
-    parser.add_argument("--scale", type=float, default=1.0)
-    parser.add_argument("--out", default=str(OUT_PATH))
-    parser.add_argument("--seed", type=int, default=SEED)
-    parser.add_argument("--id-prefix", default="seoul_kmapeval_v7")
-    args = parser.parse_args()
-    if args.id_prefix != "seoul_kmapeval_v7" and args.seed == SEED:
-        raise SystemExit(
-            f"--seed {SEED} is this builder's default, so --id-prefix {args.id_prefix} would "
-            "relabel the tuned set rather than draw a new sample. Pick another seed."
-        )
-
-    builder = Builder.open()
-    pool = Pool()
-    rows: list[dict] = []
-    try:
-        for name, function, quota in FAMILIES:
-            if args.families and name not in args.families:
-                continue
-            wanted = max(1, round(quota * args.scale))
-            rng = random.Random(f"{args.seed}:{name}")
-            produced = function(builder, pool, rng, wanted)
-            print(
-                f"{name}: {len(produced)}/{wanted} (api={builder.provider.api_call_count})",
-                flush=True,
-            )
-            rows.extend(produced)
-    finally:
-        builder.close()
-
-    finished = finalize(
-        rows,
-        seed=args.seed,
-        prefix=args.id_prefix,
+    run_builder(
+        families=FAMILIES,
+        open_builder=Builder.open,
+        make_pool=Pool,
+        finalize=finalize,
         ordered=V6_ORDERED_FAMILIES,
+        canonical_seed=SEED,
+        canonical_prefix="seoul_kmapeval_v7",
+        canonical_out=OUT_PATH,
     )
-    Path(args.out).write_text(
-        "\n".join(json.dumps(row, ensure_ascii=False) for row in finished) + "\n",
-        encoding="utf-8",
-    )
-    print(f"\nwrote {args.out} rows={len(finished)}")
 
 
 if __name__ == "__main__":

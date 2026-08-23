@@ -1386,3 +1386,63 @@ predates most of that code and has never been run on this model. A held-out numb
 v7 builder under a fresh seed and run once with nothing changed afterwards, is the one thing
 missing before any of this is quotable as a general claim rather than a result on these hundred
 questions.
+
+## The held-out hundred
+
+`dataset/seoul_kmapeval_v7h_holdout_100.jsonl`, the v7 builder under seed 927451 with `v7h` ids:
+one question and 30 of 236 place names in common with v7. Built at `0aabaa9`, audited clean, and
+run with nothing under `src/` changed afterwards. Same configuration as the table above —
+`google/gemma-4-E4B-it-qat-w4a16-ct`, `--react-tools reference`, `--provider kakao`, temperature 0,
+`MAX_REASONING_STEPS=15`, `--repeats 3` — at revision `0aabaa9` rather than `49721ca`. The one code
+change between them is `235e51e`, which turns a planner node whose `operator` is a list from a
+crash into a named failure; it affected one question in nine hundred.
+
+| | floor | ReAct (reference) | Spatial-Agent | gap |
+| --- | --- | --- | --- | --- |
+| **v7 (tuned)** | 30 (29, 31) | 43.3 (38, 45, 47) | 68.3 (65, 69, 71) | 25.0 |
+| **v7h (held out)** | 29.5 (29, 30) | **48.0** (52, 45, 47) | **70.7** (66, 73, 73) | 22.7 |
+
+**The holdout reproduces the result, and neither agent was worse on it.** ReAct gains 4.7 points
+and Spatial-Agent 2.4 going from the tuned set to the one nothing was tuned against — both inside
+the seven-point spread each agent shows across its own three passes, so the honest reading is that
+the difference is noise and there is *no measurable training-set advantage* in either direction.
+The gap of 22.7 is again more than three times the widest single-agent spread. The two floors agree
+to within a point, so the holdout is the same difficulty closed-book as the set it was drawn to
+match.
+
+Where the gap lives, summed over three passes each:
+
+| class | rows | ReAct | Spatial-Agent |
+| --- | --- | --- | --- |
+| distance | 63 | 36.5% | **82.5%** |
+| routing | 66 | 40.9% | **86.4%** |
+| radius | 12 | 41.7% | 58.3% |
+| nearby | 93 | 53.8% | 58.1% |
+| trip | 66 | 59.1% | 63.6% |
+
+The whole difference is in the two measurement-heavy classes. On `nearby` and `trip` the two
+architectures are four to five points apart, which is inside the noise; on `distance` and `routing`
+they are forty-five points apart. That is a narrower claim than "Spatial-Agent is better" and a
+more useful one: what the graph buys is *getting a measurement right and carrying it*, not
+reasoning about places in general.
+
+Cost went the other way from what the accuracies suggest. Over three passes ReAct made 2,384 LLM
+calls for 4.05M tokens and averaged 33.9s a question; Spatial-Agent made 924 calls for 5.39M
+tokens and averaged 61.2s. Spatial-Agent asks a third as often, in much larger requests, and takes
+about twice as long.
+
+Failures, over six hundred questions: one ReAct `iteration_limit`, seven Spatial-Agent
+`agent_reasoning_failure`. No truncations and no context overflows on either side. All seven of
+Spatial-Agent's are the planner writing a graph that cannot run — three nodes missing a required
+argument, two invented operator names (`select_by_index`, `select_second_closest`), one 17-operator
+plan against a budget of 15, one incomplete factorization. As on the tuned sets, no role-ordering
+violation survived the lenient pass to end a question.
+
+**Building the holdout found a defect in the builder, not in the seed.** The first draw failed
+`data/audit_dataset.py`: `nearby_within_radius_count` offers a four-rung ladder over four rows and
+picks the least-used rung each time, but it stopped scanning anchors at `count`, so it only spread
+the rungs the first four anchors happened to offer. Three of those anchors sat where `outside` came
+back empty, which leaves "네 곳" the only feasible rung — 1 through 3 each need a place beyond the
+radius and 4 needs none — and the family shipped a ladder whose third rung could never be the
+answer. The generator now keeps scanning while a rung is uncovered. This is the invariant working:
+the audit caught, before any agent ran, exactly the class of defect that used to ship.

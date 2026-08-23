@@ -452,6 +452,73 @@ TEMPLATES = {
             ]
         },
     },
+    # "두 번째로 가까운 편의점" is not "which of these is nearest". The k-th nearest place is the
+    # k-th of the *neighbourhood*, and the options are four names drawn from the top six of it --
+    # so ranking the options against each other answers a different question and lands on the gold
+    # only by luck. Retrieval was the missing step, not the ordinal: across the v7 runs 130 plans
+    # for these two families composed a graph and 4 of them retrieved anything, because
+    # `Geocode-Batch-Compare` outranked everything else on "가까운" and its example does exactly
+    # what the planner then did.
+    "ordinal_nearby": {
+        "name": "Retrieve-Rank-Ordinal",
+        "intents": {"nearby"},
+        "keywords": ("번째", "가까운", "nearest", "second", "third"),
+        "pattern": (
+            "nearby_places(center, category/keyword) -> nearest -> select_by_index(k-1) -> "
+            "match_options"
+        ),
+        "example": {
+            "graph": [
+                {
+                    "id": "anchor",
+                    "operator": "batch_geocode",
+                    "arguments": {"place_names": ["기준 장소"], "limit": 1},
+                    "depends_on": [],
+                    "output_type": "object",
+                    "role": "extent",
+                },
+                {
+                    "id": "neighbourhood",
+                    "operator": "nearby_places",
+                    "arguments": {
+                        "center": "$anchor.0.place",
+                        "query": "편의점",
+                        "limit": 45,
+                    },
+                    "depends_on": ["anchor"],
+                    "output_type": "object",
+                    "role": "support",
+                },
+                {
+                    "id": "ranking",
+                    "operator": "nearest",
+                    "arguments": {
+                        "anchor": "$anchor.0.place",
+                        "candidates": "$neighbourhood",
+                    },
+                    "depends_on": ["neighbourhood"],
+                    "output_type": "object",
+                    "role": "support",
+                },
+                {
+                    "id": "kth",
+                    "operator": "select_by_index",
+                    "arguments": {"items": "$ranking.ranked", "index": 1},
+                    "depends_on": ["ranking"],
+                    "output_type": "object",
+                    "role": "support",
+                },
+                {
+                    "id": "answer",
+                    "operator": "match_options",
+                    "arguments": {"options": ["선택지 0", "선택지 1"], "places": ["$kth"]},
+                    "depends_on": ["kth"],
+                    "output_type": "object",
+                    "role": "measure",
+                },
+            ]
+        },
+    },
     "radius": {
         "name": "Filter-Aggregate-Measure",
         "intents": {"nearby", "radius"},

@@ -1577,3 +1577,56 @@ Only the failure counts, whose causes are code-level, carry across.
 Cost, three passes each: ReAct 2,441 LLM calls for 4.18M tokens at 35.9s a question;
 Spatial-Agent 925 calls for 5.55M tokens at 62.5s — a third the calls, larger ones, about twice
 the wall clock, the same shape as v7h.
+
+## The template catalogue had a shape missing, and it cost the ordinal families
+
+On the second holdout Spatial-Agent scored 25.0% on `nearby_kth_nearest` — six of twenty-four,
+which on four options is chance, and *below* ReAct's 45.8%. The class totals hid it: `nearby` came
+out 55/93 for both architectures, and the profiles underneath are nothing alike.
+
+| nearby template | rows | ReAct | Spatial-Agent |
+| --- | --- | --- | --- |
+| `nearby_kth_nearest` | 24 | 45.8% | **25.0%** |
+| `nearby_subtype_kth` | 30 | 50.0% | 56.7% |
+| `nearby_cuisine_subtype` | 18 | 44.4% | **77.8%** |
+| `unanswerable_*` | 21 | 100% | 85.7% |
+
+The first hypothesis was an off-by-one in the ordinal operator: 0-based `select_by_index` against
+a Korean ordinal that counts from one. It is wrong. Every plan writes the index the project's
+convention wants — `두 번째` → 1, `세 번째` → 2, in all eight questions.
+
+The actual cause is upstream of the operator. `nearby_kth_nearest` draws its gold as rank k of
+everything within 1800 m and its three decoys from ranks 1 through 6, so **the options are a
+subset of the ranking and the nearest place is only sometimes among them**. Ranking the four
+options against each other answers a different question and hits the gold only by luck. Across the
+v7 runs, 130 composed plans for the two ordinal families retrieved a neighbourhood **four times**.
+On the holdout it was zero out of fifty-four.
+
+That is not the planner being careless — it is the template retrieval stage handing it the wrong
+worked example. `retrieve_templates` scores `Geocode-Batch-Compare` at 4 for intent plus 1 for
+"가까운", and its example is literally *geocode the anchor and the option names, then take the
+nearest*. There was no template for an ordinal, so the planner copied the one it was given.
+
+`Retrieve-Rank-Ordinal` fills the shape: `nearby_places(center, category/keyword) -> nearest ->
+select_by_index(k-1) -> match_options`. It outranks `Geocode-Batch-Compare` on an ordinal
+question (intent 4 + "번째" + "가까운" = 6 against 5) and stays behind it on a superlative, where
+the options really are the candidates. Radius questions are untouched. The chain runs end to end
+on `seoul_kmapeval_v7h2_011`'s real coordinates and returns option 3, which is its gold; ranking
+the three named options would have returned it first instead.
+
+**This is a deliberate deviation.** Upstream's Appendix E has ten macro families and this is an
+eleventh, so `test_template_catalog_covers_appendix_e_macro_families` now asserts Appendix E as a
+subset and names the port's own addition separately, rather than letting the catalogue drift
+silently. A template is what the retrieval stage hands the planner as a worked example, so adding
+one changes what every question of that shape gets composed from — it deserves to be visible.
+
+`FakeProvider.nearby_search` returned a single place, which meant no test using it could exercise
+a ranking at all — `select_by_index(index=1)` had nothing to select from. It returns three
+distinct spots now.
+
+**What this does not yet show.** No run has been made against the new template; the evidence is
+that 126 of 130 tuned-set plans composed a graph that cannot answer the question, and that the
+replacement chain returns the right option on real coordinates. Whether it moves the family is a
+measurement, not a claim. And the diagnosis began in the v7h2 class breakdown, so **v7h2 is spent
+too** — 45.7/72.3 belong to `38566f3`. A number for the code with this template needs a third
+draw.

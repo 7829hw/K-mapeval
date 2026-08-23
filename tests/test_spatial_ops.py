@@ -2879,3 +2879,64 @@ def test_a_minimum_asked_for_by_index_is_an_ordinal_not_a_minimum() -> None:
     ops = SpatialOperatorRegistry()
     ranked = [{"distance_m": 300.0}, {"distance_m": 600.0}, {"distance_m": 900.0}]
     assert ops.invoke("select_by_index", {"items": ranked, "index": 1})["distance_m"] == 600.0
+
+
+def test_an_ordinal_nearby_question_retrieves_before_it_ranks() -> None:
+    """The k-th nearest place is the k-th of the neighbourhood, not of the option list.
+
+    `nearby_kth_nearest` draws the gold as rank k of everything within 1800 m and the three
+    decoys from ranks 1 to 6, so the options are a subset of the ranking and the nearest place is
+    only sometimes among them. Ranking the four options against each other therefore answers a
+    different question. Across the v7 runs, 130 composed plans for the two ordinal families
+    retrieved anything four times: `Geocode-Batch-Compare` won on "가까운" and its example is
+    exactly "geocode the anchor and the options, then take the nearest".
+    """
+
+    from src.agent.geoflow import retrieve_templates
+
+    ordinal = retrieve_templates("nearby", "삼성출판박물관에서 두 번째로 가까운 편의점은?")
+    assert ordinal[0]["name"] == "Retrieve-Rank-Ordinal"
+    assert "nearby_places" in ordinal[0]["pattern"]
+
+    # A superlative is not an ordinal: there the options *are* the candidates, and the template
+    # that ranks them stays in front.
+    superlative = retrieve_templates("nearby", "서울역에서 가장 가까운 편의점은 어디인가요?")
+    assert superlative[0]["name"] == "Geocode-Batch-Compare"
+
+    # And a radius question is neither.
+    radius = retrieve_templates("nearby", "서울역 반경 500m 이내에 있는 약국은 몇 곳인가요?")
+    assert radius[0]["name"] == "Filter-Aggregate-Measure"
+
+
+def test_the_ordinal_nearby_chain_lands_on_the_option_the_ranking_names() -> None:
+    """Retrieve, rank, take index k-1, ground it back to an option -- on real numbers.
+
+    These are `seoul_kmapeval_v7h2_011`'s: the second nearest convenience store to 양천문화원 is
+    GS25 목동파크점, which the question offers as option 3. Ranking only the three named options
+    would have put it first.
+    """
+
+    ops = SpatialOperatorRegistry()
+    anchor = {"name": "양천문화원", "latitude": 37.55, "longitude": 126.97}
+    neighbourhood = [
+        {"name": "CU 뉴목동14단지점", "latitude": 37.5505, "longitude": 126.9705},
+        {"name": "GS25 목동파크점", "latitude": 37.5512, "longitude": 126.9712},
+        {"name": "GS25 목동본점", "latitude": 37.5525, "longitude": 126.9725},
+    ]
+    ranking = ops.invoke("nearest", {"anchor": anchor, "candidates": neighbourhood})
+    second = ops.invoke("select_by_index", {"items": ranking["ranked"], "index": 1})
+    assert second["name"] == "GS25 목동파크점"
+
+    matched = ops.invoke(
+        "match_options",
+        {
+            "options": [
+                "주어진 지도 정보로는 알 수 없음",
+                "CU 뉴목동14단지점",
+                "GS25 목동본점",
+                "GS25 목동파크점",
+            ],
+            "places": [second],
+        },
+    )
+    assert matched["best_option"] == 3

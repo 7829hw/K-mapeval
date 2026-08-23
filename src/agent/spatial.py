@@ -132,7 +132,10 @@ Exact operator contracts:
 - select_by_index(items,index,key?,descending?) -> object; the k-th item of a ranked list.
   index is 0-based, so the second closest is index 1 and the third is 2. This is how an
   ordinal question ends — sort_by or nearest first, then this. There is no
-  select_second_* operator and no rank argument
+  select_second_* operator and no rank argument. Rank what the question is about, not the
+  option list: "두 번째로 가까운 편의점" is the second nearest convenience store in the
+  neighbourhood, so retrieve with nearby_places and rank that, then match_options the winner.
+  The options are a subset of the ranking, never the ranking itself
 - sum_amounts(amounts,key?) -> amount; adds measurements several nodes each produced, such
   as two extract_distance legs of a via-route. Route-shaped records total distance_m and
   duration_s together. For per-option route totals use aggregate_route_groups instead

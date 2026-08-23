@@ -84,7 +84,12 @@ class FakeProvider(MapProvider):
     def nearby_search(self, center: str | Place, **kwargs: Any) -> list[Place]:
         self._api_calls += 1
         query = kwargs.get("query")
-        return [self._named(query) if query else self.place]
+        first = self._named(query) if query else self.place
+        # A neighbourhood of one cannot exercise a ranking, and an ordinal question indexes into
+        # one -- `select_by_index(index=1)` has nothing to select from. Two more distinct spots,
+        # so `nearest` has something to order and the ordinal template is actually executed.
+        stem = query or "장소"
+        return [first, self._named(f"{stem} 2"), self._named(f"{stem} 3")]
 
     def place_details(self, place_id: str) -> Place:
         return self._issued.get(place_id, self.place)
@@ -884,7 +889,8 @@ def test_operator_contracts_cover_all_scientific_core_concepts() -> None:
 
 
 def test_template_catalog_covers_appendix_e_macro_families() -> None:
-    assert {template["name"] for template in TEMPLATES.values()} == {
+    names = {template["name"] for template in TEMPLATES.values()}
+    appendix_e = {
         "Filter-Aggregate-Measure",
         "Object-Field-Measure",
         "Route-Optimize",
@@ -896,6 +902,12 @@ def test_template_catalog_covers_appendix_e_macro_families() -> None:
         "Multi-Segment-Aggregate",
         "Time-Window-Reverse",
     }
+    assert appendix_e <= names
+    # This port's own additions, which upstream's Appendix E does not carry. A template is what
+    # the retrieval stage hands the planner as a worked example, so adding one changes what every
+    # question of that shape gets composed from -- keep them named here and in
+    # docs/REFERENCE_MAPPING.md rather than letting the catalogue drift.
+    assert names - appendix_e == {"Retrieve-Rank-Ordinal"}
 
 
 @pytest.mark.parametrize("template_key", sorted(TEMPLATES))

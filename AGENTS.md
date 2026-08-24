@@ -136,6 +136,14 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
 
 ## Benchmarks
 
+- `dataset/seoul_kmapeval_v7b_mcq_300.jsonl`: the standard builder's third 300-question draw; it
+  drew 283. Built and run at `796c683`. Floor 29.5 (24.2 excluding `unanswerable_*`), ReAct 48.5,
+  Spatial-Agent 76.8 over three passes a side — a third draw agreeing the gap sits at 27–30. Also
+  the first draw run after the argument-spelling fix: "missing arguments" refusals fell from ~31
+  per 848 Spatial-Agent runs to 5 per 849, and repair rounds from 76 to 55, with no accuracy
+  change — cost fell, not correctness, which is what a vocabulary fix should do. **Spent**: the
+  run surfaced a second crash (`dict()` on a bare `"$ref"` argument, fixed at `1cb6bdc`) that
+  postdates it, so 48.5/76.8 is what `796c683` scored. See `docs/REFERENCE_MAPPING.md`.
 - `dataset/seoul_kmapeval_v7a_mcq_300.jsonl`: the standard builder asked for 300 a second time; it
   drew 282, and it is the first set at this size `data/audit_dataset.py` passes. Built and run at
   `ba92d9c`, six questions in common with the 283-row draw. Floor 26.8 (21.3 excluding the

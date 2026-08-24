@@ -2091,3 +2091,87 @@ source rather than a best match.
 
 **This spends `seoul_kmapeval_v7a_mcq_300.jsonl`.** `src/` changed in response to what that set
 showed, so 52.1/79.2 is what the code at `ba92d9c` scored. The next holdout has to be a new draw.
+
+## v7b: a third draw, and the pattern across three
+
+`dataset/seoul_kmapeval_v7b_mcq_300.jsonl` is the standard builder's third 300-question draw; it
+drew 283. Clean on `data/audit_dataset.py`, four questions in common with v7a and seven with v7.
+Built and run at `796c683`, the argument-spelling fix.
+
+| | passes | mean | pooled |
+| --- | --- | --- | --- |
+| no-tool floor | 84, 83 | **29.5** | 167/566 |
+| ReAct (reference) | 48.4, 49.8, 47.3 | **48.5** | 411/849 |
+| Spatial-Agent | 79.5, 72.4, 78.5 | **76.8** | 652/849 |
+
+| | floor | ReAct | Spatial-Agent | gap |
+| --- | --- | --- | --- | --- |
+| v7 (`6bae55c`) | 28.8 | 48.9 | 78.9 | 30.0 |
+| v7a (`ba92d9c`) | 26.8 | 52.1 | 79.2 | 27.1 |
+| v7b (`796c683`) | 29.5 | 48.5 | 76.8 | 28.3 |
+
+Three draws now agree the gap sits at 27–30 and neither side's mean overall accuracy has moved
+more than 3.6 points off its three-draw average. Spatial-Agent's spread on this draw is wider than
+the other two (sd 3.81 against 1.02 and 1.75) — one pass, the middle one, lost 4 questions to
+`llm_context_overflow` and 2 to `agent_reasoning_failure` that its other two passes did not. That
+is endpoint variance the way the rest of this document already treats it, not a regression: nothing
+that touches Spatial-Agent's prompting changed between v7a and v7b.
+
+**`trip_total_distance` supports the length hypothesis a third time.** v7a's draw showed the
+family's floor and ReAct's score both moving with the median trip length and flagged it as a
+prediction to check. Three draws now line up monotonically with length:
+
+| draw | median total | floor | ReAct | lift |
+| --- | --- | --- | --- | --- |
+| v7 | 22.2 km | 23.8 | 34.9 | 11.1 |
+| v7b | 26.5 km | 21.4 | 52.4 | 31.0 |
+| v7a | 30.9 km | 40.5 | 93.7 | 53.2 |
+
+Lift over the draw's own floor is monotonic in trip length across all three; the floor itself is
+not (v7b's is the lowest of the three despite a longer median trip than v7's), so length is not the
+whole story — but it is consistently *part* of it, at n=3 draws. Read as three points, not a
+regression line.
+
+### The argument-spelling fix, measured
+
+`796c683` was written against v7a's logs and had not been measured on an independent draw. It has
+one now:
+
+| | runs | repair rounds | hit "missing arguments" |
+| --- | --- | --- | --- |
+| v7 (`6bae55c`, pre-fix) | 849 | 76 (9.0%) | 33 (3.9%) |
+| v7a (`ba92d9c`, pre-fix) | 848 | 76 (9.0%) | 31 (3.7%) |
+| **v7b (`796c683`, post-fix)** | 849 | **55 (6.5%)** | **5 (0.6%)** |
+
+The refusal it targeted dropped by 84%, and total repair rounds by a third, on a draw the fix was
+never tuned against. It did not move overall accuracy — v7b's 76.8 sits inside the other two draws'
+range — which is what "vocabulary, not reasoning" predicts: the fix lets more plans *execute*
+where they used to be silently discarded and retried, and a repaired plan mostly already answered
+correctly, so removing the repair step removes cost, not right answers. `agent_reasoning_failure`
+carrying "missing arguments" fell from most of that category to one row (`kmapeval_117`, four
+independently computed distances handed to `pairwise_extremes` under its wrong argument name *and*
+as three bare `dist_1`/`dist_2`/`dist_3` — two missing arguments and a shape that would not resolve
+even relabelled, so refusing it is correct: the planner used the wrong operator, not the wrong
+spelling).
+
+### A second refusal, and it was not new
+
+`kmapeval_269` failed all three v7b passes on the same message: `dictionary update sequence element
+#0 has length 1; 2 is required`. It was `identity_measure` handed `"arguments": "$nearest_result"`
+— a bare reference, not an object — and `_ground_graph_literals` called `dict()` on it
+unconditionally; `dict()` on a string iterates its characters, none of them length-2 pairs, and the
+repair round was handed a Python internals leak with nothing about the graph in it. The same
+message appears twice more in `logs/`, dated back to the v6 and first v7 runs — not new, just never
+traced before now that a question repeated it three times in one draw and made it worth opening.
+
+Fixed the same way as the missing-arguments case: a non-dict `arguments` is wrapped under the
+operator's one required slot when it has exactly one — `identity_measure`'s is `value`, the same
+shape its own auto-generated closing step already writes — and left alone otherwise, so a
+multi-argument operator is still refused, now with the graph's own "arguments must be an object"
+rather than a string that names no defect. Fixed at `1cb6bdc`, after the v7b run, so this draw's
+numbers do not reflect it — three rows out of 849, one per Spatial-Agent pass.
+
+**This spends `seoul_kmapeval_v7b_mcq_300.jsonl`.** `src/` changed twice in response to what its
+run showed — once measuring the earlier fix, once from a defect the run itself surfaced — so
+48.5/76.8 is what `796c683` scored, not a number to hold the next draw against. The next holdout
+needs a fresh draw under `1cb6bdc` or later.

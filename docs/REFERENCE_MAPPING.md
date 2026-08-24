@@ -2127,10 +2127,10 @@ prediction to check. Three draws now line up monotonically with length:
 | v7b | 26.5 km | 21.4 | 52.4 | 31.0 |
 | v7a | 30.9 km | 40.5 | 93.7 | 53.2 |
 
-Lift over the draw's own floor is monotonic in trip length across all three; the floor itself is
-not (v7b's is the lowest of the three despite a longer median trip than v7's), so length is not the
-whole story — but it is consistently *part* of it, at n=3 draws. Read as three points, not a
-regression line.
+Lift over the draw's own floor rose with trip length across these three; the floor itself did not
+(v7b's is the lowest of the three despite a longer median trip than v7's). **The fourth draw (v7c)
+broke the monotonic reading — see the v7c correction below.** Length is a positive but noisy
+predictor of ReAct's score on this family, not a ladder.
 
 ### The argument-spelling fix, measured
 
@@ -2175,3 +2175,89 @@ numbers do not reflect it — three rows out of 849, one per Spatial-Agent pass.
 run showed — once measuring the earlier fix, once from a defect the run itself surfaced — so
 48.5/76.8 is what `796c683` scored, not a number to hold the next draw against. The next holdout
 needs a fresh draw under `1cb6bdc` or later.
+
+## v7c: the fourth draw, the first that stays held out, and a correction
+
+`dataset/seoul_kmapeval_v7c_mcq_300.jsonl` is the standard builder's fourth 300-question draw; it
+drew 282. Built and run at `a50096a` — which carries both the argument-spelling fix (`796c683`) and
+the bare-reference crash fix (`1cb6bdc`). One question in common with v7, six with v7a, three with
+v7b.
+
+| | passes | mean | pooled |
+| --- | --- | --- | --- |
+| no-tool floor | 75, 67 | **25.2** | 142/564 |
+| ReAct (reference) | 52.1, 52.5, 51.4 | **52.0** | 441/846 |
+| Spatial-Agent | 83.0, 81.9, 79.1 | **81.3** | 688/846 |
+
+| | floor | ReAct | Spatial-Agent | gap |
+| --- | --- | --- | --- | --- |
+| v7 (`6bae55c`) | 28.8 | 48.9 | 78.9 | 30.0 |
+| v7a (`ba92d9c`) | 26.8 | 52.1 | 79.2 | 27.1 |
+| v7b (`796c683`) | 29.5 | 48.5 | 76.8 | 28.3 |
+| v7c (`a50096a`) | 25.2 | 52.0 | 81.3 | 29.3 |
+
+Four draws hold the gap at 27–30. Spatial-Agent's 81.3 is the highest of the four and ReAct's 52.0
+ties its highest; the floor is the lowest of the four, so the lift is the widest measured.
+
+**v7c is the first of these that stays held out.** v7a and v7b were each spent by an `src/` change
+made in response to what they showed. Nothing under `src/` or `data/` has changed since `a50096a`,
+so **52.0/81.3 is a genuine held-out number for the current code** — the fixes were already in when
+it was drawn, not written against it. That is the number to quote for `a50096a`, with the one
+caveat below.
+
+### Both operator fixes, measured on an independent draw
+
+| | runs | repair rounds | "missing arguments" | bare-ref crash | `agent_reasoning_failure` |
+| --- | --- | --- | --- | --- | --- |
+| v7 (pre-both) | 849 | 76 | 33 | — | 5 |
+| v7a (pre-both) | 848 | 76 | 31 | 1 | 6 |
+| v7b (spelling only) | 849 | 55 | 5 | 1 | ~6 |
+| **v7c (both)** | 846 | **49** | **2** | **0** | **0** |
+
+Spatial-Agent recorded **zero `agent_reasoning_failure` across all three v7c passes** — every one of
+its failures this draw was `llm_context_overflow` (5 in 846, the retrieval tail). The category that
+was the leading fixable failure across the first three draws is gone on the fourth, on a draw
+neither fix was tuned against. Repair rounds are down to 49 from the pre-fix 76. What the fixes did
+not do is move overall accuracy: 81.3 sits at the top of the four-draw range but inside the ±8 this
+endpoint carries, which remains the reading — the fixes remove cost and silent discards, not wrong
+answers.
+
+### Correction: the trip-length hypothesis is positive but not monotonic
+
+The v7b entry above said lift over the draw's own floor is "monotonic in trip length across all
+three draws." The fourth draw breaks that:
+
+| draw | median total | floor | ReAct | lift |
+| --- | --- | --- | --- | --- |
+| v7 | 22.2 km | 23.8 | 34.9 | 11.1 |
+| v7b | 26.5 km | 21.4 | 52.4 | 31.0 |
+| v7c | 30.5 km | 35.7 | 63.5 | 27.8 |
+| v7a | 30.9 km | 40.5 | 93.7 | 53.2 |
+
+v7c is longer than v7b and lifts *less* (27.8 vs 31.0), and the two draws at essentially the same
+median length — v7c at 30.5 km and v7a at 30.9 km — differ by 25 points in ReAct's raw score and by
+25 in lift. Longer trips are easier for ReAct on average, but length is a noisy predictor, not a
+ladder, and the clean monotonic reading was three points lining up by luck. `trip_total_distance`
+is a family whose per-draw score swings widely — which is the same lesson the `trip` class taught at
+n=2 draws, now confirmed at n=4: quote it across draws or not at all.
+
+### The audit failed, worst of the four, and this one is the city not the code
+
+`data/audit_dataset.py` exits non-zero on v7c:
+
+    nearby_kth_nearest: k varies across [2, 3, 4] but 20 of 24 rows ask for k=2   (83.3%)
+
+worse than v7's 79% and past v7a/v7b, which cleared the 70% threshold at 66.7%. This is the defect
+`ba92d9c` addressed by growing the coverage scan — and it is addressed: the scan now runs far
+enough. What it cannot manufacture is anchors the city does not have. An anchor whose ranks one
+through five are all separable by the 90 m ordinal margin is rare, and a draw that happens to find
+few of them lands most of its rows on k=2 no matter how long the scan runs. v7a and v7b found
+enough; v7 and v7c did not. This is draw variance in what Seoul offers, not a generator bug, and it
+does not warrant another scan-limit change — the last one already does everything code can do here.
+
+The consequence is bounded and the same as v7's: the 24 `nearby_kth_nearest` rows are not a second
+answer key (place-name options, shuffled gold), so **the overall 52.0/81.3 and every other family
+stand**; what does not stand is a `nearby_kth_nearest` family number for this draw, which measured
+mostly "second nearest." If a future draw needs that family to discriminate at k∈{3,4}, the lever
+is the ordinal margin or the anchor category pool, not the scan limit — and changing either would
+spend whatever set exposed the need.

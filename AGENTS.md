@@ -136,6 +136,15 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
 
 ## Benchmarks
 
+- `dataset/seoul_kmapeval_v7c_mcq_300.jsonl`: the fourth 300-question draw, built and run at
+  `a50096a` (both operator fixes in). 282 rows. Floor 25.2 (19.3 excluding `unanswerable_*`), ReAct
+  52.0, Spatial-Agent 81.3 over three passes a side — the widest lift of the four draws, gap 29.3.
+  **The first of these that stays held out**: nothing under `src/` or `data/` has changed since it
+  was drawn, so 52.0/81.3 is a genuine held-out number for `a50096a`. Spatial-Agent had **zero
+  `agent_reasoning_failure`** this draw — the two operator fixes measured on a set neither was
+  tuned against. Caveat: it **fails `data/audit_dataset.py`** on `nearby_kth_nearest` (20/24 at
+  k=2, city-limited draw variance, not a generator bug), so that one family's number is not
+  quotable; the overall and every other family stand. See `docs/REFERENCE_MAPPING.md`.
 - `dataset/seoul_kmapeval_v7b_mcq_300.jsonl`: the standard builder's third 300-question draw; it
   drew 283. Built and run at `796c683`. Floor 29.5 (24.2 excluding `unanswerable_*`), ReAct 48.5,
   Spatial-Agent 76.8 over three passes a side — a third draw agreeing the gap sits at 27–30. Also

@@ -126,6 +126,15 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
 
 ## Benchmarks
 
+- `dataset/seoul_kmapeval_v7_mcq_300.jsonl`: the standard builder asked for 300; it drew 283. The
+  largest set here and the one whose numbers carry the least sampling noise — three passes a side
+  at `6bae55c` spanned 2.1 points for ReAct and 1.8 for Spatial-Agent, against the ±8 a hundred
+  rows show. Floor 28.8 (23.5 excluding the `unanswerable_*` families, which are guessable by
+  design), ReAct 48.9, Spatial-Agent 78.9, zero `iteration_limit` and zero truncation. **Spent**:
+  `data/audit_dataset.py` failed it on `nearby_kth_nearest` — 19 of 24 rows at k=2, because a
+  coverage scan limit that did not grow with the build stopped balancing — and `data/` changed to
+  fix that, so 48.9/78.9 belongs to `6bae55c`. The 24 rows are not a second answer key and the
+  accuracies stand; see `docs/REFERENCE_MAPPING.md`.
 - `dataset/seoul_kmapeval_v7_mcq_100.jsonl`: v6 with its two four-stop trip families walked back
   to three stops, because at four the reference baseline runs out of iterations before it can
   finish one. Built by `data/build_mapeval_v7_benchmark.py`; passes `data/audit_dataset.py`. Shares

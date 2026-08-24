@@ -1858,3 +1858,58 @@ ended on `iteration_limit` with ReAct scoring 0/15"; pooled over four passes it 
 and 14/60 correct. And the one-pass ablation entry said a budget of 30 left the benchmark at 38.0%;
 three passes a side say 39.0 to 47.3, concentrated in one of the two families. `AGENTS.md` and
 `data/build_kmapeval_dataset.py` are corrected to match both.
+
+## The first build at scale: 283 questions, three passes, one revision
+
+Every number above rests on a hundred questions, where this endpoint's run-to-run spread is about
+±8 points and a single-run comparison of two architectures is not a result. So the standard builder
+was asked for 300 — it drew 283, the rest lost to live Kakao — and both architectures ran it three
+times at `6bae55c`, `--provider kakao`, `--react-tools reference`, temperature 0,
+`MAX_REASONING_STEPS=15`, no output ceiling.
+
+| | passes | mean | pooled |
+| --- | --- | --- | --- |
+| no-tool floor | 84, 79 | **28.8** | 163/566 |
+| ReAct (reference) | 49.8, 47.7, 49.1 | **48.9** | 415/849 |
+| Spatial-Agent | 79.5, 77.7, 79.5 | **78.9** | 670/849 |
+
+**The spread collapses with the sample.** ReAct's three passes span 2.1 points and Spatial-Agent's
+1.8, against the 4–8 the hundred-row sets showed. Nothing about the endpoint changed; the sample
+got 2.8× bigger. This is the first set here on which one pass a side would have been worth reading.
+
+**The gap is 30.0 points**, the widest measured, and it holds in every class:
+
+| class | rows | floor | ReAct | Spatial-Agent |
+| --- | --- | --- | --- | --- |
+| routing | 66 | 20.5 | 27.3 | **91.4** |
+| distance | 46 | 17.4 | 35.5 | **82.6** |
+| nearby | 93 | 41.4 | 65.2 | **78.5** |
+| trip | 66 | 26.5 | 55.1 | 67.2 |
+| radius | 12 | 33.3 | 58.3 | 63.9 |
+
+Routing is where the architectures diverge most (64 points) and where the floor is lowest — the
+turn-level questions cannot be guessed and ReAct cannot hold a step list across one-leg
+`Directions` calls. `trip` and `radius` are the two classes where Spatial-Agent's lead is under 15
+points, and `nearby_within_radius_count` (58.3 / 63.9) and `poi_farthest_of_three` (20.5 / 53.8)
+are the two families both architectures do worst on. Those are family findings, not architecture
+ones.
+
+**The floor's own composition matters.** 28.8 overall, but the five `unanswerable_*` families
+score 40/42 closed-book: refusing is guessable without a map, by design. Over the other 262 rows
+the floor is **23.5**, just under four-way chance, and the chosen-option histogram is flat
+(53/76/81/73 and 59/71/79/74). No family is answerable from the option set.
+
+**v7's three-stop trip families fit the budget.** Zero `iteration_limit` in 849 ReAct rows, against
+24 of 60 on v6's four-stop pair. They are not easy — `trip_optimal_order` 41.7% and
+`trip_total_distance` 34.9% — they are *lost*, which is what a family is supposed to measure. No
+`llm_output_truncated` either, on either side.
+
+**Failures are Spatial-Agent's alone, and there are twelve in 849 rows (1.4%).** Six
+`llm_context_overflow` and six `agent_reasoning_failure`; ReAct had none of either. The overflows
+are still retrieval's tail — one row, `kmapeval_278`, overflowed on all three passes — and they
+explain the whole of Spatial-Agent's one loss to ReAct on `unanswerable_rating` (5/9 against 9/9):
+four losses, all of them two rows that never finished. Four of the six reasoning failures are
+`trip_total_distance`.
+
+Cost keeps its shape: ReAct 2,292 LLM calls for 4.0M tokens at 37.7s a question; Spatial-Agent 870
+calls for 6.3M tokens at 79.9s. Fewer, larger calls.

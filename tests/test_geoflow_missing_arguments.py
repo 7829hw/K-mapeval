@@ -12,7 +12,27 @@ from __future__ import annotations
 import pytest
 
 from src.agent.geoflow import normalize_and_validate_graph
+from src.agent.spatial import _factorize_validate_plan
 from src.tools.spatial import SpatialOperatorRegistry
+
+_ANALYSIS = {
+    "concepts": [
+        {
+            "id": "question_context",
+            "text": "q",
+            "role": "extent",
+            "concept_type": "object",
+            "depends_on": [],
+        },
+        {
+            "id": "requested_answer",
+            "text": "answer choice",
+            "role": "measure",
+            "concept_type": "amount",
+            "depends_on": ["question_context"],
+        },
+    ]
+}
 
 MAX_STEPS = 15
 
@@ -186,3 +206,67 @@ def test_a_reference_that_never_resolved_still_fails_loudly() -> None:
     registry = SpatialOperatorRegistry()
     with pytest.raises(ValueError, match="measures nothing"):
         registry.invoke("extract_distance", {"route": "$legs_matrix.routes[0]"})
+
+
+def test_a_bare_reference_as_arguments_binds_the_operators_one_slot() -> None:
+    """`kmapeval_269`: `"arguments": "$nearest_result"` on an `identity_measure` node.
+
+    `dict("$nearest_result")` does not raise a name for that -- Python iterates the string and
+    raises "dictionary update sequence element #0 has length 1; 2 is required", which is what
+    every one of this question's three passes actually failed with. `identity_measure` has one
+    required argument, so the string names it unambiguously.
+    """
+
+    plan = {
+        "graph": [
+            {
+                "id": "places",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["가", "나"]},
+                "depends_on": [],
+                "role": "extent",
+            },
+            {
+                "id": "nearest_result",
+                "operator": "nearest",
+                "arguments": {"anchor": "$places.0.place", "candidates": "$places"},
+                "depends_on": ["places"],
+                "role": "support",
+            },
+            {
+                "id": "final_measure",
+                "operator": "identity_measure",
+                "arguments": "$nearest_result",
+                "depends_on": ["nearest_result"],
+                "role": "measure",
+            },
+        ]
+    }
+    _, steps, _ = _factorize_validate_plan(_ANALYSIS, plan, "q", ["a", "b", "c", "d"], "nearby", 15)
+    final = next(step for step in steps if step["id"] == "final_measure")
+    assert final["arguments"] == {"value": "$nearest_result"}
+
+
+def test_a_bare_reference_on_a_multi_argument_operator_still_refuses_cleanly() -> None:
+    """Two required slots and one string is still a guess -- refused, not crashed."""
+
+    plan = {
+        "graph": [
+            {
+                "id": "a",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["가"]},
+                "depends_on": [],
+                "role": "extent",
+            },
+            {
+                "id": "bad",
+                "operator": "difference",
+                "arguments": "$a",
+                "depends_on": ["a"],
+                "role": "measure",
+            },
+        ]
+    }
+    with pytest.raises(ValueError, match="arguments must be an object"):
+        _factorize_validate_plan(_ANALYSIS, plan, "q", ["a", "b", "c", "d"], "nearby", 15)

@@ -15,6 +15,7 @@ from src.agent.base import (
 )
 from src.agent.geoflow import (
     OPERATOR_CONTRACTS,
+    OperatorContract,
     canonical_reference,
     factorize_geoflow,
     normalize_analysis,
@@ -1134,12 +1135,30 @@ def _ground_graph_literals(
             raise ValueError(
                 f"GeoFlow node {step.get('id')!r} names no operator: {operator!r}"
             )
-        arguments = _verbatim_place_names(
-            dict(step.get("arguments") or step.get("params") or {}),
-            question,
-            options,
-            question_places,
+        raw_arguments = step.get("arguments")
+        if raw_arguments is None:
+            raw_arguments = step.get("params")
+        if raw_arguments and not isinstance(raw_arguments, dict):
+            # A planner writes `"arguments": "$nearest_result"` when a node just forwards what it
+            # depends on -- the same intent the auto-generated closing Measure step expresses as
+            # `{"value": "$source"}`. `dict("$nearest_result")` does not raise that name; Python
+            # iterates the string and reports "dictionary update sequence element #0 has length 1,
+            # 2 is required", which told the repair round nothing about what was actually wrong.
+            # Wrapped under the operator's one required slot when it has exactly one -- the same
+            # binding `normalize_and_validate_graph` makes from a lone dependency -- or left as
+            # written otherwise, so the graph's own "arguments must be an object" is what a
+            # multi-argument operator is refused with.
+            contract = OPERATOR_CONTRACTS.get(operator, OperatorContract("object"))
+            required = contract.required_arguments
+            raw_arguments = {required[0]: raw_arguments} if len(required) == 1 else raw_arguments
+        arguments = (
+            _verbatim_place_names(dict(raw_arguments), question, options, question_places)
+            if isinstance(raw_arguments, dict)
+            else raw_arguments
         )
+        if not isinstance(arguments, dict):
+            grounded.append({**step, "arguments": arguments})
+            continue
         if operator == "nearby_places" and specifications:
             arguments.pop("query", None)
             arguments.pop("category_code", None)

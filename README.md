@@ -2,11 +2,8 @@
 
 MapEval 방식 ReAct와 Spatial-Agent의 공간 추론 성능을 같은 조건으로 비교하는 연구용 MVP입니다. 공통 provider·도구·평가 파이프라인을 제공하며, 독립변수는 에이전트 구조 하나뿐입니다.
 
-근거(evidence) 출처는 실행 단위로 하나만 선택되고 서로 섞이지 않습니다.
-
-- `context` (기본값): 데이터셋 **전체**의 context로 만든 corpus 하나를 `ContextMapProvider`가 API 대신 제공합니다. 원본 Spatial-Agent의 local context cache(`data/build_cache.py` → `context_cache.db`)를 이식한 것입니다. context는 에이전트가 아니라 **provider**에 주입되므로 두 에이전트 모두 동일한 도구 호출을 통해서만 근거에 접근합니다.
-- `hybrid`: 위 corpus를 먼저 보고, 없는 것만 Kakao 실호출로 넘깁니다. 원본이 cache miss를 Google Maps로 넘기는 것과 같은 구성입니다.
-- `kakao`: Kakao Local / Kakao Mobility 실호출과 SQLite 캐시만 사용합니다.
+두 에이전트의 근거(evidence)는 항상 `KakaoMapProvider`에서 옵니다. Kakao Local / Kakao
+Mobility 실호출과 두 에이전트가 공유하는 SQLite 캐시만 사용합니다.
 
 지원 classification은 `nearby`, `poi`, `routing`, `trip`, `type`, `direction`,
 `distance`, `radius`입니다. `answer`와 에이전트의 선택지 번호는 모두 `options`의
@@ -19,7 +16,7 @@ K-MapEval/
 ├── main.py              # 단일 실행 진입점
 ├── src/
 │   ├── agent/           # ReAct / Spatial-Agent
-│   ├── tools/           # context/Kakao provider, SQLite cache, 공간 연산
+│   ├── tools/           # Kakao provider, SQLite cache, 공간 연산
 │   ├── config.py        # .env 설정
 │   ├── dataset.py       # JSONL 로더
 │   ├── evaluator.py     # 평가 및 결과 기록
@@ -30,7 +27,9 @@ K-MapEval/
 └── reports/             # 배치 평가 보고서(자동 생성)
 ```
 
-두 에이전트 모두 `Place`와 `Route` 정규화 스키마만 봅니다. 정답, classification, region, difficulty, verified_at, 그리고 **context**는 에이전트 입력에 포함되지 않습니다. `BenchmarkItem.agent_input()`은 `(question, options)`만 반환하고, context는 실행 시작 시 provider의 corpus로만 적재됩니다. 원본 Spatial-Agent도 context 없는 MapEval-API로 평가하고 context는 캐시 구축에만 씁니다.
+두 에이전트 모두 `Place`와 `Route` 정규화 스키마만 봅니다. 정답, classification, region,
+difficulty, verified_at 및 과거 데이터셋의 **context**는 에이전트 입력이나 provider 설정에
+포함되지 않습니다. `BenchmarkItem.agent_input()`은 `(question, options)`만 반환합니다.
 
 Spatial-Agent는 `공간 개념/기능 역할 분석 → 매크로 검색 → ConceptGraph 구성 →
 operator-concept hypergraph factorization → 5개 제약 검증 → 위상순 실행 → 근거 기반 선택`
@@ -87,7 +86,7 @@ cp example.env .env
 ## 실행
 
 ```bash
-python main.py --agent react       # dataset/seoul_mapeval_v1_mcq_100.jsonl, context 근거
+python main.py --agent react
 python main.py --agent spatial
 python main.py --agent both
 python main.py --agent spatial --concurrency 4
@@ -99,13 +98,8 @@ python main.py --agent spatial --concurrency 4
 python main.py --agent both --ids seoul_mapqa_v0_000907 seoul_mapqa_v0_000009
 ```
 
-근거 출처는 `--provider`로 고릅니다. 기본값 `auto`는 모든 행이 context를 가지면 `context`를,
-아니면 `kakao`를 씁니다. `kakao`와 `hybrid`에만 `KAKAO_REST_API_KEY`가 필요합니다.
-
-```bash
-python main.py --agent both --provider hybrid
-python main.py --agent both --provider kakao
-```
+모든 실행에 `KAKAO_REST_API_KEY`가 필요합니다. provider 선택 옵션은 없으며
+`KakaoMapProvider`가 항상 사용됩니다.
 
 로그 생성 방식은 Spatial-Agent 원본과 같습니다. 각 문항의 실행 trace는
 `logs/<UTC>_id<문항ID>_<질문-slug>.log`에 기록되고, 배치가 끝나면
@@ -126,9 +120,8 @@ python main.py --agent both --provider kakao
 `dataset/seoul_mapeval_v1.json`에서 seed `20260818`으로 template별 quota를 두고 100문항을 뽑았고,
 행마다 anchor가 서로 다르며 선택지는 문항 id로 시드된 순서로 섞여 있습니다(원본 생성기가 거리
 선택지를 오름차순 고정으로 만들어 `distance_between` 전체 정답이 index 2였습니다).
-100문항 전부 정답이 context만으로 결정론적으로 유도되는 것을 확인했으므로, 오답은 근거가 아니라
-에이전트의 결과입니다. 보고서 `metadata.provider`에 근거 출처가 기록되며, 출처가 다른 실행 결과는
-합산하지 않습니다.
+이 파일의 `context` 필드는 초기 context 실험의 출처 보존용 레거시 메타데이터이며 현재 실행에서는
+사용하지 않습니다. 보고서 `metadata.provider`에는 항상 `kakao`가 기록됩니다.
 
 ## 테스트
 

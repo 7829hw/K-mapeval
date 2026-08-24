@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from main import build_parser
 from src.dataset import BenchmarkItem, load_dataset
 from src.parsing import parse_answer, parse_json_object
 
@@ -25,7 +26,7 @@ def test_json_parser_handles_fenced_output() -> None:
     assert parse_json_object('```json\n{"intent":"poi"}\n```') == {"intent": "poi"}
 
 
-def test_context_benchmark_is_valid_and_carries_its_own_evidence() -> None:
+def test_legacy_context_benchmark_is_valid_and_retains_its_metadata() -> None:
     items = load_dataset(Path("dataset/seoul_mapeval_v1_mcq_100.jsonl"))
     assert len(items) == 100
     assert {item.classification for item in items} == {
@@ -47,6 +48,13 @@ def test_the_context_never_reaches_the_agent() -> None:
     assert options == items[0].options
     assert items[0].context not in question
     assert all(items[0].context not in option for option in options)
+
+
+def test_cli_has_no_provider_selector() -> None:
+    parser = build_parser()
+
+    assert "--provider" not in parser._option_string_actions
+    assert "provider" not in vars(parser.parse_args([]))
 
 
 REPRODUCTION_BENCHMARK = Path("dataset/seoul_kmapeval_v2_mcq_100.jsonl")

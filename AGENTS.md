@@ -64,11 +64,9 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   reports nothing rather than estimating it, and never sum it unless every row has one.
 - `--react-tools full` is an ablation. Never pool it with the default `mapeval` surface, and do not
   tune ReAct's prompt, tool contracts, or step budget in response to benchmark misses.
-- Select one evidence mode per run: `context`, `hybrid`, or `kakao`. Only `hybrid` may use its
-  defined context-to-Kakao fallback; do not create ad hoc agent-specific evidence paths.
-- Build context evidence once from the full dataset corpus. Context belongs behind the provider,
-  never in the agent prompt; do not scope it per question or replay a pre-ranked context block as
-  an answer.
+- Every run uses `KakaoMapProvider`; there is no provider selector or context-to-Kakao fallback.
+  Legacy dataset `context` fields are metadata only and must never become runtime evidence or
+  agent input.
 - `BenchmarkItem.agent_input()` exposes only `(question, options)`. Never pass `answer`,
   `classification`, `region`, `difficulty`, `verified_at`, `gold_evidence`, or other eval-only
   metadata to an agent or derive provider configuration from it.
@@ -90,8 +88,8 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   least-bad match, or collapse distinct `ProviderError` subclasses into agent reasoning failures.
 - Route map access through the registry/provider so tool calls, API calls, and cache deltas remain
   measurable.
-- Do not pool results across datasets, provider modes, or ReAct tool surfaces. Label reports as
-  prompting-only, and include the no-tool floor when interpreting accuracy.
+- Do not pool results across datasets or ReAct tool surfaces. Label reports as prompting-only,
+  and include the no-tool floor when interpreting accuracy.
 - Decode at `temperature=0`, which is what both upstreams do. Sending no temperature leaves the
   endpoint's default in force, and two floor runs over one benchmark then differed by 11 points.
 - The LLM endpoint is not reproducible even greedily — no sampling parameter fixes it, and a
@@ -204,7 +202,8 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   rebuild the holdout under another seed before quoting it again.
 - `dataset/seoul_kmapeval_v4_mcq_100.jsonl`: MapEval-method reproduction benchmark.
 - `dataset/seoul_kmapeval_v3_mcq_100.jsonl`: compositional architecture benchmark.
-- `dataset/seoul_mapeval_v1_mcq_100.jsonl`: context/hybrid evidence benchmark.
+- `dataset/seoul_mapeval_v1_mcq_100.jsonl`: legacy context-evidence benchmark; its `context` fields
+  are retained for provenance but ignored by current runtime code.
 - `dataset/seoul_kmapeval_v2_mcq_100.jsonl`: superseded benchmark retained for historical runs.
 
 `data/build_kmapeval_dataset.py` is the standard builder for *new* sets: **v7's families**,
@@ -235,7 +234,7 @@ ruff check .
 Tests must mock Kakao and the LLM; ordinary tests require no keys or network. Run relevant focused
 tests while developing, then the full test and lint suites before finishing a code change.
 
-Every `main.py` run consumes LLM tokens, and `kakao`/`hybrid` runs may consume Kakao quota.
+Every `main.py` run consumes LLM tokens and may consume Kakao quota.
 Dataset builders, verifiers, and the no-tool floor may also use live services. Run any of them only
 when the user explicitly asks for live execution.
 

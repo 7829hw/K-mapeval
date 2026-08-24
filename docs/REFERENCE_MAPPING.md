@@ -20,7 +20,7 @@
 | Temporal operators | `timezone`, `open_at_time`, `calculate_finish_time`, `calculate_start_time` | Handles cross-midnight/24-hour periods. Multi-stop finish time queries cached/live route durations and adds stays. Latest-departure calculation is an explicit template helper. |
 | Spatial-Agent evaluator/generator | Spatial-Agent `evaluate` and `generate` | The LLM conditions on question, final state, and full trace. Deterministic match evidence no longer overwrites the generated selection. |
 | Google Maps client | `KakaoMapProvider` | Kakao Local handles search/geocode/reverse-geocode/nearby; Kakao Mobility handles driving and verified multi-waypoint routes with optional guides. |
-| Spatial-Agent context cache | `SQLiteMapCache` | Both agents share one normalized Kakao cache. The upstream MapEval-Textual/Google context snapshot is not bundled. |
+| Spatial-Agent context cache | Not implemented | Legacy dataset context fields are ignored. `SQLiteMapCache` caches normalized Kakao responses only; it is not a MapEval context corpus. |
 | MapEval-API benchmark (300 rows, live Google Maps) | `dataset/seoul_kmapeval_v2_mcq_100.jsonl` (100 rows, live Kakao) | Class mix mirrors MapEval-API's answerable half (nearby 30 / trip 24 / routing 23 / poi 23) so the multi-hop families the paper's gains come from are actually present. Gold answers are computed from Kakao Local and Kakao Mobility, the same provider the agents query. `unanswerable` is excluded — see below. |
 | SFT and DPO | Not implemented | This repository evaluates the off-the-shelf prompting path and does not claim fine-tuned Qwen results. |
 
@@ -28,9 +28,7 @@
 
 - Template retrieval is keyword based, not embedding based.
 - Factorization and concept binding are deterministic, not SFT/DPO learned.
-- Evidence comes from one of two interchangeable sources, recorded per run in
-  `metadata.provider`: a per-question context shipped with the dataset (the port of upstream's
-  MapEval-Textual setting, see below), or live Kakao POIs.
+- Evidence always comes from Kakao and is recorded as `kakao` in `metadata.provider`.
 - Kakao Mobility support is driving-only.
 - The benchmark router uses the LLM analysis intent; Korean heuristics are only a fallback when the
   returned intent is missing or unsupported.
@@ -90,33 +88,45 @@ What upstream does:
 - **The agent never sees the context text.** `test_agent.py` does not mention it, and no agent
   module reads it outside the database.
 
-What this repo does, and why:
+Current K-MapEval behavior:
 
-- Same shape: the corpus is built from every context in the dataset and shared by all questions,
-  loaded *behind* the tool layer so both architectures still choose tools and still read
+- The context-cache port has been removed. Every run constructs `KakaoMapProvider`; there is no
+  `--provider` selector, corpus parsing, or context-to-Kakao fallback.
+- Legacy MapEval-Textual `context` fields remain in their dataset rows for provenance, but they are
+  metadata only: runtime code never collects them, parses them, or derives provider configuration
+  from them.
+- `SQLiteMapCache` remains because it caches normalized Kakao requests and responses for both
+  architectures. It is independent of the removed MapEval context corpus.
+
+Historical context-cache port (retained here only to interpret reports from older revisions):
+
+The following bullets describe removed behavior, not the current runtime.
+
+- Same shape: the corpus was built from every context in the dataset and shared by all questions,
+  loaded *behind* the tool layer so both architectures still chose tools and still read
   normalized `Place` / `Route` objects. `BenchmarkItem.agent_input()` is unchanged.
-- The context travels in the benchmark row rather than in a second file. `main.py` collects
-  `item.context` across the dataset and builds one corpus, which is upstream's arrangement without
+- The context travelled in the benchmark row rather than in a second file. `main.py` collected
+  `item.context` across the dataset and built one corpus, which was upstream's arrangement without
   the extra artifact. Nothing per-question is bound: an earlier revision scoped the corpus to the
   running question, and that made the mere existence of a name an answer signal — "which option
   exists at all" answered 14 of 100 questions under per-question scoping and 9 under the shared
   corpus.
-- `--provider hybrid` is upstream's cache-then-live arrangement with Kakao in Google's place, and
-  it is what `--provider auto` now resolves to for a context-carrying dataset. `--provider context`
-  runs the corpus alone, so a run needs no Kakao key and a miss stays a miss — a closed world
+- `--provider hybrid` was upstream's cache-then-live arrangement with Kakao in Google's place, and
+  `--provider auto` resolved to it for a context-carrying dataset. `--provider context` ran the
+  corpus alone, so a run needed no Kakao key and a miss stayed a miss — a closed world
   stricter than anything upstream measures, which makes it an ablation to ask for by name rather
-  than the default a bare run lands on. `resolve_provider_kind` and its test pin the choice.
-  One asymmetry the mode carries and upstream does not: upstream's cache and its fallback are both
+  than the default a bare run landed on. `resolve_provider_kind` and its test pinned the choice.
+  One asymmetry the mode carried and upstream did not: upstream's cache and its fallback are both
   Google, while `seoul_mapeval_v1`'s contexts are OSM-derived and the fallback is Kakao, so a
   hybrid run here mixes two gazetteers where upstream mixes none.
-- **Retrievals are computed, not replayed.** This is the one place the port deliberately does not
+- **Retrievals were computed, not replayed.** This was the one place the port deliberately did not
   follow upstream, and the reason is an evaluation-validity flaw in upstream that this repo
   reproduced and then measured. MapEval-API is MapEval-Textual with the `context` field removed —
   the same 300 questions, the same ids — so a cache built from Textual holds, for every API
   question, the retrieval result that answers it. `get_nearby_places` returns that block already
   filtered by type and already sorted by distance, which makes one tool call sufficient and
   collapses the API setting into the Textual one. Ported faithfully, it produced ReAct 100/100.
-  Here the block contributes its *places* to the corpus and `nearby_search` computes the ranking
+  Here the block contributed its *places* to the corpus and `nearby_search` computed the ranking
   from coordinates over the whole corpus, filtered by type through `TYPE_SYNONYMS`. That is also
   what a live map API does: Kakao and Google compute, only a frozen context is pre-computed.
 - Counters follow the upstream framing: the corpus *is* the cache, so it costs no API call; an
@@ -156,10 +166,10 @@ overall 71.07%   trip 55.2%   poi 53.1%   nearby 80.7%   routing 92.4%   failed 
 `data/context_cache.db` (589 KB) was present and newer than that report when it was written, and
 `SpatialAgent.__init__` initializes the cache whenever the file exists. So that 71.07% is a
 **context-assisted** number, on the arrangement described above — the corpus built from the same
-300 questions' curated evidence, with the live API behind it. The configuration here that
-corresponds to it is `hybrid`, not `kakao`; a `kakao` run has no curated corpus at all and is a
-harder setting than the one the reference number comes from. Any comparison that puts our number
-beside 71.07% has to say which of the two it is.
+300 questions' curated evidence, with the live API behind it. The removed configuration that
+corresponded to it was `hybrid`, not `kakao`; a current run has no curated corpus at all and is a
+harder setting than the one the reference number comes from. Any comparison that puts a current
+number beside 71.07% has to state that evidence-setting difference.
 
 The per-class split is the more useful half of it: upstream's losses are concentrated in `poi`
 (53.1%) and `trip` (55.2%), and `poi` there is dominated by rating, opening-hours and
@@ -248,8 +258,8 @@ Measured directly on `MapEval-API.jsonl` (300 rows), because it decides what can
 - **MapEval-API is MapEval-Textual minus `context`.** Same 300 ids, 297 identical question
   strings, and `MapEval-Textual.jsonl`'s key set is API's plus `context`. A cache built from
   Textual and queried by API is therefore question-for-question an answer key, which is why
-  `ContextMapProvider` computes retrievals over the whole corpus instead of replaying the stored
-  block (see above).
+  the removed `ContextMapProvider` computed retrievals over the whole corpus instead of replaying
+  the stored block (see above).
 - **The ReAct baseline's budget is 15 iterations**, langchain's default, which is what
   `mapeval-api/Evaluator2.py` runs. An earlier version of this file argued 30 from
   `max_tool_rounds: int = 30` in `mapeval-api/mapeval_api_evaluator.py`; that file is untracked

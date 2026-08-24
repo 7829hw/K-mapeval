@@ -173,6 +173,13 @@ REQUIRED_ARGUMENT_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
     "sum_amounts": {
         "amounts": ("items", "values", "inputs", "distances", "legs", "routes", "numbers"),
     },
+    # `center` is `nearby_places`'s name for the same point, and a planner that retrieves with one
+    # node and ranks with the next writes one vocabulary across both. `_normalize_arguments`
+    # accepts these; the required-argument check has to accept the same spellings or it refuses a
+    # plan the executor would have run.
+    "nearest": {"anchor": ("center", "origin", "from_place", "reference")},
+    "extract_distance": {"route": ("routes", "legs", "route_list")},
+    "extract_duration": {"route": ("routes", "legs", "route_list")},
     "difference": {
         "minuend": (
             "a",
@@ -1279,6 +1286,20 @@ def _unique_id(prefix: str, known_ids: set[str]) -> str:
     return f"{prefix}_{index}"
 
 
+def _missing_arguments(
+    arguments: dict[str, Any],
+    required: tuple[str, ...],
+    aliases: dict[str, tuple[str, ...]],
+) -> list[str]:
+    """The required slots the planner filled under no spelling this port accepts."""
+
+    return [
+        name
+        for name in required
+        if name not in arguments and not any(alias in arguments for alias in aliases.get(name, ()))
+    ]
+
+
 def normalize_and_validate_graph(
     payload: dict[str, Any], *, max_steps: int, strict_types: bool = True
 ) -> tuple[list[dict[str, Any]], dict[str, bool]]:
@@ -1338,13 +1359,25 @@ def normalize_and_validate_graph(
             if operator == "select_max":
                 arguments.setdefault("descending", True)
             operator = "select_by_index"
+        declared = raw.get("depends_on") or raw.get("before") or []
+        if not isinstance(declared, list):
+            raise ValueError(f"GeoFlow node {step_id} depends_on must be a list")
+        declared_dependencies = [_normalize_dependency(value, raw_ids) for value in declared]
         aliases = REQUIRED_ARGUMENT_ALIASES.get(operator, {})
-        missing = [
-            name
-            for name in contract.required_arguments
-            if name not in arguments
-            and not any(alias in arguments for alias in aliases.get(name, ()))
-        ]
+        missing = _missing_arguments(arguments, contract.required_arguments, aliases)
+        # A node whose whole input is its one dependency, written as `arguments: {}` with
+        # `depends_on: [previous]`. The planner said where the value comes from and the operator
+        # has exactly one slot to put it in, so there is one binding consistent with the plan and
+        # nothing to guess -- `extract_distance` after a `distance_matrix`, `sum_amounts` after
+        # the extraction. Refused, it cost `trip_total_distance` questions on both 300-row draws:
+        # seven of the ten `agent_reasoning_failure` rows across them were a missing argument, and
+        # the repair round routinely filled one such node and left the next one empty.
+        #
+        # Deliberately narrow. Two missing arguments, or two dependencies, and which value belongs
+        # in which slot is a guess; this fills nothing then and the plan is refused as before.
+        if len(missing) == 1 and len(declared_dependencies) == 1:
+            arguments = {**arguments, missing[0]: f"${declared_dependencies[0]}"}
+            missing = _missing_arguments(arguments, contract.required_arguments, aliases)
         if missing:
             raise ValueError(f"GeoFlow node {step_id} is missing arguments: {', '.join(missing)}")
         if operator == "place_search" and not (
@@ -1365,10 +1398,6 @@ def normalize_and_validate_graph(
             {"place_a", "place_b"} <= arguments.keys() or _has_coordinate_pairs(arguments)
         ):
             raise ValueError(f"{operator} requires two places or two coordinate pairs")
-        declared = raw.get("depends_on") or raw.get("before") or []
-        if not isinstance(declared, list):
-            raise ValueError(f"GeoFlow node {step_id} depends_on must be a list")
-        declared_dependencies = [_normalize_dependency(value, raw_ids) for value in declared]
         arguments = _rewrite_placeholder_references(
             arguments,
             known_ids=known_ids,

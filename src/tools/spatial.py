@@ -398,12 +398,20 @@ class SpatialOperatorRegistry:
         return {"route_indexes": matched_indexes, "routes": matched_routes}
 
     @staticmethod
-    def extract_distance(route: dict[str, Any]) -> dict[str, float]:
-        return {"distance_m": float(route["distance_m"])}
+    def extract_distance(route: Any) -> dict[str, float] | list[dict[str, float]]:
+        """One route's distance, or one per route when handed the list.
+
+        `extract_distance(routes="$segments.routes")` after a three-leg `distance_matrix` is what
+        a planner writes when it wants the legs measured before adding them, and it means one
+        unambiguous thing. `_normalize_arguments` maps the plural spelling onto this slot; a list
+        arriving here is measured element-wise rather than raising on `list["distance_m"]`.
+        """
+
+        return _extract_metric(route, "distance_m")
 
     @staticmethod
-    def extract_duration(route: dict[str, Any]) -> dict[str, float]:
-        return {"duration_s": float(route["duration_s"])}
+    def extract_duration(route: Any) -> dict[str, float] | list[dict[str, float]]:
+        return _extract_metric(route, "duration_s")
 
     @staticmethod
     def filter_places(
@@ -1438,6 +1446,31 @@ def _normalize_arguments(name: str, arguments: dict[str, Any]) -> dict[str, Any]
         key = args.get("key") or _comparison_value_path(items)
         return {"items": items, "key": key}
 
+    if name in {"extract_distance", "extract_duration"}:
+        # The plural is the same slot: a plan that measures every leg of a trip writes `routes`
+        # about as often as `route`, and `$segments.routes` is a list either way. Refusing the
+        # spelling cost a `trip_total_distance` question its answer on the v7a draw.
+        if "route" not in args:
+            for alias in ("routes", "legs", "route_list"):
+                if alias in args:
+                    args["route"] = args.pop(alias)
+                    break
+        return args
+
+    if name == "nearest":
+        # `center` is what `nearby_places` calls the point it measures from, so a planner that
+        # retrieves with `nearby_places(center=...)` and ranks with `nearest(center=...)` in the
+        # next node has written one vocabulary, not two. The implementation calls it `anchor` and
+        # nothing else, so the plan died on a spelling: two `nearby_subtype_kth` questions lost to
+        # "missing arguments: anchor" across the two 300-row draws. Only spellings that mean the
+        # same point -- no ordinal, no candidate list.
+        if "anchor" not in args:
+            for alias in ("center", "origin", "from_place", "reference"):
+                if alias in args:
+                    args["anchor"] = args.pop(alias)
+                    break
+        return args
+
     if name == "sum_route_metrics":
         routes = next(
             (args[key] for key in ("routes", "inputs", "legs") if key in args),
@@ -1618,6 +1651,25 @@ def _as_place_list(
             f"({len(values)} unresolved)"
         )
     return resolved
+
+
+def _extract_metric(route: Any, metric: str) -> dict[str, float] | list[dict[str, float]]:
+    """Read one metric off a route, off the node that carries routes, or off each of a list."""
+
+    route = _route_list(route)
+    if isinstance(route, list):
+        return [_single_metric(item, metric) for item in route]
+    return _single_metric(route, metric)
+
+
+def _single_metric(route: Any, metric: str) -> dict[str, float]:
+    if not isinstance(route, dict) or metric not in route:
+        raise ValueError(
+            f"extract expected a route carrying {metric}, got {type(route).__name__}. "
+            "A `$node` reference that never resolved measures nothing, so this fails "
+            "instead of reporting zero."
+        )
+    return {metric: float(route[metric])}
 
 
 def _route_list(value: Any) -> Any:

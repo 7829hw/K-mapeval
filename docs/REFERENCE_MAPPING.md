@@ -2041,3 +2041,53 @@ to 65,304 completion tokens, `LLMOutputTruncatedError` escaped the pool, and eve
 the run went with it. It now catches the same three the evaluator separates — unavailable,
 truncated, overflow — records each as a per-question failure and names the rows, so a floor over
 fewer rows than it claims says so. Fixed at `218bcce`; both passes above ran clean afterwards.
+
+### The repeated failure was a spelling, and it was costing far more than the rows it lost
+
+`kmapeval_223` failed on all three v7a passes, and across the two 300-row draws seven of the ten
+`agent_reasoning_failure` rows read `GeoFlow node ... is missing arguments: ...`. Reading the logs
+rather than the counts showed the counts were the small part: **31 of the 848 Spatial-Agent
+question-runs in the v7a passes hit that refusal at least once**, and most of them survived only by
+spending a repair round on it — 76 repair calls in those three passes.
+
+Three shapes, all of them the port's vocabulary rather than the planner's reasoning.
+
+**A node whose whole input is its one dependency.** The planner writes `arguments: {}` and
+`depends_on: ["route_legs"]`, because it has already said where the value comes from:
+
+    {"id": "leg_distances",  "operator": "extract_distance", "arguments": {}, "depends_on": ["route_legs"]}
+    {"id": "total_distance", "operator": "sum_amounts",      "arguments": {}, "depends_on": ["leg_distances"]}
+
+One missing slot and one named source is one binding, not a guess, so the validator now makes it:
+`arguments[missing] = "$<dependency>"`. Deliberately narrow — two missing arguments, or two
+dependencies, and which value belongs in which slot *is* a guess, so nothing is filled and the plan
+is refused exactly as before. This is also why the repair round was not the answer: on
+`kmapeval_223` it filled `extract_distance` and left `sum_amounts` empty, then the lenient pass
+failed on the node the repair had skipped.
+
+**`nearest(center=…)`.** `nearby_places` calls that point `center` and `nearest` calls it `anchor`,
+so a planner that retrieves with one node and ranks with the next writes one vocabulary across
+both. The implementation accepted only `anchor`, and two `nearby_subtype_kth` questions died on the
+spelling. `center`, `origin`, `from_place` and `reference` now normalize onto `anchor` — spellings
+for the same point, and nothing else: no ordinal, no candidate list.
+
+**`extract_distance(routes=[…])`.** Measuring every leg before adding them is one unambiguous
+thing, and `$segments.routes` is a list either way. The plural now maps onto the slot and a list is
+measured element-wise. It still refuses to invent: a `$node` reference that never resolved raises
+where it stands rather than reporting zero, which is the rule that caught `sum_amounts` reading
+`"extract_distance(route_A1_A2)"` as text.
+
+Replayed against the graphs the planner actually wrote — pulled out of `logs/`, not reconstructed —
+29 of the 31 refusals now validate at the point they were refused, which removes 29 of the 76
+repair rounds as well as the questions that were lost outright. The two that still fail are a
+hallucinated operator (`"operator": "pairs"`) and a genuinely under-specified node, and both should
+fail: refusing a graph the executor could not have run is the validator working.
+
+The risk this takes on, stated plainly: a plan that used to be refused and repaired into something
+correct can now execute on the filled binding and answer wrongly, where before it failed loudly. It
+is bounded by the operators still raising on a shape they cannot read, and by the fill being the
+only binding the plan allows — but it is a real trade, and it is why the fill is one slot and one
+source rather than a best match.
+
+**This spends `seoul_kmapeval_v7a_mcq_300.jsonl`.** `src/` changed in response to what that set
+showed, so 52.1/79.2 is what the code at `ba92d9c` scored. The next holdout has to be a new draw.

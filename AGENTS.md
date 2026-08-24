@@ -139,8 +139,9 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
 - `dataset/seoul_kmapeval_v7a_mcq_300.jsonl`: the standard builder asked for 300 a second time; it
   drew 282, and it is the first set at this size `data/audit_dataset.py` passes. Built and run at
   `ba92d9c`, six questions in common with the 283-row draw. Floor 26.8 (21.3 excluding the
-  `unanswerable_*` families), ReAct 52.1, Spatial-Agent 79.2 over three passes a side. **Held
-  out** as long as nothing under `src/` or `data/` changes. Two draws at this size say overall
+  `unanswerable_*` families), ReAct 52.1, Spatial-Agent 79.2 over three passes a side. **Spent**:
+  the run exposed the argument-spelling refusals and `src/` changed to close them, so those
+  numbers belong to `ba92d9c`. Two draws at this size say overall
   accuracy is stable to ~3 points and *family* accuracy is not — `trip_total_distance` moved
   ReAct 58.7 points between them — so quote family and class numbers only across draws.
 - `dataset/seoul_kmapeval_v7_mcq_300.jsonl`: the standard builder asked for 300; it drew 283. The

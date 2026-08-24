@@ -1736,7 +1736,7 @@ adoption gains had nowhere to appear.
 Least-used-first alone did not fix it, and measuring said why: under the 90 m ordinal margin,
 **six of one draw's eight anchors were separable at k=2 only**, because ranks three through five of
 a dense neighbourhood sit within 90 m of each other. There was nothing to choose. The family now
-keeps scanning anchors while a value is short, bounded by `ORDINAL_SCAN_LIMIT`, and fills equal
+keeps scanning anchors while a value is short, bounded by `_scan_limit`, and fills equal
 quotas at the end with the remainder going to k=2 — the value the city can always supply.
 
 Rebuilt under the same seed: `nearby_kth_nearest` goes from `{2: 7, 3: 1}` to `{2: 4, 3: 2, 4: 2}`
@@ -1913,3 +1913,30 @@ four losses, all of them two rows that never finished. Four of the six reasoning
 
 Cost keeps its shape: ReAct 2,292 LLM calls for 4.0M tokens at 37.7s a question; Spatial-Agent 870
 calls for 6.3M tokens at 79.9s. Fewer, larger calls.
+
+### The audit failed this set, and the cause was a constant that stopped growing
+
+`data/audit_dataset.py` exits non-zero on it:
+
+    nearby_kth_nearest: k varies across [2, 3, 4] but 19 of 24 rows ask for k=2
+
+This is the defect (c) above was supposed to have closed. Drawing the ordinal was not enough: the
+family's coverage scan was bounded by `ORDINAL_SCAN_LIMIT = 24`, which at v6's quota of **eight**
+rows is three times the count and leaves room to keep hunting the scarce ordinals, and at the
+standard builder's **twenty-four** *is* the count. The loop stopped the instant it had enough rows
+and shipped whatever the first anchors offered — and a dense city offers k=2, because ranks three
+through five of a block sit inside the 90 m ordinal margin. The balancing code was present and
+correct the whole time; it never got a candidate to balance.
+
+The constant is now a floor, `_scan_limit(floor, count) = max(floor, count * 3)`. At every quota in
+v6 and v7 — eight rows for this family, four for the radius one — that is the constant it always
+was, so **both benchmarks of record still draw what they drew**; a fix to a shared generator that
+moved them would have silently rewritten two published numbers. `tests/test_benchmark_families.py`
+pins the cause rather than the symptom: the same fake draw fails the audit's concentration
+threshold when `_scan_limit` is pinned back to the floor.
+
+Two things follow. The 24 affected rows are 8.5% of the set and they are not a second answer key —
+the options are place names and the gold position is shuffled — so the accuracies above stand; what
+the family measured is narrower than advertised, mostly "second nearest" rather than k ∈ {2,3,4}.
+And **the set is spent**: `data/` changed in response to what it showed, so 48.9/78.9 is what the
+code at `6bae55c` scored, not a holdout number for anything built afterwards.

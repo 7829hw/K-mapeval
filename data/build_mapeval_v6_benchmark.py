@@ -102,9 +102,24 @@ RADII = (300, 500, 800)
 # place within this band of the boundary is not reliably on either side of it.
 BOUNDARY_MARGIN_M = 70.0
 # How many anchors the radius-count family may resolve while hunting for an uncovered rung.
-RADIUS_SCAN_LIMIT = 24
+RADIUS_SCAN_FLOOR = 24
 # How many anchors the k-th nearest family may build while hunting for a scarce ordinal.
-ORDINAL_SCAN_LIMIT = 24
+ORDINAL_SCAN_FLOOR = 24
+
+
+def _scan_limit(floor: int, count: int) -> int:
+    """How far a coverage scan may run: three times the rows it has to fill, never below `floor`.
+
+    A constant limit is a limit that stops balancing as soon as the build gets big. At v6's quota
+    of eight rows, 24 is three times the count and the scan has room to keep hunting the scarce
+    ordinals; at the standard builder's twenty-four it *is* the count, so the loop stopped the
+    instant it had enough rows and shipped whatever mix the first anchors handed it -- 19 of 24
+    rows at k=2 on the 283-row set, which `audit_dataset.py` failed. The floor is still 24, so
+    every family that draws eight rows or fewer -- which is every family in v6 and v7 -- scans
+    exactly what it scanned and draws exactly what it drew.
+    """
+
+    return max(floor, count * 3)
 
 
 # ------------------------------------------------------------------ nearby
@@ -125,6 +140,11 @@ def nearby_kth_nearest(
     rng.shuffle(anchors)
     codes = ["CE7", "BK9", "PM9", "CS2"]
     produced_counts: dict[int, int] = {2: 0, 3: 0, 4: 0}
+    # What the selection at the end of this function hands each of 2, 3 and 4, so that "we have
+    # enough of every ordinal" is asked against the quota that will actually be filled rather than
+    # against a fraction of it. At v6's count of eight the two are the same number.
+    per_value = count // 3
+    scan_limit = _scan_limit(ORDINAL_SCAN_FLOOR, count)
     made: list[tuple[int, dict]] = []
     used: set[str] = set()
     for index, anchor in enumerate(anchors):
@@ -133,9 +153,9 @@ def nearby_kth_nearest(
         # separable at k=2 only, because ranks three through five of a dense neighbourhood sit
         # within 90 m of each other. So keep scanning while a value is still short, and pick the
         # rows at the end.
-        if len(made) >= count and min(produced_counts.values()) >= count // 4:
+        if len(made) >= count and min(produced_counts.values()) >= per_value:
             break
-        if len(made) >= ORDINAL_SCAN_LIMIT:
+        if len(made) >= scan_limit:
             break
         if anchor.place_id in used:
             continue
@@ -353,7 +373,7 @@ def nearby_within_radius_count(
         covered = {rung for rung, _ in made}
         if len(made) >= count and len(covered) >= min(count, 4):
             break
-        if scanned >= RADIUS_SCAN_LIMIT:
+        if scanned >= _scan_limit(RADIUS_SCAN_FLOOR, count):
             break
         if anchor.place_id in used:
             continue

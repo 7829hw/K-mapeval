@@ -117,7 +117,11 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
 - Every rung a question offers has to be reachable *and* reached. A family whose options are a
   fixed ladder must be able to answer each rung, and should spend its rows across them the way
   `trip_feasible_count` does — keying the answer on a loop index spends them wherever the loop
-  happened to succeed.
+  happened to succeed. Drawing the parameter is only half of it: the scan that hunts for the scarce
+  values has to be bounded by something that grows with `count`, or the balancing runs out of
+  candidates the moment the build gets bigger than the constant was sized for. That is how
+  `nearby_kth_nearest` shipped 19 of 24 rows at k=2 in the 283-row set with correct balancing code.
+  Re-run `data/audit_dataset.py` at the size you are actually building.
 - Every benchmark in `dataset/` has been tuned against, so an accuracy on one is a training-set
   accuracy. Build a held-out set with `--seed`/`--id-prefix` on a builder, change nothing under
   `src/` afterwards, and report that number separately. The reference point is upstream

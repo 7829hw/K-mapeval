@@ -98,6 +98,12 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   100-question run carries a spread of about ±8 points. Run each configuration several times and
   read any difference against that spread; a single-run comparison of two architectures is not a
   result. See `docs/REFERENCE_MAPPING.md`.
+- Passes are not draws, and a family needs both. Three passes over ~282 rows pin an *overall*
+  accuracy to about ±2, and two such draws agreed to within 3.2 points — but between those same
+  two draws `trip_total_distance` moved ReAct 58.7 points and the `trip` class changed which
+  architecture won it. So a family or class number belongs to the draw it was measured on: quote
+  it across draws, or quote it as one draw's. Read it as lift over that draw's own floor, because
+  a redraw moves the floor too.
 - Run `python data/audit_dataset.py <dataset>` after every build and before the floor. It exits
   non-zero on a second answer key: a gold sitting at a fixed rank once the options are sorted, an
   option that can never be the answer, a gold whose text appears in its own question, duplicate
@@ -130,6 +136,13 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
 
 ## Benchmarks
 
+- `dataset/seoul_kmapeval_v7a_mcq_300.jsonl`: the standard builder asked for 300 a second time; it
+  drew 282, and it is the first set at this size `data/audit_dataset.py` passes. Built and run at
+  `ba92d9c`, six questions in common with the 283-row draw. Floor 26.8 (21.3 excluding the
+  `unanswerable_*` families), ReAct 52.1, Spatial-Agent 79.2 over three passes a side. **Held
+  out** as long as nothing under `src/` or `data/` changes. Two draws at this size say overall
+  accuracy is stable to ~3 points and *family* accuracy is not — `trip_total_distance` moved
+  ReAct 58.7 points between them — so quote family and class numbers only across draws.
 - `dataset/seoul_kmapeval_v7_mcq_300.jsonl`: the standard builder asked for 300; it drew 283. The
   largest set here and the one whose numbers carry the least sampling noise — three passes a side
   at `6bae55c` spanned 2.1 points for ReAct and 1.8 for Spatial-Agent, against the ±8 a hundred

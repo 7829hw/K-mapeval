@@ -1940,3 +1940,104 @@ the options are place names and the gold position is shuffled — so the accurac
 the family measured is narrower than advertised, mostly "second nearest" rather than k ∈ {2,3,4}.
 And **the set is spent**: `data/` changed in response to what it showed, so 48.9/78.9 is what the
 code at `6bae55c` scored, not a holdout number for anything built afterwards.
+
+## v7a: the same size a second time, and what two draws say that one could not
+
+`dataset/seoul_kmapeval_v7a_mcq_300.jsonl` is the standard builder asked for 300 again; it drew
+282, and it is the **first set at this size that `data/audit_dataset.py` passes**. Built at
+`ba92d9c` fifteen minutes after the scan-limit fix and run there, with nothing under `src/` or
+`data/` changed since and six of its 282 questions in common with the previous draw. A holdout.
+
+| | passes | mean | pooled |
+| --- | --- | --- | --- |
+| no-tool floor | 76, 75 | **26.8** | 151/564 |
+| ReAct (reference) | 50.7, 51.8, 53.9 | **52.1** | 441/846 |
+| Spatial-Agent | 78.0, 81.2, 78.4 | **79.2** | 670/846 |
+
+The gap is 27.1. Set beside the previous draw — same generator, same revision family, 283 rows
+against 282 — the overall numbers are stable and the floor is too:
+
+| | floor | ReAct | Spatial-Agent | gap |
+| --- | --- | --- | --- | --- |
+| v7 300 (`6bae55c`) | 28.8 | 48.9 | 78.9 | 30.0 |
+| v7a 300 (`ba92d9c`) | 26.8 | 52.1 | 79.2 | 27.1 |
+
+**The ordinal fix worked, and did not solve the family.** `nearby_kth_nearest` goes from
+`{2: 19, 3: 3, 4: 2}` to `{2: 16, 3: 6, 4: 2}`, which clears the audit's 70% concentration
+threshold at 66.7% — cleared, not comfortably. The remaining lopsidedness is the city rather than
+the code: an anchor whose ranks one through five are all separable by 90 m is rare, and a scan that
+finds none cannot balance what it does not have. Raising the limit further buys nothing; the next
+move on this family, if it needs one, is the margin or the rank pool.
+
+### Family-level accuracy does not survive a redraw, and overall accuracy does
+
+This is the finding two draws bought that one could not. Both sets are ~282 rows at three passes a
+side, so per-pass noise is 1.6–1.8 points. Between draws:
+
+| family | floor | ReAct | Spatial-Agent |
+| --- | --- | --- | --- |
+| `trip_total_distance` | 23.8 → **40.5** | 34.9 → **93.7** | 68.3 → 82.5 |
+| `nearby_subtype_kth` | 26.7 → 13.3 | 71.1 → **47.8** | 86.7 → 90.0 |
+| `routing_nth_turn` | 16.7 → 11.9 | 38.1 → **60.3** | 96.8 → 93.7 |
+| `routing_turn_count_via` | 9.5 → 2.4 | 22.2 → **41.3** | 82.5 → 93.7 |
+| `nearby_within_radius_count` | 33.3 → 33.3 | 58.3 → **38.9** | 63.9 → 66.7 |
+
+ReAct's `trip_total_distance` moved 58.7 points on 63 rows. The option structure is identical
+across the two draws — gold sorted-rank spread flat in both, closest-distractor relative gap
+median 0.20 in both — and the visible difference is trip length: total driving distance median
+22.2 km, then 30.9 km. **The floor moved with it, 23.8 to 40.5**, which says a third of that swing
+is the family becoming guessable rather than ReAct becoming able: a three-leg drive across Seoul
+that totals ~31 km sits closer to whatever prior the model has for such a trip than one that totals
+~22 km, so the right bucket gets picked without measuring anything. Lift over the floor is the
+honest read, and it still moved: 11.1 points, then 53.2.
+
+The consequence for this repository is a rule, not a caveat. **A single draw supports an overall
+accuracy and does not support a family or class claim.** In this draw ReAct wins the whole `trip`
+class, 73.7 against Spatial-Agent's 69.2; in the previous one it lost it, 55.1 against 67.2. Every
+family-level diagnosis published here before this section rests on one draw.
+
+### What the floor says about `distance`
+
+| class | rows | floor | ReAct | Spatial-Agent |
+| --- | --- | --- | --- | --- |
+| routing | 66 | 12.1 | 44.9 | **92.4** |
+| distance | 45 | 25.6 | **25.9** | 83.7 |
+| nearby | 93 | 36.6 | 56.3 | 76.3 |
+| trip | 66 | 27.3 | 73.7 | 69.2 |
+| radius | 12 | 33.3 | 38.9 | 66.7 |
+
+**ReAct scores 25.9 on `distance` against a floor of 25.6.** Five tools and fifteen iterations
+bought it three tenths of a point over answering closed-book; on `poi_farthest_of_three` it scores
+25.0 against a floor of 29.2, which is below it. Spatial-Agent gets 83.7 on the same rows, so the
+questions are answerable and the measurements are there to be made. This is the sharpest statement
+this repository has of what the baseline cannot do: it is not that ReAct measures distances badly,
+it is that on this class it is not measuring at all.
+
+Routing is the mirror image — the lowest floor in the set (12.1, and `routing_turn_count_via` is
+1/42 closed-book) and the class ReAct climbs furthest above its own floor, 32.8 points. The widest
+architecture gap is `distance`'s 57.8, for the reason above: one side is measuring and the other
+is not.
+
+`unanswerable_*` remains free for everyone: 40 of 42 rows closed-book. Over the other 522 rows the
+floor is **21.3**, below four-way chance, and the chosen-option histogram is flat in both passes.
+
+### Failures, and one that repeats
+
+ReAct: three `iteration_limit` in 846 rows (0.35%) — two `trip_optimal_order`, one
+`nearby_within_radius_count`. Not the 24-of-60 that v6's four-stop families produced, but not zero
+either; v7's three-stop trips fit the budget with little to spare. No truncation, no overflow.
+
+Spatial-Agent: eleven in 846 (1.3%) — six `llm_context_overflow`, all but one in the two ordinal
+families that retrieve, and five `agent_reasoning_failure`. **`kmapeval_223` failed on all three
+passes**, as `trip_total_distance` did four times on the previous draw. A failure that repeats
+across passes is a defect rather than a draw, and it is the one worth opening next.
+
+Cost is unchanged in shape: ReAct 2,333 calls for 4.0M tokens at 36.7s a question, Spatial-Agent
+868 calls for 6.5M tokens at 79.6s.
+
+**One tooling defect, found by running this floor.** `data/measure_no_tool_floor.py` measured a
+dataset in one thread pool and caught only `LLMUnavailableError`. A closed-book question spiralled
+to 65,304 completion tokens, `LLMOutputTruncatedError` escaped the pool, and every other answer in
+the run went with it. It now catches the same three the evaluator separates — unavailable,
+truncated, overflow — records each as a per-question failure and names the rows, so a floor over
+fewer rows than it claims says so. Fixed at `218bcce`; both passes above ran clean afterwards.

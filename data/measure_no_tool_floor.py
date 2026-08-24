@@ -24,7 +24,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.agent.base import format_question  # noqa: E402
 from src.config import Settings  # noqa: E402
-from src.llm import LLMUnavailableError, OpenAIChatClient  # noqa: E402
+from src.llm import (  # noqa: E402
+    LLMContextOverflowError,
+    LLMOutputTruncatedError,
+    LLMUnavailableError,
+    OpenAIChatClient,
+)
 from src.parsing import parse_answer  # noqa: E402
 
 # Not `REACT_SYSTEM_PROMPT`: that one tells the agent to use the map tools, and with none bound 22
@@ -54,7 +59,13 @@ def answer_one(row: dict) -> dict:
             )
             text = llm.chat(messages).content
         failure = None
-    except LLMUnavailableError as exc:
+    # The three ways a call ends without an answer, all of them the endpoint's and none of them
+    # this question's fault. They are the same three the evaluator separates for an agent run, and
+    # they are caught for the same reason: one closed-book question that sends the model into a
+    # reasoning spiral used to raise out of the thread pool and take the whole floor with it --
+    # 282 questions' worth of answers discarded because one of them wrote 65,304 tokens. A floor
+    # is a measurement; it reports what it could not measure rather than refusing to report.
+    except (LLMUnavailableError, LLMOutputTruncatedError, LLMContextOverflowError) as exc:
         text, failure = "", f"{type(exc).__name__}: {exc}"
     finally:
         llm.close()
@@ -78,11 +89,16 @@ def main() -> None:
         results = list(pool.map(answer_one, rows))
     correct = sum(row["correct"] for row in results)
     print(f"\n=== no-tool floor on {dataset}")
+    failed = [row for row in results if row["failure"]]
     print(
         f"overall {correct}/{len(results)}   "
         f"unparsed {sum(row['predicted'] is None for row in results)}   "
-        f"failures {sum(bool(row['failure']) for row in results)}"
+        f"failures {len(failed)}"
     )
+    # A floor with rows the endpoint never answered is a floor over fewer rows than it claims, so
+    # say which and how many rather than folding them into the denominator silently.
+    for row in failed:
+        print(f"  ! {row['id']} {row['template_id']}: {row['failure'][:120]}")
     totals: Counter[str] = Counter()
     hits: Counter[str] = Counter()
     for row in results:

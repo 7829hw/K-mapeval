@@ -77,6 +77,64 @@ def test_evaluator_writes_upstream_spatial_agent_report_and_query_logs(tmp_path)
     assert "WORKFLOW COMPLETED" in log_text
 
 
+def test_partial_execution_errors_are_kept_per_question_and_aggregated(
+    tmp_path, capsys
+) -> None:
+    class PartiallyRecoveredAgent(BenchmarkAgent):
+        agent_type = "partial"
+
+        def answer(self, question: str, options: list[str]) -> AgentResult:
+            return AgentResult(
+                agent_type=self.agent_type,
+                predicted_answer=0,
+                execution_errors=[
+                    {
+                        "step_id": "route",
+                        "operator": "directions",
+                        "error": "RouteNotFoundError: no route",
+                    },
+                    {
+                        "step_id": "turns",
+                        "operator": "steps_analysis",
+                        "error": "ValueError: route unavailable",
+                    },
+                ],
+            )
+
+    item = BenchmarkItem(
+        id="partial-1", question="q", options=["x", "y"], answer=0, classification="routing"
+    )
+    report = Evaluator(
+        PartiallyRecoveredAgent(),
+        [item],
+        output_dir=None,
+        log_dir=tmp_path / "logs",
+    ).run()
+
+    row = report.results[0]
+    assert row["answer_correct"] is True
+    assert row["failure_type"] is None
+    assert row["execution_error_count"] == 2
+    assert [error["step_id"] for error in row["execution_errors"]] == ["route", "turns"]
+    performance = report.statistics["performance"]
+    assert performance["execution_error_question_count"] == 1
+    assert performance["execution_error_question_ids"] == ["partial-1"]
+    assert performance["execution_error_step_count"] == 2
+    assert performance["execution_error_operators"] == {
+        "directions": 1,
+        "steps_analysis": 1,
+    }
+    assert (
+        "Intermediate execution errors: 2 step(s) across 1 question(s)"
+        in capsys.readouterr().out
+    )
+    log_text = next((tmp_path / "logs").glob("*.log")).read_text(encoding="utf-8")
+    assert (
+        'EXECUTION ERRORS | steps 2 | operators {"directions": 1, "steps_analysis": 1}'
+        in log_text
+    )
+
+
 def test_report_is_created_after_batch_and_terminal_matches_upstream_style(
     tmp_path, capsys
 ) -> None:

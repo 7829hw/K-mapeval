@@ -23,6 +23,16 @@ ROLE_PRIORITY = {
 class OperatorContract:
     output_type: str
     required_arguments: tuple[str, ...] = ()
+    optional_arguments: tuple[str, ...] = ()
+    # Arguments whose values may be outputs of earlier graph nodes.  This does not make every
+    # bare string a reference: normalization only promotes a value when it exactly names one of
+    # the node's declared dependencies.  Keeping the information on the contract prevents a
+    # literal such as metric="distance" or mode="driving" from being mistaken for a node id.
+    reference_arguments: tuple[str, ...] = ()
+
+    @property
+    def allowed_arguments(self) -> frozenset[str]:
+        return frozenset((*self.required_arguments, *self.optional_arguments))
 
 
 @dataclass(frozen=True)
@@ -88,61 +98,262 @@ class FactorizedGeoFlow:
 
 
 OPERATOR_CONTRACTS: dict[str, OperatorContract] = {
-    "identity_measure": OperatorContract("object", ("value",)),
-    "place_search": OperatorContract("object"),
-    "batch_geocode": OperatorContract("object", ("place_names",)),
-    "geocode": OperatorContract("location", ("address",)),
-    "reverse_geocode": OperatorContract("location", ("latitude", "longitude")),
-    "place_details": OperatorContract("object", ("place_id",)),
-    "batch_place_details": OperatorContract("object", ("place_ids",)),
-    "nearby_places": OperatorContract("object", ("center",)),
+    "identity_measure": OperatorContract(
+        "object", ("value",), reference_arguments=("value",)
+    ),
+    "place_search": OperatorContract(
+        "object",
+        optional_arguments=(
+            "query",
+            "center",
+            "category_code",
+            "radius_m",
+            "min_rating",
+            "open_now",
+            "limit",
+        ),
+        reference_arguments=("center",),
+    ),
+    "batch_geocode": OperatorContract(
+        "object",
+        ("place_names",),
+        ("anchor", "radius_m", "limit", "strict_names"),
+        ("anchor",),
+    ),
+    "geocode": OperatorContract("location", ("address",), ("limit",)),
+    "reverse_geocode": OperatorContract(
+        "location", ("latitude", "longitude"), ("limit",), ("latitude", "longitude")
+    ),
+    "place_details": OperatorContract(
+        "object", ("place_id",), reference_arguments=("place_id",)
+    ),
+    "batch_place_details": OperatorContract(
+        "object", ("place_ids",), reference_arguments=("place_ids",)
+    ),
+    "nearby_places": OperatorContract(
+        "object",
+        ("center",),
+        ("query", "category_code", "radius_m", "limit"),
+        ("center",),
+    ),
     # `candidates` defaults to an empty list on the tool: recovering options with nothing
     # retrieved yet is a legitimate plan, and requiring it here refused one.
-    "recover_option_places": OperatorContract("object", ("options", "anchor")),
-    "directions": OperatorContract("field", ("origin", "destination")),
-    "travel_time": OperatorContract("field", ("origin", "destination")),
-    "distance_matrix": OperatorContract("field"),
-    "haversine_distance": OperatorContract("amount"),
-    "pairwise_distances": OperatorContract("field", ("pairs",)),
-    "pairwise_extremes": OperatorContract("amount", ("locations",)),
-    "bearing_to_direction": OperatorContract("field"),
-    "filter_by_direction": OperatorContract("object", ("center", "places", "direction")),
-    "nearest": OperatorContract("object", ("anchor", "candidates")),
-    "within_radius": OperatorContract("object", ("center", "candidates", "radius_m")),
-    "select_min": OperatorContract("object", ("items",)),
-    "select_max": OperatorContract("object", ("items",)),
-    "sort_by": OperatorContract("object", ("items", "key")),
-    "select_by_index": OperatorContract("object", ("items", "index")),
-    "compare_routes": OperatorContract("object", ("routes",)),
-    "filter_routes": OperatorContract("field", ("routes", "keyword")),
-    "extract_distance": OperatorContract("amount", ("route",)),
-    "extract_duration": OperatorContract("amount", ("route",)),
-    "filter_places": OperatorContract("object", ("places",)),
-    "steps_analysis": OperatorContract("field", ("route",)),
-    "sum_route_metrics": OperatorContract("amount", ("routes",)),
-    "sum_amounts": OperatorContract("amount", ("amounts",)),
-    "difference": OperatorContract("amount", ("minuend", "subtrahend")),
-    "aggregate_route_groups": OperatorContract("amount", ("routes", "groups")),
-    "merge_places": OperatorContract("object", ("items",)),
-    "match_options": OperatorContract("object", ("options", "places")),
-    "match_distance_options": OperatorContract("object", ("distance", "options")),
-    "match_type_options": OperatorContract("object", ("place", "options")),
-    "events_from_objects": OperatorContract("event", ("objects",)),
-    "filter_events": OperatorContract("event", ("events", "field", "operator", "value")),
-    "build_route_network": OperatorContract("network", ("nodes", "edges")),
-    "calculate_proportion": OperatorContract("proportion", ("numerator", "denominator")),
-    "open_at_time": OperatorContract("event", ("schedule", "local_time", "timezone")),
-    "timezone": OperatorContract("event", ("latitude", "longitude")),
-    "timezone_convert": OperatorContract("event", ("local_time", "from_timezone", "to_timezone")),
+    "recover_option_places": OperatorContract(
+        "object",
+        ("options", "anchor"),
+        ("candidates", "category_code", "radius_m", "direction"),
+        ("anchor", "candidates"),
+    ),
+    "directions": OperatorContract(
+        "field",
+        ("origin", "destination"),
+        ("mode", "priority", "waypoints", "include_steps"),
+        ("origin", "destination", "waypoints"),
+    ),
+    "travel_time": OperatorContract(
+        "field",
+        ("origin", "destination"),
+        ("mode", "priority", "waypoints", "include_steps"),
+        ("origin", "destination", "waypoints"),
+    ),
+    "distance_matrix": OperatorContract(
+        "field",
+        optional_arguments=("origins", "destinations", "pairs", "mode", "priority"),
+        reference_arguments=("origins", "destinations", "pairs"),
+    ),
+    "haversine_distance": OperatorContract(
+        "amount",
+        optional_arguments=(
+            "place_a",
+            "place_b",
+            "lat1",
+            "lon1",
+            "lng1",
+            "lat2",
+            "lon2",
+            "lng2",
+            "start_lat",
+            "start_lng",
+            "start_lon",
+            "end_lat",
+            "end_lng",
+            "end_lon",
+        ),
+        reference_arguments=("place_a", "place_b"),
+    ),
+    "pairwise_distances": OperatorContract(
+        "field", ("pairs",), reference_arguments=("pairs",)
+    ),
+    "pairwise_extremes": OperatorContract(
+        "amount", ("locations",), reference_arguments=("locations",)
+    ),
+    "bearing_to_direction": OperatorContract(
+        "field",
+        optional_arguments=(
+            "place_a",
+            "place_b",
+            "lat1",
+            "lon1",
+            "lng1",
+            "lat2",
+            "lon2",
+            "lng2",
+            "start_lat",
+            "start_lng",
+            "start_lon",
+            "end_lat",
+            "end_lng",
+            "end_lon",
+        ),
+        reference_arguments=("place_a", "place_b"),
+    ),
+    "filter_by_direction": OperatorContract(
+        "object",
+        ("center", "places", "direction"),
+        reference_arguments=("center", "places"),
+    ),
+    "nearest": OperatorContract(
+        "object",
+        ("anchor", "candidates"),
+        ("metric", "routes", "required_type"),
+        ("anchor", "candidates", "routes"),
+    ),
+    "within_radius": OperatorContract(
+        "object",
+        ("center", "candidates", "radius_m"),
+        reference_arguments=("center", "candidates"),
+    ),
+    "select_min": OperatorContract(
+        "object", ("items",), ("key",), ("items",)
+    ),
+    "select_max": OperatorContract(
+        "object", ("items",), ("key",), ("items",)
+    ),
+    "sort_by": OperatorContract(
+        "object", ("items", "key"), ("descending",), ("items",)
+    ),
+    "select_by_index": OperatorContract(
+        "object", ("items", "index"), ("key", "descending"), ("items", "index")
+    ),
+    "compare_routes": OperatorContract(
+        "object", ("routes",), ("metric",), ("routes",)
+    ),
+    "filter_routes": OperatorContract(
+        "field", ("routes", "keyword"), ("include",), ("routes",)
+    ),
+    "extract_distance": OperatorContract(
+        "amount", ("route",), reference_arguments=("route",)
+    ),
+    "extract_duration": OperatorContract(
+        "amount", ("route",), reference_arguments=("route",)
+    ),
+    "filter_places": OperatorContract(
+        "object",
+        ("places",),
+        ("min_rating", "price_levels", "required_types", "open_now"),
+        ("places",),
+    ),
+    "steps_analysis": OperatorContract(
+        "field", ("route",), ("landmark",), ("route",)
+    ),
+    "sum_route_metrics": OperatorContract(
+        "amount", ("routes",), ("metric",), ("routes",)
+    ),
+    "sum_amounts": OperatorContract(
+        "amount", ("amounts",), ("key",), ("amounts",)
+    ),
+    "difference": OperatorContract(
+        "amount", ("minuend", "subtrahend"), ("key",), ("minuend", "subtrahend")
+    ),
+    "aggregate_route_groups": OperatorContract(
+        "amount", ("routes", "groups"), reference_arguments=("routes", "groups")
+    ),
+    "merge_places": OperatorContract(
+        "object", ("items",), reference_arguments=("items",)
+    ),
+    "match_options": OperatorContract(
+        "object",
+        ("options", "places"),
+        ("anchor", "mode", "minimum_similarity"),
+        ("places", "anchor"),
+    ),
+    "match_distance_options": OperatorContract(
+        "object", ("distance", "options"), reference_arguments=("distance",)
+    ),
+    "match_type_options": OperatorContract(
+        "object", ("place", "options"), reference_arguments=("place",)
+    ),
+    "events_from_objects": OperatorContract(
+        "event", ("objects",), ("event_type", "timestamp_field"), ("objects",)
+    ),
+    "filter_events": OperatorContract(
+        "event",
+        ("events", "field", "operator", "value"),
+        reference_arguments=("events", "value"),
+    ),
+    "build_route_network": OperatorContract(
+        "network", ("nodes", "edges"), reference_arguments=("nodes", "edges")
+    ),
+    "calculate_proportion": OperatorContract(
+        "proportion",
+        ("numerator", "denominator"),
+        reference_arguments=("numerator", "denominator"),
+    ),
+    "open_at_time": OperatorContract(
+        "event",
+        ("schedule", "local_time", "timezone"),
+        reference_arguments=("schedule", "local_time"),
+    ),
+    "timezone": OperatorContract(
+        "event",
+        ("latitude", "longitude"),
+        ("timestamp",),
+        ("latitude", "longitude", "timestamp"),
+    ),
+    "timezone_convert": OperatorContract(
+        "event",
+        ("local_time", "from_timezone", "to_timezone"),
+        reference_arguments=("local_time",),
+    ),
     # Only `locations` is unconditionally required: the itinerary is anchored by *either*
     # start_time or arrival_time, and `CalculateFinishTimeArgs` enforces exactly-one with a
     # message G4 cannot express. Leaving start_time required here refused every plan that used
     # the reverse mode the prompt had just told planners to use.
-    "calculate_finish_time": OperatorContract("event", ("locations",)),
-    "calculate_start_time": OperatorContract(
-        "event", ("arrival_time", "duration_s", "timezone")
+    "calculate_finish_time": OperatorContract(
+        "event",
+        ("locations",),
+        ("start_time", "arrival_time", "stay_durations_s", "timezone", "mode", "priority"),
+        ("locations", "start_time", "arrival_time", "stay_durations_s"),
     ),
-    "tsp_tw": OperatorContract("network", ("nodes", "distance_matrix")),
+    "calculate_start_time": OperatorContract(
+        "event",
+        ("arrival_time", "duration_s", "timezone"),
+        ("stay_durations_s",),
+        ("arrival_time", "duration_s", "stay_durations_s"),
+    ),
+    "tsp_tw": OperatorContract(
+        "network",
+        ("nodes", "distance_matrix"),
+        (
+            "time_windows",
+            "service_times",
+            "start_index",
+            "time_budget",
+            "end_index",
+            "fixed_order",
+            "metric",
+            "return_to_start",
+        ),
+        (
+            "nodes",
+            "distance_matrix",
+            "time_windows",
+            "service_times",
+            "start_index",
+            "time_budget",
+            "end_index",
+        ),
+    ),
 }
 
 # Names planners wrote for an operation that now exists, mapped onto the operator that does it.
@@ -163,7 +374,7 @@ OPERATOR_SYNONYMS: dict[str, str] = {
 # only ever looked for the canonical one -- so a plan the executor would have run was refused
 # before it ran. `sum_amounts(items=[$leg1, $leg2])` was written exactly that way and lost its
 # question to "missing arguments: amounts". These are the same spellings the normalizer accepts.
-REQUIRED_ARGUMENT_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
+ARGUMENT_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
     "select_min": {"items": ("values", "inputs", "list", "candidates")},
     "select_max": {"items": ("values", "inputs", "list", "candidates")},
     "select_by_index": {
@@ -205,6 +416,18 @@ REQUIRED_ARGUMENT_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
             "items",
             "inputs",
         ),
+    },
+    "sum_route_metrics": {"routes": ("inputs", "legs")},
+    # These names state the same boolean.  The executor already canonicalizes them, so the graph
+    # contract must not reject a plan that the implementation accepts.
+    "tsp_tw": {
+        "fixed_order": (
+            "preserve_order",
+            "keep_order",
+            "in_order",
+            "sequential",
+            "ordered",
+        )
     },
 }
 
@@ -1300,6 +1523,27 @@ def _missing_arguments(
     ]
 
 
+def _accepted_argument_names(
+    contract: OperatorContract, aliases: dict[str, tuple[str, ...]]
+) -> frozenset[str]:
+    """Every canonical spelling and exact alias the implementation accepts."""
+
+    return contract.allowed_arguments | frozenset(
+        alias for names in aliases.values() for alias in names
+    )
+
+
+def _reference_argument_names(
+    contract: OperatorContract, aliases: dict[str, tuple[str, ...]]
+) -> frozenset[str]:
+    """Canonical and aliased data slots in which a declared dependency may be written bare."""
+
+    names = set(contract.reference_arguments)
+    for canonical in contract.reference_arguments:
+        names.update(aliases.get(canonical, ()))
+    return frozenset(names)
+
+
 def _validate_statically_known_reference_shapes(
     steps: list[dict[str, Any]], by_id: dict[str, dict[str, Any]]
 ) -> None:
@@ -1400,11 +1644,18 @@ def normalize_and_validate_graph(
             if operator == "select_max":
                 arguments.setdefault("descending", True)
             operator = "select_by_index"
+            contract = OPERATOR_CONTRACTS[operator]
         declared = raw.get("depends_on") or raw.get("before") or []
         if not isinstance(declared, list):
             raise ValueError(f"GeoFlow node {step_id} depends_on must be a list")
         declared_dependencies = [_normalize_dependency(value, raw_ids) for value in declared]
-        aliases = REQUIRED_ARGUMENT_ALIASES.get(operator, {})
+        aliases = ARGUMENT_ALIASES.get(operator, {})
+        unexpected = sorted(set(arguments) - _accepted_argument_names(contract, aliases))
+        if unexpected:
+            raise ValueError(
+                f"GeoFlow node {step_id} gives {operator} unsupported arguments: "
+                f"{', '.join(unexpected)}"
+            )
         missing = _missing_arguments(arguments, contract.required_arguments, aliases)
         # A node whose whole input is its one dependency, written as `arguments: {}` with
         # `depends_on: [previous]`. The planner said where the value comes from and the operator
@@ -1443,6 +1694,7 @@ def normalize_and_validate_graph(
             arguments,
             known_ids=known_ids,
             declared_dependencies=declared_dependencies,
+            bare_reference_arguments=_reference_argument_names(contract, aliases),
         )
         inferred = reference_roots(arguments)
         dependencies = list(dict.fromkeys([*declared_dependencies, *inferred]))
@@ -1887,11 +2139,37 @@ def _normalize_dependency(value: Any, raw_ids: list[str]) -> str:
     return text
 
 
+_NESTED_REFERENCE_KEYS = frozenset(
+    {
+        "anchor",
+        "candidates",
+        "center",
+        "destination",
+        "edges",
+        "events",
+        "items",
+        "locations",
+        "nodes",
+        "objects",
+        "origin",
+        "place",
+        "place_a",
+        "place_b",
+        "places",
+        "route",
+        "routes",
+        "value",
+    }
+)
+
+
 def _rewrite_placeholder_references(
     value: Any,
     *,
     known_ids: set[str],
     declared_dependencies: list[str],
+    bare_reference_arguments: frozenset[str] = frozenset(),
+    allow_bare_reference: bool = False,
 ) -> Any:
     if isinstance(value, dict):
         return {
@@ -1899,6 +2177,12 @@ def _rewrite_placeholder_references(
                 item,
                 known_ids=known_ids,
                 declared_dependencies=declared_dependencies,
+                bare_reference_arguments=bare_reference_arguments,
+                allow_bare_reference=(
+                    key in _NESTED_REFERENCE_KEYS
+                    if allow_bare_reference
+                    else key in bare_reference_arguments
+                ),
             )
             for key, item in value.items()
         }
@@ -1908,11 +2192,20 @@ def _rewrite_placeholder_references(
                 item,
                 known_ids=known_ids,
                 declared_dependencies=declared_dependencies,
+                bare_reference_arguments=bare_reference_arguments,
+                allow_bare_reference=allow_bare_reference,
             )
             for item in value
         ]
     if not isinstance(value, str):
         return value
+    stripped = value.strip()
+    if (
+        allow_bare_reference
+        and stripped in known_ids
+        and stripped in declared_dependencies
+    ):
+        return f"${stripped}"
     reference = canonical_reference(value)
     if not reference.startswith("$"):
         return value

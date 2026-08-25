@@ -140,6 +140,16 @@ def log_agent_result(
         "n/a" if result.reasoning_tokens is None else result.reasoning_tokens,
         result.reasoning_chars,
     )
+    if result.execution_errors:
+        operators: dict[str, int] = {}
+        for error in result.execution_errors:
+            operator = str(error.get("operator") or "unknown")
+            operators[operator] = operators.get(operator, 0) + 1
+        logger.info(
+            "EXECUTION ERRORS | steps %s | operators %s",
+            len(result.execution_errors),
+            json.dumps(operators, ensure_ascii=False, sort_keys=True),
+        )
     logger.info("=" * 80)
     logger.info("Result:")
     logger.info("  - Intent: %s", result.predicted_intent)

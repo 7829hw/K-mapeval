@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 from src.models import Place, Route
@@ -1063,6 +1065,119 @@ def test_every_required_argument_in_a_contract_is_one_the_operator_demands() -> 
             f"{name}: contract requires {sorted(claimed - demanded)} which the tool accepts "
             "without"
         )
+
+
+def test_every_runtime_argument_is_allowed_by_the_geoflow_contract() -> None:
+    """Adding an implementation parameter must not make valid plans fail contract validation."""
+
+    from src.agent.geoflow import OPERATOR_CONTRACTS
+
+    registry = ToolRegistry(_MatrixProvider())
+    for schema in registry.schemas():
+        name = schema["function"]["name"]
+        runtime = set(schema["function"]["parameters"].get("properties") or {})
+        assert runtime <= OPERATOR_CONTRACTS[name].allowed_arguments, (
+            f"{name}: contract omits runtime arguments "
+            f"{sorted(runtime - OPERATOR_CONTRACTS[name].allowed_arguments)}"
+        )
+
+    for name in SpatialOperatorRegistry.names:
+        runtime = set(inspect.signature(getattr(SpatialOperatorRegistry, name)).parameters)
+        assert runtime <= OPERATOR_CONTRACTS[name].allowed_arguments, (
+            f"{name}: contract omits runtime arguments "
+            f"{sorted(runtime - OPERATOR_CONTRACTS[name].allowed_arguments)}"
+        )
+
+
+def test_validation_rejects_unknown_arguments_before_operator_execution() -> None:
+    from src.agent.geoflow import normalize_and_validate_graph
+
+    graph = {
+        "graph": [
+            {
+                "id": "turns",
+                "operator": "steps_analysis",
+                "arguments": {"route": {}, "step_index": 3},
+                "role": "measure",
+            }
+        ]
+    }
+
+    with pytest.raises(ValueError, match=r"steps_analysis unsupported arguments: step_index"):
+        normalize_and_validate_graph(graph, max_steps=4)
+
+
+def test_declared_dependencies_in_data_arguments_become_references() -> None:
+    """Bare node ids are references only in data slots and only when declared as dependencies."""
+
+    from src.agent.geoflow import normalize_and_validate_graph
+
+    graph = {
+        "graph": [
+            {
+                "id": "locations",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["A", "B"]},
+                "role": "extent",
+            },
+            {
+                "id": "legs",
+                "operator": "distance_matrix",
+                "arguments": {"origins": "locations", "destinations": "locations"},
+                "depends_on": ["locations"],
+                "role": "support",
+            },
+            {
+                "id": "tour",
+                "operator": "tsp_tw",
+                "arguments": {
+                    "nodes": "locations",
+                    "distance_matrix": "legs",
+                    "metric": "distance",
+                },
+                "depends_on": ["locations", "legs"],
+                "role": "measure",
+            },
+        ]
+    }
+
+    steps, _ = normalize_and_validate_graph(graph, max_steps=4)
+
+    assert steps[1]["arguments"] == {
+        "origins": "$locations",
+        "destinations": "$locations",
+    }
+    assert steps[2]["arguments"]["nodes"] == "$locations"
+    assert steps[2]["arguments"]["distance_matrix"] == "$legs"
+    assert steps[2]["arguments"]["metric"] == "distance"
+
+    pair_graph = {
+        "graph": [
+            graph["graph"][0],
+            {
+                "id": "pair_leg",
+                "operator": "distance_matrix",
+                "arguments": {
+                    "pairs": [
+                        {
+                            "origin": "locations",
+                            "destination": "locations",
+                            "label": "locations",
+                        }
+                    ]
+                },
+                "depends_on": ["locations"],
+                "role": "measure",
+            },
+        ]
+    }
+    pair_steps, _ = normalize_and_validate_graph(pair_graph, max_steps=4)
+    pair = pair_steps[1]["arguments"]["pairs"][0]
+    assert pair == {
+        "origin": "$locations",
+        "destination": "$locations",
+        "label": "locations",
+    }
 
 
 def test_a_stray_dependency_is_dropped_when_the_references_are_sound() -> None:

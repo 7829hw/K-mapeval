@@ -131,6 +131,26 @@ def test_react_executes_common_tool_then_parses_answer() -> None:
     assert result.failure_type is None
 
 
+def test_react_preserves_a_tool_error_even_when_it_recovers_an_answer() -> None:
+    llm = QueuedLLM(
+        [
+            LLMResponse("", (LLMToolCall("bad-call", "place_details", {}),)),
+            LLMResponse("^^1^^"),
+        ]
+    )
+
+    result = ReactAgent(llm, ToolRegistry(FakeProvider()), max_steps=3).answer(
+        "질문", ["A", "B"]
+    )
+
+    assert result.predicted_answer == 1
+    assert result.failure_type is None
+    assert len(result.execution_errors) == 1
+    assert result.execution_errors[0]["step_id"] == "bad-call"
+    assert result.execution_errors[0]["operator"] == "place_details"
+    assert "place_id" in result.execution_errors[0]["error"]
+
+
 def test_a_question_records_what_it_cost_at_the_endpoint() -> None:
     """Tokens are summed over every completion the question asked for, thinking counted apart.
 
@@ -527,6 +547,32 @@ def test_lenient_validation_executes_a_structurally_repaired_graph_first() -> No
         if entry["stage"] == "validate" and entry.get("status") == "lenient"
     )
     assert lenient["plan_source"] == "repaired"
+
+
+def test_spatial_agent_preserves_recovered_operator_errors() -> None:
+    llm = QueuedLLM(
+        [
+            LLMResponse('{"intent":"poi"}'),
+            LLMResponse(
+                '{"graph":[{"id":"empty_rank","operator":"select_by_index",'
+                '"arguments":{"items":[],"index":0},"role":"measure"}]}'
+            ),
+            LLMResponse('{"predicted_option":0,"confidence":0.5,"reason":"fallback"}'),
+        ]
+    )
+
+    result = SpatialAgent(llm, ToolRegistry(FakeProvider()), max_steps=4).answer(
+        "질문", ["A", "B"]
+    )
+
+    assert result.predicted_answer == 0
+    assert result.failure_type is None
+    assert len(result.execution_errors) == 2
+    assert result.execution_errors[0]["step_id"] == "empty_rank"
+    assert result.execution_errors[0]["operator"] == "select_by_index"
+    assert "empty collection" in result.execution_errors[0]["error"]
+    assert result.execution_errors[1]["operator"] == "identity_measure"
+    assert "depends on failed step" in result.execution_errors[1]["error"]
 
 
 def test_registry_returns_error_observation_instead_of_raising() -> None:

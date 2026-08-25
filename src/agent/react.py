@@ -106,6 +106,7 @@ class ReactAgent(BenchmarkAgent):
         reasoning_steps = 0
         usage = TokenUsage()
         stopped_at_budget = False
+        execution_errors: list[dict[str, str]] = []
         try:
             for _ in range(self.max_steps):
                 reasoning_steps += 1
@@ -132,6 +133,14 @@ class ReactAgent(BenchmarkAgent):
                             **observation,
                         }
                     )
+                    if execution.status == "error":
+                        execution_errors.append(
+                            {
+                                "step_id": str(call.id),
+                                "operator": call.name,
+                                "error": str(execution.error or "Unknown tool execution error"),
+                            }
+                        )
                     messages.append(
                         {
                             "role": "tool",
@@ -201,6 +210,7 @@ class ReactAgent(BenchmarkAgent):
             total_tokens=usage.total_tokens,
             reasoning_tokens=usage.reasoning_tokens,
             reasoning_chars=usage.reasoning_chars,
+            execution_errors=execution_errors,
             latency_ms=(time.perf_counter() - started) * 1000,
             failure_type=failure_type,
             failure_message=failure_message,

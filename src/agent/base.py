@@ -32,6 +32,11 @@ class AgentResult(BaseModel):
     total_tokens: int = Field(default=0, ge=0)
     reasoning_tokens: int | None = Field(default=None, ge=0)
     reasoning_chars: int = Field(default=0, ge=0)
+    # A tool/operator step may fail while the architecture continues and still selects an answer.
+    # Keep those partial failures separate from `failure_type`, which says whether the question
+    # itself failed.  Without this field a confident answer hid every broken intermediate step in
+    # a per-query log that the JSON report could not aggregate.
+    execution_errors: list[dict[str, str]] = Field(default_factory=list)
     latency_ms: float = Field(default=0.0, ge=0)
     failure_type: str | None = None
     failure_message: str | None = None

@@ -342,6 +342,7 @@ class SpatialAgent(BenchmarkAgent):
         predicted_intent: str | None = None
         reasoning_steps = 0
         usage = TokenUsage()
+        execution_errors: list[dict[str, str]] = []
         try:
             analysis_response = self.llm.chat(
                 [
@@ -581,6 +582,14 @@ class SpatialAgent(BenchmarkAgent):
                         "status": "error",
                         "error": results[step_id]["error"],
                     }
+                if entry.get("status") == "error":
+                    execution_errors.append(
+                        {
+                            "step_id": step_id,
+                            "operator": operator,
+                            "error": str(entry.get("error") or "Unknown operator execution error"),
+                        }
+                    )
                 entry["state_keys"] = list(results)
                 for binding in step.get("output_bindings") or []:
                     concept_id = str(binding.get("concept_id") or "")
@@ -681,6 +690,7 @@ class SpatialAgent(BenchmarkAgent):
             total_tokens=usage.total_tokens,
             reasoning_tokens=usage.reasoning_tokens,
             reasoning_chars=usage.reasoning_chars,
+            execution_errors=execution_errors,
             latency_ms=(time.perf_counter() - started) * 1000,
             failure_type=failure_type,
             failure_message=failure_message,

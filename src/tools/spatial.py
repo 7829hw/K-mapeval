@@ -1499,6 +1499,21 @@ def _normalize_arguments(name: str, arguments: dict[str, Any]) -> dict[str, Any]
                 args.setdefault("fixed_order", args.pop(alias))
         if "fixed_order" in args:
             args["fixed_order"] = _as_flag(args["fixed_order"])
+        # The contract names the objective, not its storage unit.  These spellings are exact
+        # synonyms for the two supported objectives and do not infer one from the question or
+        # from the answer options.
+        metric = args.get("metric")
+        if isinstance(metric, str):
+            normalized_metric = metric.strip().lower()
+            args["metric"] = {
+                "time": "duration",
+                "travel_time": "duration",
+                "duration_s": "duration",
+                "seconds": "duration",
+                "distance_m": "distance",
+                "metres": "distance",
+                "meters": "distance",
+            }.get(normalized_metric, normalized_metric)
 
     if name in {"haversine_distance", "bearing_to_direction"}:
         if "place_a" in args and "place_b" in args:

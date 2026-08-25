@@ -2669,3 +2669,92 @@ those structurally impossible references. They are unresolved planner/repair mis
 that the repaired-first fallback was skipped. These are training-set diagnostics only: all named
 datasets were already spent, so the revision still needs a fresh untouched draw for a holdout
 accuracy.
+
+### Validate complete argument contracts and report partial execution failures
+
+The post-`b508631` diagnostics above also exposed failures that final accuracy and
+`failure_type` did not show. Across the three 100-row Spatial-Agent passes and the one 283-row
+pass, 137 of 583 question attempts contained at least one failed execution step. Some were
+expected missing-evidence probes on `unanswerable_*`, and some later steps merely cascaded from an
+earlier failure, but 119 of 541 answerable attempts still contained one. A question could then be
+answered from another branch, so these errors stayed only in per-query logs even when the report
+row said the answer was correct.
+
+Three architecture-wide changes close that observability and validation gap:
+
+1. `OperatorContract` now declares every canonical runtime argument, not only the required ones.
+   Graph validation rejects unsupported names before execution, so values such as
+   `steps_analysis(step_index=...)` and `extract_distance(route_index=...)` enter the ordinary
+   repair round instead of raising `TypeError` inside an otherwise "valid" graph. A regression
+   test compares the contracts with every tool schema and deterministic operator signature so a
+   newly added implementation argument cannot silently make the validator stricter than the
+   executor. Exact aliases already accepted by the implementation remain accepted by validation.
+2. A bare string becomes an internal reference only when it is in a data-bearing argument,
+   exactly names a real node, and exactly names one of that step's declared dependencies. Thus
+   `origins: "locations"`, `nodes: "locations"` and `distance_matrix: "legs"` become
+   `$locations`/`$legs`, while literals such as `metric: "distance"`, route labels and question
+   option text cannot be rewritten. `tsp_tw` also canonicalizes exact measure/unit synonyms:
+   `time`, `travel_time`, `duration_s` and `seconds` mean `duration`; `distance_m`, `metres` and
+   `meters` mean `distance`. These mappings do not inspect a question, option or gold answer.
+3. Both agents now return a compact `execution_errors` list even when they recover an answer.
+   Every report row carries that list and `execution_error_count`; run statistics carry
+   `execution_error_question_count`, `execution_error_question_ids`,
+   `execution_error_step_count` and counts by operator. The terminal summary and per-question log
+   print the same totals. `failure_type` remains reserved for the question-level outcome, so an
+   intermediate error and a recovered correct answer are both represented rather than one
+   overwriting the other.
+
+No live benchmark was run for these repairs. They change validation and execution observability,
+so all existing datasets are spent again; their logs diagnose the defects but cannot measure this
+revision as a holdout.
+
+#### Post-change benchmark diagnostics
+
+After the implementation above, but before it was committed, four single-pass reports were run
+against the already-spent v7 datasets. All used concurrency 32, temperature 0, 15 reasoning steps
+and the reference ReAct surface; none recorded a truncation, context overflow or iteration limit.
+Their `code_revision=6b2deaf72574` identifies the checked-out parent rather than the modified
+source loaded by the process. The presence of the new `execution_error_*` report fields and the
+contract-validation traces pins the executed behaviour to this change, but the dirty-worktree
+provenance means these are diagnostics, not reproducible accuracy results.
+
+| report | agent | correct | question failures | questions / steps with execution errors |
+|---|---:|---:|---:|---:|
+| `test_20260825T153356Z.json` (v7 100) | ReAct | 49/100 | 0 | 27 / 31 |
+| `test_20260825T153718Z.json` (v7 100) | Spatial-Agent | 84/100 | 0 | 14 / 29 |
+| `test_20260825T154450Z.json` (v7 283) | ReAct | 134/283 | 0 | 87 / 102 |
+| `test_20260825T155421Z.json` (v7 283) | Spatial-Agent | 238/283 | 7 | 44 / 77 |
+
+The 100-row scores sit inside the immediately preceding three-pass ranges (ReAct 45--52,
+Spatial-Agent 80--85). The 283-row Spatial-Agent score is 84.1% versus 80.6% in the preceding
+single pass, but one pass on a set already used to change the code cannot attribute that movement.
+The 283-row draw also retains its known `nearby_kth_nearest` audit failure. None of these numbers
+is a new holdout result.
+
+The traces directly exercise all three repairs:
+
+- Ten plans supplied unsupported argument names: two in the 100-row run and eight in the 283-row
+  run. Every one was rejected before execution. Six repairs then produced executable graphs (four
+  answered correctly); four repair responses remained structurally or contractually invalid and
+  ended as `agent_reasoning_failure`. No execution trace contains the old `unexpected keyword
+  argument` failure.
+- Twelve plans passed a bare `locations` or `all_locations` dependency into both sides of
+  `distance_matrix` (three in the 100-row run and nine in the 283-row run). All twelve matrices
+  received resolved place lists and completed. Eight `tsp_tw` plans used `metric="time"` (three
+  and five respectively); all eight completed with the canonical `duration_s` result. The former
+  bare-reference validation errors and `tsp_tw metric must be one of ...` errors are absent.
+- Counting failed steps in the raw execution traces gives exactly 14 questions / 29 steps for the
+  100-row Spatial-Agent run and 44 / 77 for the 283-row run, matching both report summaries.
+  Twelve of those 14 and 38 of those 44 questions still answered correctly, confirming that the
+  new fields preserve partial failures that the question-level `failure_type` intentionally does
+  not classify as terminal failures.
+
+The remaining Spatial-Agent execution errors are value-shape or plan-semantics problems: empty or
+out-of-range selections, list/scalar confusion in arithmetic, malformed `batch_place_details`
+inputs, and one 16-place matrix exceeding the declared limit of 15. The seven terminal failures in
+the 283-row run split into three impossible named-field projections from a `batch_geocode` list and
+four unsupported-argument plans whose one repair response was still invalid. These are visible
+planner/repair misses rather than validation bypasses. ReAct's partial errors are separately
+explained by the provider boundary: all 31 in the 100-row run, and 100 of 102 in the 283-row run,
+are explicit `UnsupportedTravelModeError` results because Kakao routing supports driving only; the
+other two are explicit `RouteNotFoundError` results for endpoints within five metres.

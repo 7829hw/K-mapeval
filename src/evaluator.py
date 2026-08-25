@@ -307,6 +307,11 @@ class Evaluator:
                 "total_tokens": result.total_tokens,
                 "reasoning_tokens": result.reasoning_tokens,
                 "reasoning_chars": result.reasoning_chars,
+                # Intermediate failures are not question failures: an architecture can recover
+                # or its evaluator can answer from another branch.  Preserve both the count and
+                # the compact details so aggregate accuracy cannot hide a broken execution path.
+                "execution_error_count": len(result.execution_errors),
+                "execution_errors": result.execution_errors,
                 "error": error,
                 "failure_type": result.failure_type,
                 "attempts": 1,
@@ -367,6 +372,8 @@ class Evaluator:
             "total_tokens": 0,
             "reasoning_tokens": None,
             "reasoning_chars": 0,
+            "execution_error_count": 0,
+            "execution_errors": [],
             "error": error,
             "failure_type": failure_type,
             "attempts": attempts,
@@ -425,6 +432,13 @@ def calculate_statistics(results: list[dict[str, Any]]) -> dict[str, Any]:
     failure_types = Counter(str(row["failure_type"]) for row in results if row.get("failure_type"))
     retried = [row for row in results if int(row.get("attempts") or 1) > 1]
     recovered = [row["id"] for row in retried if not is_transient_failure(row)]
+    execution_error_rows = [row for row in results if int(row.get("execution_error_count") or 0)]
+    execution_error_operators = Counter(
+        str(error.get("operator") or "unknown")
+        for row in results
+        for error in (row.get("execution_errors") or [])
+        if isinstance(error, dict)
+    )
     return {
         "answer_accuracy_by_class": by_class,
         "overall_answer_accuracy": {
@@ -453,6 +467,14 @@ def calculate_statistics(results: list[dict[str, Any]]) -> dict[str, Any]:
             # metadata: a family whose questions need more tool calls than the budget allows is
             # measuring the budget, not the architecture.
             "iteration_limit_count": failure_types[ITERATION_LIMIT_FAILURE],
+            # A question can still answer after one branch failed.  Keep this beside accuracy so
+            # those failures do not disappear merely because the final option happened to match.
+            "execution_error_question_count": len(execution_error_rows),
+            "execution_error_question_ids": [row["id"] for row in execution_error_rows],
+            "execution_error_step_count": sum(
+                int(row.get("execution_error_count") or 0) for row in results
+            ),
+            "execution_error_operators": dict(execution_error_operators),
             # Summed over the questions, so a run can be read as "how much did it look up".
             "tool_calls": sum(int(row.get("tool_calls") or 0) for row in results),
             "api_calls": sum(int(row.get("api_calls") or 0) for row in results),
@@ -540,6 +562,13 @@ def print_summary(statistics: dict[str, Any]) -> None:
         print(
             f"Ran out of steps on {stopped} question(s) without answering. Upstream counts these "
             "as misses; check whether the family can be answered within the step budget at all."
+        )
+    execution_error_steps = performance.get("execution_error_step_count") or 0
+    if execution_error_steps:
+        print(
+            f"Intermediate execution errors: {execution_error_steps} step(s) across "
+            f"{performance.get('execution_error_question_count') or 0} question(s) | "
+            f"{performance.get('execution_error_operators') or {}}"
         )
     if performance["failed_count"]:
         print(f"Failed samples: {performance['failed_ids']}")

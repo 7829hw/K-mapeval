@@ -150,6 +150,22 @@ def test_the_planner_may_spell_fixed_order_its_own_way(alias: str) -> None:
 
 
 @pytest.mark.parametrize(
+    ("alias", "canonical"),
+    [
+        ("time", "duration"),
+        ("travel_time", "duration"),
+        ("duration_s", "duration"),
+        ("seconds", "duration"),
+        ("distance_m", "distance"),
+        ("metres", "distance"),
+        ("meters", "distance"),
+    ],
+)
+def test_tsp_metric_unit_and_measure_aliases_are_canonical(alias: str, canonical: str) -> None:
+    assert _normalize_arguments("tsp_tw", {"metric": alias})["metric"] == canonical
+
+
+@pytest.mark.parametrize(
     ("question", "expected"),
     [
         ("A를 1.5시간, B를 1시간 동안 적힌 순서대로 둘러봅니다. 몇 곳을 방문할 수 있나요?", True),

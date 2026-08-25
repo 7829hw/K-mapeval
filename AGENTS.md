@@ -148,6 +148,19 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
 
 ## Benchmarks
 
+- An operator must answer the question the *question* asks, not the one its name suggests. `tsp_tw`
+  is a travelling-salesman operator, and it permuted an itinerary the question had already ordered,
+  ranked every tour by seconds when the question asked for metres, and left the tour open when the
+  question closed it. Each is worth 15-50 points on the family that asks for it, and none of them
+  shows up as a failure — they show up as a confident wrong answer. What the question states is a
+  literal to bind in grounding, exactly like the stays and the budget: the order (`fixed_order`),
+  the measure (`metric`) and whether it comes home (`return_to_start`). Check the *value* an
+  operator returns, not just that it returned: `metric="distance"` was documented, bound and
+  refusing bad input for a whole run while quietly still returning seconds, because
+  `distance_matrix` emits a duration matrix beside the routes and `_matrix_argument` preferred it.
+- Run every benchmark at `--concurrency 32`. It is what every recorded v7 run used, and a report at
+  another concurrency is a different run condition — check `metadata.concurrency` before setting
+  two numbers beside each other.
 - `dataset/seoul_kmapeval_v7d_mcq_300.jsonl`: the fifth 300-question draw, built and run at
   `c7d49cb` (= `a50096a` plus the context-provider deletion, a path these runs never took). 281
   rows. Floor 27.4 (21.9 excluding `unanswerable_*`), ReAct 47.6, Spatial-Agent 80.4 over three
@@ -158,7 +171,9 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   baseline's*: mean cross-draw range 23.6 points for ReAct against 13.6 for Spatial-Agent, so the
   "quote across draws" rule binds hardest on ReAct. **Spent** — the run surfaced a grounding crash
   and `src/` changed to close it, so 47.6/80.4 is what `c7d49cb` scored. Also **fails
-  `data/audit_dataset.py`** on `nearby_kth_nearest`; see the next bullet. See
+  `data/audit_dataset.py`** on `nearby_kth_nearest`; see the next bullet. **Also spent a second
+  time** by the three `tsp_tw` fixes at `01f7f64`/`34a74de`/`e114f4b`, which took Spatial-Agent's
+  `trip` class 63.6 → 80.8 and `trip_optimal_order` 52.8 → 86.1 on these same rows. See
   `docs/REFERENCE_MAPPING.md`.
 - `dataset/seoul_kmapeval_v7c_mcq_300.jsonl`: the fourth 300-question draw, built and run at
   `a50096a` (both operator fixes in). 282 rows. Floor 25.2 (19.3 excluding `unanswerable_*`), ReAct

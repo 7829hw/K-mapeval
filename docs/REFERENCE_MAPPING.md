@@ -2435,3 +2435,120 @@ grounding test fails on the unpatched predicate) and that the operator's own ref
 
 **v7d is spent by that fix**, as v7a and v7b were before it: 47.6/80.4 is what `c7d49cb` scored,
 not a number to hold the next draw against.
+
+## The trip families: three defects in one operator
+
+Spatial-Agent's weakest class across all five 300-row draws is `trip` — 65.2%, 65.4% and 76.5%
+pooled over 1,056 runs for `trip_feasible_count_five`, `trip_optimal_order` and
+`trip_total_distance`, against 90+ on `routing` and `distance`. The cause is not the step budget
+and not the planner. It is `tsp_tw`, which answered a different question than the one it was asked,
+three different ways.
+
+### It is not `MAX_REASONING_STEPS`
+
+The obvious suspect was the step budget, since `MAX_REASONING_STEPS` bounds the nodes the planner
+may author. Over 1,363 Spatial-Agent runs on v7d it is not:
+
+| family | runs | hit the 15-node cap | p90 graph size |
+| --- | --- | --- | --- |
+| `trip_feasible_count_five` | 84 | **0** | 6 |
+| `trip_total_distance` | 105 | **0** | 7 |
+| `trip_optimal_order` | 120 | **5** | 8 |
+| every other family | 1,054 | **0** | ≤10 |
+
+Five refusals in 1,363 runs, all in one family, and zero `iteration_limit` in every pass. The five
+graphs that hit it authored 18, 23, 25, 25 and 40 operators — a planner enumerating all six
+permutations by hand instead of calling `tsp_tw` once. Raising the cap would let that brute-force
+plan through; it would not have fixed the objective, and the three defects below all show up in
+graphs of six to eight nodes. The budget also stays at 15 for the reasons already recorded above:
+it is langchain's default and therefore the reference baseline's, it is *one* budget that moves
+both architectures at once, and the v6 ablation measured it moving Spatial-Agent 69.0 → 74.0.
+
+### Defect 1: a stated itinerary was answered by reordering it
+
+`trip_feasible_count_five` lists its stops 적힌 순서대로 and asks how many fit a time budget.
+`tsp_tw` permutes, and when no full tour fits it fell back to a nearest-first greedy walk that
+reaches stops the stated order cannot. On v7d, **15 of Spatial-Agent's 26 misses in that family
+were exactly the count you get by ignoring travel time**, and ReAct made the same mistake 6 times
+in 7. Replayed offline on real cached Kakao legs over 155 recorded itineraries, the permuting path
+overcounts **24 of them by exactly +1**; the stated-order walk gets 153, and both remaining misses
+are legs whose cached duration has drifted since the set was built. Against the durations the
+datasets themselves recorded it is 161 of 161.
+
+`fixed_order` walks the nodes as listed. Grounding binds it from the question, as it already binds
+the stays and the budget — the order is a question literal too. It fires on every
+`trip_feasible_count_five`, `trip_total_distance` and `multisegment_total` row in every dataset
+here and on no `trip_optimal_order` row.
+
+Two further repairs came with it: the greedy fallback no longer appends an `end_index` it cannot
+reach (it was appended unconditionally, so a tour that had spent its budget came back naming a stop
+it never gets to and a `total_cost` above the `time_budget` it was handed), and every branch now
+reports `visited_count` and which objective it optimised for.
+
+### Defect 2: every tour was ranked by seconds, and left open
+
+"자동차 총 주행거리가 가장 짧은 방문 순서" is a question about metres, and the four orders it
+chooses between sit a median **2.07% of the tour** apart — so seconds are not an approximation of
+metres, they select a different option. The tour was also left open where the question closes it
+("…둘러본 뒤 다시 제일모텔로 돌아옵니다"), and the cheapest way out is not the cheapest loop.
+Over 114 `trip_optimal_order` rows with complete cached legs:
+
+| | picks the gold option |
+| --- | --- |
+| distance + closed tour | **93/114 = 81.6%** ← what the question asks |
+| distance, open | 53/114 = 46.5% |
+| duration + closed | 41/114 = 36.0% |
+| duration, open | 35/114 = 30.7% ← what the operator did |
+
+The old behaviour was the worst of the four. The 21 rows the right reading still misses are legs
+whose cached length has drifted, not a disagreement about the objective. `metric` and
+`return_to_start` are both bound from the question by grounding. Seconds beside a matrix of metres
+are refused rather than allowed to cancel out — a stay added to a distance is an invented
+measurement — and a distance question states its stays as decoys, so grounding drops them.
+
+### Defect 3: the metric argument was a no-op on the only shape that matters
+
+`distance_matrix` returns `{routes: [...], matrix: [...]}` — routes that carry both numbers, and a
+pre-built matrix that is always durations — and `_matrix_argument` preferred the pre-built one. So
+`tsp_tw(metric="distance")` over `$legs`, which is what every trip graph passes, returned seconds
+and reported them as metres. Caught by asserting the value rather than the call: 600 came back
+where 9,000 was asked for. The routes are now re-read in the metric requested, and a matrix with no
+routes behind it is refused for a non-default metric rather than reinterpreted.
+
+### Measured: three passes a side on v7d
+
+Spatial-Agent only; ReAct's `reference` surface has no `tsp_tw` and is untouched. All at
+`--concurrency 32` except the middle column, which is noted because run conditions are not poolable.
+
+| | `c7d49cb` (before) | `01f7f64` (defect 1) | `e114f4b` (all three) |
+| --- | --- | --- | --- |
+| concurrency | 32 | **4** | 32 |
+| passes | 81.5, 80.1, 79.7 | 79.0, 79.0, 78.3 | 83.3, 79.0, 82.2 |
+| overall | 80.4 | 78.8 | **81.5** |
+| `trip` class | 63.6 | 68.7 | **80.8** |
+| `trip_optimal_order` | 52.8 | 52.8 | **86.1** |
+| `trip_feasible_count_five` | 58.7 | 88.9 | 73.0 |
+| `trip_total_distance` | 81.0 | 66.7 | 82.5 |
+
+Per pass, `trip_optimal_order` goes 11, 13, 14 of 24 to **22, 19, 21** — the two ranges do not
+overlap, and it is the largest single-family move any change here has produced. `trip_total_distance`
+goes 19, 14, 18 to 17, 17, 18: unchanged in the mean and tighter in spread.
+
+**One regression, found and repaired inside the same change.** Defect 1's prompt edit told the
+planner to set `fixed_order` on "A → B → C 순서로" questions, which is exactly how
+`trip_total_distance` is phrased. That pushed the family onto `tsp_tw` — 8% of its runs to 27% —
+where `total_cost` was seconds and the options are km, and within that run the rows that reached
+`tsp_tw` scored 55% against 71% for those that did not. The family fell 81.0 → 66.7 and came back
+to 82.5 once `metric` worked. This is why defect 3 mattered: without it the metric argument was
+present, documented, bound by grounding, and doing nothing.
+
+**What did not move, and one thing that did without a mechanism.** `routing` (96.0 → 95.5) and
+`nearby` (79.5 → 76.2) are flat within the endpoint's spread. `poi_farthest_of_three` fell 74.4 →
+46.2 across the three revisions (11, 10, 8 → 9, 5, 7 → 6, 5, 7 of 13), and **no run of that family
+touched `tsp_tw` at all** — there is no code path from these changes to it. It is also the family
+with the largest Spatial-Agent cross-draw range already on record (30.8 points over five draws), on
+13 rows where one row is 7.7 points. Recorded as unexplained rather than attributed.
+
+**Every dataset here is spent by this.** These changes strengthen Spatial-Agent's operator surface,
+so no accuracy measured before `e114f4b` is comparable to one after it, and v7d's 80.4 is what
+`c7d49cb` scored. The next held-out number needs a fresh draw.

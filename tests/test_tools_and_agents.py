@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -17,6 +18,7 @@ from src.agent.geoflow import (
 from src.agent.spatial import (
     RETRIEVAL_LIMIT,
     _bind_named_places,
+    _compact_evaluation_evidence,
     _ground_graph_literals,
     _heuristic_intent,
     _resolve_output_binding,
@@ -354,6 +356,77 @@ def test_spatial_agent_runs_paper_aligned_pipeline() -> None:
     ]
     assert result.tool_calls == 1
     assert result.api_calls == 1
+
+
+def test_spatial_evaluation_prompt_compacts_repeated_large_operator_state() -> None:
+    """The auditable trace stays complete while the final LLM sees bounded evidence.
+
+    A neighbourhood result is copied into ranking arguments/results and concept bindings.  With
+    45 places that exceeded the model's context window even though the Measure result was tiny.
+    """
+
+    places = [
+        {
+            "place_id": str(index),
+            "name": f"장소 {index}",
+            "address": f"서울시 긴 주소 {index}",
+            "latitude": 37.5 + index / 10_000,
+            "longitude": 127.0 + index / 10_000,
+            "category": "의료,건강 > 병원 > 내과",
+            "phone": "02-0000-0000",
+            "place_url": f"https://example.test/{index}",
+        }
+        for index in range(45)
+    ]
+    answer = {
+        "best_option": 3,
+        "confidence": 0.95,
+        "option_matches": [{"option_index": 3, "similarity": 1.0}],
+    }
+    execution_log = [
+        {
+            "id": "nearby",
+            "operator": "nearby_places",
+            "role": "support",
+            "status": "ok",
+            "arguments": {"query": "내과", "candidates": places},
+            "result": places,
+        },
+        {
+            "id": "ranking",
+            "operator": "nearest",
+            "role": "support",
+            "status": "ok",
+            "arguments": {"candidates": places},
+            "result": {"ranked": places},
+        },
+        {
+            "id": "answer",
+            "operator": "match_options",
+            "role": "measure",
+            "status": "ok",
+            "arguments": {"places": places, "options": ["A", "B", "C", "D"]},
+            "result": answer,
+        },
+    ]
+    concept_state = {"neighbourhood": places, "ranking": places, "answer": answer}
+    original = json.dumps(
+        {"steps": execution_log, "final_state": concept_state}, ensure_ascii=False
+    )
+
+    compacted = _compact_evaluation_evidence(execution_log, concept_state)
+    encoded = json.dumps(compacted, ensure_ascii=False)
+
+    assert len(encoded) < len(original) / 4
+    assert len(encoded) < 50_000
+    assert '"_omitted_items"' in encoded
+    assert '"best_option": 3' in encoded
+    assert "장소 44" not in encoded
+    assert '"phone": "02-0000-0000"' in encoded
+    # Prompt projection must not mutate the full trace that reports and per-query logs retain.
+    assert json.dumps(
+        {"steps": execution_log, "final_state": concept_state}, ensure_ascii=False
+    ) == original
 
 
 def test_a_plan_only_our_own_rules_reject_still_gets_executed() -> None:
@@ -748,6 +821,116 @@ def test_geoflow_validation_rejects_cycles_instead_of_truncating() -> None:
     }
     with pytest.raises(ValueError, match="acyclicity"):
         normalize_and_validate_graph(graph, max_steps=8)
+
+
+@pytest.mark.parametrize("strict_types", [True, False])
+def test_geoflow_validation_rejects_out_of_range_batch_geocode_reference(
+    strict_types: bool,
+) -> None:
+    """Known list cardinality is a structural rule, including on the lenient last attempt."""
+
+    graph = {
+        "graph": [
+            {
+                "id": "places",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["기준", "후보1", "후보2"]},
+                "role": "extent",
+            },
+            {
+                "id": "distance",
+                "operator": "haversine_distance",
+                "arguments": {
+                    "place_a": "$places.0.place",
+                    "place_b": "$places.3.place",
+                },
+                "role": "measure",
+            },
+        ]
+    }
+
+    with pytest.raises(ValueError, match="has 3 place_names"):
+        normalize_and_validate_graph(
+            graph, max_steps=8, strict_types=strict_types
+        )
+
+
+def test_geoflow_validation_rejects_a_field_projection_from_batch_geocode_list() -> None:
+    graph = {
+        "graph": [
+            {
+                "id": "places",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["기준", "후보"]},
+                "role": "extent",
+            },
+            {
+                "id": "distance",
+                "operator": "haversine_distance",
+                "arguments": {
+                    "place_a": "$places.anchor_place",
+                    "place_b": "$places.1.place",
+                },
+                "role": "measure",
+            },
+        ]
+    }
+
+    with pytest.raises(ValueError, match="use a numeric record index first"):
+        normalize_and_validate_graph(graph, max_steps=8)
+
+
+def test_grounding_prepends_anchor_only_when_plan_references_the_extra_record() -> None:
+    graph = [
+        {
+            "id": "places",
+            "operator": "batch_geocode",
+            "arguments": {
+                "place_names": ["후보1", "후보2", "후보3"],
+                "anchor": "기준점",
+            },
+        },
+        {
+            "id": "distance",
+            "operator": "haversine_distance",
+            "arguments": {
+                "place_a": "$places.0.place",
+                "place_b": "$places.3.place",
+            },
+        },
+    ]
+
+    grounded = _ground_graph_literals(
+        graph,
+        "기준점에서 세 후보 가운데 가장 먼 곳까지의 직선거리는?",
+        ["1km", "2km", "3km", "알 수 없음"],
+        "distance",
+    )
+
+    assert grounded[0]["arguments"]["place_names"] == [
+        "기준점",
+        "후보1",
+        "후보2",
+        "후보3",
+    ]
+
+    no_extra_reference = [
+        graph[0],
+        {
+            **graph[1],
+            "arguments": {
+                "place_a": "$places.0.place",
+                "place_b": "$places.2.place",
+            },
+        },
+    ]
+    unchanged = _ground_graph_literals(
+        no_extra_reference,
+        "기준점에서 후보까지의 직선거리는?",
+        ["1km", "2km", "3km", "알 수 없음"],
+        "distance",
+    )
+    assert unchanged[0]["arguments"]["place_names"] == ["후보1", "후보2", "후보3"]
 
 
 def test_geoflow_g5_rejects_node_not_reachable_from_context() -> None:

@@ -2568,10 +2568,11 @@ together:
 
 Three code changes implement that boundary:
 
-1. `_computed_clock_option` is deleted. The evaluator LLM still receives the complete operator
-   trace and is instructed to prefer computed evidence, but `_select_option` now reconciles only
-   the answer text and index that generation returned. Clock questions no longer have a second,
-   harness-owned answer channel or the option-relative `nearest_gap * 2` threshold.
+1. `_computed_clock_option` is deleted. The evaluator LLM still receives the executed operators'
+   answer-bearing evidence and is instructed to prefer computed evidence, but `_select_option`
+   now reconciles only the answer text and index that generation returned. Clock questions no
+   longer have a second, harness-owned answer channel or the option-relative `nearest_gap * 2`
+   threshold.
 2. The handwritten post-repair solver for `distance`, `nearby`, `direction` and `radius` is
    deleted. After the normal repair round, every intent gets the same last attempt: execute the
    planner's original graph with this port's type/role restrictions relaxed, while retaining the
@@ -2590,3 +2591,36 @@ addition beyond upstream's ten Appendix E macro families and must be reported as
 This revision changes Spatial-Agent behaviour, so every existing dataset is spent for it. No
 accuracy is claimed here: a result for this code requires a fresh seed and an untouched holdout,
 and neither dataset construction nor a live benchmark was run as part of this change.
+
+## Structural reference validation and bounded evaluation evidence
+
+The first three-pass run after removing the family-specific fallback exposed two general failures
+on `seoul_kmapeval_v7_mcq_100.jsonl`. They are recorded as defects found on a spent set, not as a
+new accuracy claim.
+
+First, `batch_geocode` has a statically known top-level shape: it returns one ordered record for
+each `place_names` entry. Plans nevertheless referenced `$places.3` after supplying three names,
+or projected `$places.anchor_place` directly from the list. The executor's deliberately lenient
+path handling degraded those references to the closest resolvable object, so downstream distance
+operators received the whole list or treated the first destination as the origin. When a plan
+supplies an explicit anchor and its own references prove that it expects one additional leading
+record, grounding prepends that anchor. Otherwise validation rejects only what is knowable before
+execution: a non-numeric first projection from a `batch_geocode` list, or a numeric index outside
+its literal input length. Unknown fields below a valid record remain lenient, and this structural
+data-availability rule also applies on the final `strict_types=False` attempt.
+
+Second, the report trace remains complete, but the final generation prompt no longer duplicates
+it verbatim. A 45-place neighbourhood was repeated in the retrieval result, ranking arguments,
+ranking result, later arguments and concept bindings; six of 300 Spatial-Agent attempts crossed
+the model's 65,536-token context window at the final call. The generation stage now receives a
+deterministic projection that:
+
+- retains every operator's identity, role, status, error, scalar arguments and answer-bearing
+  output fields;
+- bounds repeated collections and records the exact omitted count as `_omitted_items`;
+- leaves the full execution trace used by logs, metrics and reports unchanged.
+
+Neither repair selects an answer, recognizes a benchmark family, or changes an operator result.
+Regression tests use synthetic output shapes and 45 fabricated places rather than benchmark
+answers. Because `src/` changed after the run, every existing accuracy is again training-set
+evidence for this revision; the next result must use a fresh untouched draw.

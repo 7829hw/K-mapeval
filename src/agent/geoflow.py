@@ -1300,6 +1300,47 @@ def _missing_arguments(
     ]
 
 
+def _validate_statically_known_reference_shapes(
+    steps: list[dict[str, Any]], by_id: dict[str, dict[str, Any]]
+) -> None:
+    """Refuse projections that cannot exist on an output whose shape is already known.
+
+    Most operator output shapes are only known after provider execution, so validation must stay
+    lenient about their paths.  A ``batch_geocode`` node is different: it returns one ordered
+    record per literal ``place_names`` entry.  Its top-level cardinality and list shape are known
+    before execution.  Letting ``$places.3`` through when the node was given three names degraded
+    to the whole list in the executor and made the next spatial operator compute over the wrong
+    evidence.  Likewise, ``$places.anchor_place`` can never name a field on a list.
+
+    This is a structural data-availability rule, so it applies to the final lenient pass as well
+    as strict validation.  Unknown paths below a valid record (for example Google's
+    ``$places.0.geometry.location`` spelling) remain deliberately lenient.
+    """
+
+    for step in steps:
+        for reference in _reference_strings(step["arguments"]):
+            parts = [part for part in reference.lstrip("$").split(".") if part]
+            if len(parts) < 2:
+                continue
+            producer = by_id.get(parts[0])
+            if not producer or producer["operator"] != "batch_geocode":
+                continue
+            projection = parts[1]
+            if not projection.isdigit():
+                raise ValueError(
+                    "Data availability violation: "
+                    f"{reference} projects field {projection!r} from batch_geocode list "
+                    f"{producer['id']!r}; use a numeric record index first"
+                )
+            names = producer["arguments"].get("place_names")
+            if isinstance(names, list) and int(projection) >= len(names):
+                raise ValueError(
+                    "Data availability violation: "
+                    f"{reference} indexes batch_geocode node {producer['id']!r} at "
+                    f"{projection}, but it has {len(names)} place_names"
+                )
+
+
 def normalize_and_validate_graph(
     payload: dict[str, Any], *, max_steps: int, strict_types: bool = True
 ) -> tuple[list[dict[str, Any]], dict[str, bool]]:
@@ -1432,6 +1473,7 @@ def normalize_and_validate_graph(
         )
 
     by_id = {step["id"]: step for step in steps}
+    _validate_statically_known_reference_shapes(steps, by_id)
     consumed = {
         dependency
         for step in steps

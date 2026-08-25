@@ -248,7 +248,9 @@ Keep the question semantics and retrieved template, use only the exact operator 
 original system prompt, and stay within {max_steps} nodes. Return only {"graph":[...]} JSON."""
 
 EVALUATOR_PROMPT = """You are Spatial-Agent's grounded response generation stage. Select exactly
-one candidate using the final GeoFlow state and the complete topological execution trace. Computed
+one candidate using the final GeoFlow state and topological execution evidence. Large collections
+are losslessly counted but represented by bounded samples; `_omitted_items` states how many
+records were left out of a sample. Computed
 distance, direction, category, route, and option_totals evidence has priority over prior knowledge.
 Exact candidate-text matches beat semantic matches, and semantic matches beat inference.
 Respect candidate-index to candidate-text mapping. Numbering is 0-based. Return JSON only:
@@ -263,6 +265,17 @@ step after checking them against the complete final state and trace.
 An operator that reports an error contributed no evidence; fall back to the surviving steps rather
 than to the failed step's intent.
 Never return an option outside the supplied candidates."""
+
+# Execution traces are retained in full for auditability, but copying every resolved Place through
+# every downstream argument and concept binding into the final LLM prompt grows quadratically with
+# a retrieval.  Forty-five nearby results pushed that prompt past a 65,536-token context window.
+# These limits apply only to the evaluation prompt's evidence projection, never to execution or to
+# the trace stored in the report.
+EVALUATION_ARGUMENT_LIST_LIMIT = 4
+EVALUATION_RESULT_LIST_LIMIT = 10
+EVALUATION_STATE_LIST_LIMIT = 6
+EVALUATION_MAX_DEPTH = 6
+EVALUATION_STRING_LIMIT = 512
 
 INTENT_EVALUATION_RULES = {
     "nearby": (
@@ -543,6 +556,9 @@ class SpatialAgent(BenchmarkAgent):
                 }
             )
 
+            evaluation_evidence = _compact_evaluation_evidence(
+                execution_log, concept_state
+            )
             evaluation = self.llm.chat(
                 [
                     {
@@ -557,10 +573,8 @@ class SpatialAgent(BenchmarkAgent):
                         "role": "user",
                         "content": (
                             f"Intent: {intent}\n{format_question(question, options)}\n\n"
-                            "Validated GeoFlow topological execution trace:\n"
-                            f"{json.dumps(execution_log, ensure_ascii=False)}\n\n"
-                            "Final concept state:\n"
-                            f"{json.dumps(concept_state, ensure_ascii=False)}"
+                            "Compacted GeoFlow topological execution evidence:\n"
+                            f"{json.dumps(evaluation_evidence, ensure_ascii=False)}"
                         ),
                     },
                 ]
@@ -664,6 +678,78 @@ def _factorize_validate_plan(
         strict_types=strict_types,
     )
     return factorized, steps, constraints
+
+
+def _compact_evaluation_evidence(
+    execution_log: list[dict[str, Any]], concept_state: dict[str, Any]
+) -> dict[str, Any]:
+    """Project executed evidence into a bounded prompt without changing the stored trace.
+
+    Operator arguments contain resolved upstream outputs, so a 45-place retrieval is repeated in
+    the retrieval result, ranking arguments, ranking result, later arguments, and concept state.
+    The evaluator needs the operation, status, constants, measurements, ranks and candidate names;
+    it does not need every duplicate provider record.  Collection samples retain their exact size
+    through an ``_omitted_items`` marker, while downstream Measure results (normally already small)
+    remain intact.
+    """
+
+    steps: list[dict[str, Any]] = []
+    for entry in execution_log:
+        projected = {
+            key: entry[key]
+            for key in ("id", "operator", "role", "output_type", "status", "error")
+            if key in entry
+        }
+        if "arguments" in entry:
+            projected["arguments"] = _compact_evaluation_value(
+                entry["arguments"], list_limit=EVALUATION_ARGUMENT_LIST_LIMIT
+            )
+        if "result" in entry:
+            projected["result"] = _compact_evaluation_value(
+                entry["result"], list_limit=EVALUATION_RESULT_LIST_LIMIT
+            )
+        steps.append(projected)
+    return {
+        "steps": steps,
+        "final_state": _compact_evaluation_value(
+            concept_state, list_limit=EVALUATION_STATE_LIST_LIMIT
+        ),
+    }
+
+
+def _compact_evaluation_value(
+    value: Any, *, list_limit: int, depth: int = 0
+) -> Any:
+    """Recursively bound repeated collections while preserving answer-bearing scalar fields."""
+
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if len(value) <= EVALUATION_STRING_LIMIT:
+            return value
+        omitted = len(value) - EVALUATION_STRING_LIMIT
+        return f"{value[:EVALUATION_STRING_LIMIT]}… <{omitted} chars omitted>"
+    if isinstance(value, dict):
+        if depth >= EVALUATION_MAX_DEPTH:
+            return {"_omitted_fields": len(value)}
+        return {
+            str(key): _compact_evaluation_value(
+                item, list_limit=list_limit, depth=depth + 1
+            )
+            for key, item in value.items()
+            if item is not None
+        }
+    if isinstance(value, list | tuple):
+        if depth >= EVALUATION_MAX_DEPTH:
+            return {"_collection_size": len(value)}
+        sample = [
+            _compact_evaluation_value(item, list_limit=list_limit, depth=depth + 1)
+            for item in value[:list_limit]
+        ]
+        if len(value) > list_limit:
+            sample.append({"_omitted_items": len(value) - list_limit})
+        return sample
+    return value
 
 
 def _resolve_output_binding(output: Any, path: str) -> Any:
@@ -1102,6 +1188,7 @@ def _ground_graph_literals(
         )
         if name
     ]
+    indexed_references = _indexed_references_by_root(steps)
     grounded: list[dict[str, Any]] = []
     for step in steps:
         operator = step.get("operator")
@@ -1322,6 +1409,10 @@ def _ground_graph_literals(
             continue
         names = list(arguments.get("place_names") or [])
         pair = _extract_compared_places(question) if intent == "distance" else None
+        written_anchor = arguments.get("anchor")
+        batch_anchor = anchor or (
+            written_anchor if isinstance(written_anchor, str) and written_anchor.strip() else None
+        )
         if pair and len(names) == 2:
             # These two are POIs the question states precisely, not option shorthand, so a
             # neighbourhood hit still has to match by name: 자양2동문고 must not become 초원책서점.
@@ -1332,7 +1423,7 @@ def _ground_graph_literals(
             # downstream computes correctly over the wrong evidence.
             names = list(pair)
             arguments["anchor"] = names[0]
-        elif anchor:
+        elif batch_anchor:
             # Only the node that *has* an anchor slot gets the anchor written into it. A plan may
             # geocode the anchor in one node and the four option texts in another, and replacing
             # the head of the second deleted an option — the gold one, in a radius question whose
@@ -1340,11 +1431,23 @@ def _ground_graph_literals(
             # inside 600 m, and the generation stage picked from the leftovers.
             if names and (
                 len(names) == len(options) + 1
-                or names[0] == anchor
-                or _is_shortened_name(names[0], anchor)
+                or names[0] == batch_anchor
+                or _is_shortened_name(names[0], batch_anchor)
             ):
-                names[0] = anchor
-            arguments["anchor"] = anchor
+                names[0] = batch_anchor
+            arguments["anchor"] = batch_anchor
+            # `anchor` normally only biases ambiguous name resolution and is not another output.
+            # A plan that references exactly one record beyond its listed names, however, states
+            # through its own dataflow that it expects [anchor, *names].  Prepend only under that
+            # structural proof; doing it for every anchor-bearing batch would shift correct option
+            # indices and turn a disambiguation hint into data the planner never requested.
+            highest_index = indexed_references.get(str(step.get("id") or ""), -1)
+            if (
+                names
+                and highest_index >= len(names)
+                and all(_option_key(name) != _option_key(batch_anchor) for name in names)
+            ):
+                names.insert(0, batch_anchor)
         if (
             intent in {"nearby", "direction", "routing"}
             and len(names) == len(options) + 1
@@ -1354,6 +1457,32 @@ def _ground_graph_literals(
         arguments["place_names"] = names
         grounded.append({**step, "arguments": arguments})
     return grounded
+
+
+def _indexed_references_by_root(steps: list[dict[str, Any]]) -> dict[str, int]:
+    """Largest literal list index each planner node is referenced with anywhere downstream."""
+
+    highest: dict[str, int] = {}
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            for item in value.values():
+                walk(item)
+            return
+        if isinstance(value, list):
+            for item in value:
+                walk(item)
+            return
+        if not isinstance(value, str):
+            return
+        for match in re.finditer(
+            r"\$([A-Za-z_][\w-]*)\.(\d+)(?:\.|\b)", canonical_reference(value)
+        ):
+            root, index = match.group(1), int(match.group(2))
+            highest[root] = max(highest.get(root, -1), index)
+
+    walk(steps)
+    return highest
 
 
 def _retrieval_steps(

@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import re
 import time
-from datetime import datetime
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -34,7 +33,6 @@ from src.llm import (
 from src.parsing import parse_answer, parse_json_object
 from src.tools import SpatialOperatorRegistry, ToolRegistry
 from src.tools.spatial import (
-    parse_clock_text,
     parse_coordinate_literal,
     strip_location_qualifier,
 )
@@ -435,59 +433,27 @@ class SpatialAgent(BenchmarkAgent):
                         self.max_steps,
                     )
                 except ValueError as repair_error:
-                    fallback_graph = _bind_prevalidated_template(
-                        intent, question, options, _extract_anchor(question, intent)
+                    # Upstream has no type or role check to fail in the first place, so make the
+                    # same final attempt for every intent. The former path substituted a
+                    # handwritten solver only for distance/nearby/direction/radius, which meant a
+                    # validation miss was forgiven according to the benchmark family rather than
+                    # according to one architecture-wide rule.
+                    trace.append(
+                        {
+                            "stage": "validate",
+                            "status": "lenient",
+                            "error": str(repair_error),
+                        }
                     )
-                    fallback_failed = False
-                    if fallback_graph:
-                        trace.append(
-                            {"stage": "template_fallback", "graph": fallback_graph}
-                        )
-                        try:
-                            factorized, steps, constraints = _factorize_validate_plan(
-                                analysis,
-                                {"graph": fallback_graph},
-                                question,
-                                options,
-                                intent,
-                                max(self.max_steps, len(fallback_graph)),
-                                expand_retrieval=False,
-                            )
-                        except ValueError as fallback_error:
-                            # A prevalidated template that does not fit this question either is
-                            # not a reason to stop: the planner's own graph has not been tried
-                            # under upstream's rules yet.
-                            trace.append(
-                                {
-                                    "stage": "template_fallback",
-                                    "status": "invalid",
-                                    "error": str(fallback_error),
-                                }
-                            )
-                            fallback_failed = True
-                    if not fallback_graph or fallback_failed:
-                        # Nothing prevalidated fits this intent, so the choice is between the
-                        # planner's own graph and no answer at all. Upstream has no type or role
-                        # check to fail in the first place -- it would have executed this graph --
-                        # so we do too, with every structural rule still in force. Whatever is
-                        # actually wrong with it now shows up as the step that could not run,
-                        # which is a finding about the architecture rather than about us.
-                        trace.append(
-                            {
-                                "stage": "validate",
-                                "status": "lenient",
-                                "error": str(repair_error),
-                            }
-                        )
-                        factorized, steps, constraints = _factorize_validate_plan(
-                            analysis,
-                            plan,
-                            question,
-                            options,
-                            intent,
-                            self.max_steps,
-                            strict_types=False,
-                        )
+                    factorized, steps, constraints = _factorize_validate_plan(
+                        analysis,
+                        plan,
+                        question,
+                        options,
+                        intent,
+                        self.max_steps,
+                        strict_types=False,
+                    )
             trace.append({"stage": "factorize", **factorized.as_dict()})
             trace.append(
                 {
@@ -602,7 +568,7 @@ class SpatialAgent(BenchmarkAgent):
             reasoning_steps += 1
             usage += evaluation.usage
             evaluation_json = parse_json_object(evaluation.content)
-            predicted, selection = _select_option(evaluation_json, options, results)
+            predicted, selection = _select_option(evaluation_json, options)
             if predicted is None:
                 predicted = parse_answer(evaluation.content, option_count=len(options))
                 selection = "answer_marker" if predicted is not None else "unresolved"
@@ -672,7 +638,6 @@ def _factorize_validate_plan(
     intent: str,
     max_steps: int,
     *,
-    expand_retrieval: bool = True,
     strict_types: bool = True,
 ):
     raw_steps = plan.get("graph") if plan.get("graph") is not None else plan.get("steps")
@@ -688,7 +653,6 @@ def _factorize_validate_plan(
         question,
         options,
         intent,
-        expand_retrieval=expand_retrieval,
         inferred_type=analysis.get("target_type"),
     )
     factorized = factorize_geoflow(analysis, {"graph": grounded}, strict_types=strict_types)
@@ -1088,7 +1052,6 @@ def _ground_graph_literals(
     options: list[str],
     intent: str,
     *,
-    expand_retrieval: bool = True,
     inferred_type: str | None = None,
 ) -> list[dict[str, Any]]:
     """Bind verbatim question literals after drafting, before graph validation.
@@ -1180,7 +1143,7 @@ def _ground_graph_literals(
             arguments["radius_m"] = radius_m if radius_m is not None else RETRIEVAL_RADIUS_M
             arguments["limit"] = RETRIEVAL_LIMIT
             grounded.extend(
-                _retrieval_steps(step, arguments, specifications, expand=expand_retrieval)
+                _retrieval_steps(step, arguments, specifications)
             )
             continue
         if route_priority and operator in _PRIORITY_OPERATORS:
@@ -1397,8 +1360,6 @@ def _retrieval_steps(
     step: dict[str, Any],
     arguments: dict[str, Any],
     specifications: list[dict[str, Any]],
-    *,
-    expand: bool,
 ) -> list[dict[str, Any]]:
     """Fan a retrieval node out over every Kakao spelling of the requested place type.
 
@@ -1407,7 +1368,7 @@ def _retrieval_steps(
     merge back under the planner's original node id, which keeps downstream references valid.
     """
 
-    if not expand or len(specifications) == 1:
+    if len(specifications) == 1:
         return [{**step, "arguments": {**arguments, **specifications[0]}}]
     step_id = str(step.get("id") or "nearby")
     branches = [
@@ -1433,193 +1394,41 @@ def _retrieval_steps(
     return [*branches, merged]
 
 
-_COMPARED_PLACES = re.compile(r"^(.+?)\s*(?:및|와|과)\s+(.+?)\s+사이의\s+직선거리")
+_COMPARED_PLACE_PATTERNS = (
+    re.compile(
+        r"^(.+?)\s*(?:및|와|과)\s+(.+?)\s+(?:사이|간)(?:의)?\s+직선\s*거리"
+    ),
+    re.compile(r"^(.+?)에서\s+(.+?)까지(?:의)?\s+직선\s*거리"),
+)
 
 
 def _extract_compared_places(question: str) -> tuple[str, str] | None:
     """The two POI names a straight-line-distance question compares, verbatim."""
 
-    match = _COMPARED_PLACES.search(question)
-    if not match:
-        return None
-    first, second = (part.strip() for part in match.groups())
-    return (first, second) if first and second else None
+    for pattern in _COMPARED_PLACE_PATTERNS:
+        match = pattern.search(question)
+        if match:
+            first, second = (part.strip() for part in match.groups())
+            if first and second:
+                return first, second
+    return None
 
 
-def _bind_prevalidated_template(
-    intent: str,
-    question: str,
-    options: list[str],
-    anchor: str | None,
-) -> list[dict[str, Any]] | None:
-    if intent == "distance":
-        pair = _extract_compared_places(question)
-        if not pair:
-            return None
-        place_a, place_b = pair
-        return [
-            _step(
-                "places",
-                "batch_geocode",
-                {"place_names": [place_a, place_b], "anchor": place_a, "limit": 1},
-                role="support",
-            ),
-            _step(
-                "distance",
-                "haversine_distance",
-                {"place_a": "$places.0.place", "place_b": "$places.1.place"},
-                depends_on=["places"],
-                role="support",
-            ),
-            _step(
-                "option_match",
-                "match_distance_options",
-                {"distance": "$distance", "options": options},
-                depends_on=["distance"],
-                role="measure",
-            ),
-        ]
-
-    if intent not in {"nearby", "direction", "radius"} or not anchor:
-        return None
-    target = _extract_target_type(question, intent)
-    if not target:
-        return None
-    radius_m = _extract_radius_m(question) if intent == "radius" else RETRIEVAL_RADIUS_M
-    retrieval_specs = _nearby_retrieval_specs(target)
-    steps = [
-        _step(
-            "anchor",
-            "batch_geocode",
-            {"place_names": [anchor], "anchor": anchor, "limit": 1},
-            role="support",
-        )
-    ]
-    retrieval_ids: list[str] = []
-    for index, spec in enumerate(retrieval_specs):
-        step_id = f"nearby_{index + 1}"
-        retrieval_ids.append(step_id)
-        steps.append(
-            _step(
-                step_id,
-                "nearby_places",
-                {
-                    "center": "$anchor.0.place",
-                    **spec,
-                    "radius_m": radius_m,
-                    "limit": RETRIEVAL_LIMIT,
-                },
-                depends_on=["anchor"],
-                role="support",
-            )
-        )
-    candidates_ref = f"${retrieval_ids[0]}"
-    candidate_dependency = retrieval_ids
-    if len(retrieval_ids) > 1:
-        steps.append(
-            _step(
-                "candidates",
-                "merge_places",
-                {"items": [f"${step_id}" for step_id in retrieval_ids]},
-                depends_on=retrieval_ids,
-                role="support",
-            )
-        )
-        candidates_ref = "$candidates"
-        candidate_dependency = ["candidates"]
-    if intent in {"nearby", "direction"}:
-        steps.append(
-            _step(
-                "option_candidates",
-                "recover_option_places",
-                {
-                    "options": options,
-                    "candidates": candidates_ref,
-                    "anchor": "$anchor.0.place",
-                    "radius_m": radius_m,
-                },
-                depends_on=["anchor", *candidate_dependency],
-                role="support",
-            )
-        )
-        candidates_ref = "$option_candidates"
-        candidate_dependency = ["option_candidates"]
-    if intent == "direction":
-        direction = _extract_requested_direction(question)
-        if not direction:
-            return None
-        steps.append(
-            _step(
-                "directional_candidates",
-                "filter_by_direction",
-                {
-                    "center": "$anchor.0.place",
-                    "places": candidates_ref,
-                    "direction": direction,
-                },
-                depends_on=["anchor", *candidate_dependency],
-                role="support",
-            )
-        )
-        candidates_ref = "$directional_candidates"
-        candidate_dependency = ["directional_candidates"]
-    steps.append(
-        _step(
-            "option_match",
-            "match_options",
-            {
-                "options": options,
-                "places": candidates_ref,
-                "anchor": "$anchor.0.place",
-                "mode": "radius_set" if intent == "radius" else "nearest",
-            },
-            depends_on=["anchor", *candidate_dependency],
-            role="measure",
-        )
-    )
-    return steps
-
-
-def _step(
-    step_id: str,
-    operator: str,
-    arguments: dict[str, Any],
-    *,
-    depends_on: list[str] | None = None,
-    role: str,
-) -> dict[str, Any]:
-    from src.agent.geoflow import OPERATOR_CONTRACTS
-
-    return {
-        "id": step_id,
-        "operator": operator,
-        "arguments": arguments,
-        "depends_on": depends_on or [],
-        "output_type": OPERATOR_CONTRACTS[operator].output_type,
-        "role": role,
-    }
-
-
-# The phrasings the benchmarks actually use, per intent, most specific first. Each was written
-# against a question in `dataset/`, not from what the phrasing ought to be: the older patterns
-# expected "북쪽에 있는 가장 가까운 X 중" and "안에 있는 X 목록", and the datasets say
-# "북쪽 방향에 있는 X 중 가장 가까운 곳" and "이내에 있는 X는". Nothing matched, so the kind of
-# place asked for — which is a literal sitting in the sentence — came only from the Analysis
-# stage's guess, and the pre-validated template fallback could not be built at all.
-# The kind of place a question asks for sits between a lead-in that carries the intent and a
-# grammatical tail that carries nothing. Splitting the two is what keeps this extractor about
-# Korean rather than about our benchmarks' sentence templates: an earlier revision wrote one
-# regex per observed sentence ("...은 다음", "...안에 있는 X 목록"), so a question that asked the
-# same thing in another ending lost a literal that was sitting in plain sight.
+# The kind of place a question asks for sits between a semantic lead-in and a grammatical tail.
+# Keep those pieces independent: enumerating complete observed sentences makes the extractor a
+# function of one generator, while the same relation can be written with different particles,
+# endings and ordinary synonyms.
 _TARGET_TYPE_TAIL = r"\s*(?:은|는|이|가|을|를)?\s*(?:다음|어디|무엇|어느|중|목록)"
 
 _TARGET_TYPE_LEADS: dict[str, tuple[str, ...]] = {
-    "nearby": (r"가장\s*가까운\s+",),
+    "nearby": (r"(?:가장\s*)?(?:가까운|인접한)\s+",),
     "direction": (
         r"(?:북동|남동|남서|북서|북|남|동|서)쪽\s*(?:방향)?(?:에|으로)\s*있는\s*"
         r"(?:가장\s*가까운\s*)?",
+        r"(?:북동|남동|남서|북서|북|남|동|서)쪽\s*(?:방향)?에서\s*"
+        r"(?:가장\s*가까운\s*)?",
     ),
-    "radius": (r"(?:이내|안|내)에\s*있는\s+",),
+    "radius": (r"(?:이내|안|내)에\s*(?:있는|위치한)\s+",),
 }
 
 _TARGET_TYPE_PATTERNS: dict[str, tuple[str, ...]] = {
@@ -1791,6 +1600,21 @@ def _states_visiting_order(question: str) -> bool:
     return bool(_STATED_ORDER.search(question))
 
 
+_DURATION_TEXT = r"(?:[\d.]+\s*시간(?:\s*[\d.]+\s*분)?|[\d.]+\s*분)"
+
+
+def _duration_seconds(value: str) -> float | None:
+    match = re.fullmatch(
+        r"\s*(?:(?P<hours>[\d.]+)\s*시간)?\s*(?:(?P<minutes>[\d.]+)\s*분)?\s*",
+        value,
+    )
+    if not match or not any(match.group(name) for name in ("hours", "minutes")):
+        return None
+    hours = float(match.group("hours") or 0)
+    minutes = float(match.group("minutes") or 0)
+    return hours * 3600 + minutes * 60
+
+
 def _extract_trip_schedule(question: str) -> tuple[dict[str, float], float | None]:
     """Read the stays and the total time a trip question states, in seconds.
 
@@ -1804,17 +1628,20 @@ def _extract_trip_schedule(question: str) -> tuple[dict[str, float], float | Non
     # A stop is stated as "X를 2시간" or as "X에서 30분"; reading only the first shape returned
     # nothing for a question full of errands and left the departure time short by all of them.
     for match in re.finditer(
-        r"([^,.]+?)(?:을|를|에서|에)\s*(?:약\s*)?([\d.]+)\s*(시간|분)", question
+        rf"([^,.!?]+?)(?:을|를|에서|에)\s*(?:약\s*)?({_DURATION_TEXT})", question
     ):
         name = match.group(1).strip()
-        # The sentence that introduces the stay list ends in "…있습니다. " — keep only the name.
-        name = re.split(r"[.!?]\s*", name)[-1].strip()
+        # If the first visit shares a clause with the departure, retain the name after the
+        # departure verb: "A에서 출발해 B를 30분" spends time at B, not at a place named by the
+        # whole clause. Punctuation and commas are already clause boundaries in the regex.
+        name = re.split(r"출발(?:해|해서|하여|하고|한\s*뒤)?\s*", name)[-1].strip()
         if not name:
             continue
-        amount = float(match.group(2))
-        stays[name] = amount * 3600 if match.group(3) == "시간" else amount * 60
-    budget_match = re.search(r"총\s*([\d.]+)\s*시간", question)
-    budget = float(budget_match.group(1)) * 3600 if budget_match else None
+        seconds = _duration_seconds(match.group(2))
+        if seconds is not None:
+            stays[name] = seconds
+    budget_match = re.search(rf"(?:총|전체)\s*({_DURATION_TEXT})", question)
+    budget = _duration_seconds(budget_match.group(1)) if budget_match else None
     return stays, budget
 
 
@@ -1861,7 +1688,17 @@ def _extract_requested_direction(question: str) -> str | None:
     return next(
         (
             direction
-            for direction in ("북쪽", "남쪽", "동쪽", "서쪽")
+            # Longer diagonal names must precede their cardinal substrings: 북동쪽 contains 동쪽.
+            for direction in (
+                "북동쪽",
+                "남동쪽",
+                "남서쪽",
+                "북서쪽",
+                "북쪽",
+                "남쪽",
+                "동쪽",
+                "서쪽",
+            )
             if direction in question
         ),
         None,
@@ -1885,6 +1722,22 @@ _TWO_ANCHOR_MARKERS = ("양쪽", "둘 다", "모두에서")
 
 def _extract_anchor(question: str, intent: str) -> str | None:
     for pattern in _ANCHOR_PATTERNS:
+        match = re.search(pattern, question)
+        if match and match.group(1).strip():
+            return _single_anchor(match.group(1).strip())
+    intent_patterns = {
+        "nearby": (
+            r"^(.+?)(?:에서|으로부터|와|과)\s*(?:가장\s*)?(?:가까운|인접한)",
+        ),
+        "radius": (
+            r"^(.+?)(?:에서|으로부터)\s*(?:반경|직선\s*거리|거리)?\s*[\d,.]+\s*(?:km|m)",
+        ),
+        "direction": (
+            r"^(.+?)(?:에서|을\s*기준으로|를\s*기준으로|\s기준(?:으로)?)\s*"
+            r"(?:볼\s*때\s*)?(?:북동|남동|남서|북서|북|남|동|서)쪽\s*(?:방향)?(?:에|에서|으로)",
+        ),
+    }
+    for pattern in intent_patterns.get(intent, ()):
         match = re.search(pattern, question)
         if match and match.group(1).strip():
             return _single_anchor(match.group(1).strip())
@@ -2003,64 +1856,9 @@ def _is_shortened_name(candidate: Any, expected: Any) -> bool:
     return bool(candidate_key and candidate_key != expected_key and candidate_key in expected_key)
 
 
-# The operators default to it and every question in these families is stated in it.
-_CLOCK_TIMEZONE = "Asia/Seoul"
-
-
-def _computed_clock_option(results: dict[str, Any] | None, options: list[str]) -> int | None:
-    """The option nearest the wall clock the graph computed, when there is exactly one."""
-
-    if not results or len(options) < 2:
-        return None
-    parsed_options = [parse_clock_text(option, _CLOCK_TIMEZONE) for option in options]
-    if any(option is None for option in parsed_options):
-        return None
-    # A clock operator reports both ends and computes one of them: run forwards and the start is
-    # the question's, run backwards and the finish is. Which is which is not visible in the field
-    # names — preferring `finish_time` answered "when must I leave" with the deadline the question
-    # had just handed over — so the operator names the field it derived and only that one counts.
-    derived = {
-        parsed
-        for value in results.values()
-        if isinstance(value, dict)
-        and isinstance(value.get("derived_clock"), str)
-        and isinstance(value.get(str(value["derived_clock"])), str)
-        and (parsed := _clock_moment(str(value[str(value["derived_clock"])]))) is not None
-    }
-    if len(derived) != 1:
-        # No computed clock, or two of them and no way to know which the question asked for.
-        return None
-    computed = next(iter(derived))
-    minutes = [
-        option.hour * 60 + option.minute for option in parsed_options if option is not None
-    ]
-    distances = sorted(
-        (abs(value - (computed.hour * 60 + computed.minute)), index)
-        for index, value in enumerate(minutes)
-    )
-    (nearest_gap, nearest), (runner_up_gap, _) = distances[0], distances[1]
-    if nearest_gap * 2 >= runner_up_gap:
-        # The nearest option is always *some* option, so the clock counts only when it picks one
-        # decisively — twice as close as the next. A plan that lost its stays computed 12:30
-        # against options at 14:23 and 15:23, was 113 minutes from one and 173 from the other,
-        # and took the first; the generation stage had added the four stated hours itself and
-        # written the right answer. A clock that does land on its option still outranks that
-        # prose, because it is computed evidence and the prose is recalled.
-        return None
-    return nearest
-
-
-def _clock_moment(value: str) -> datetime | None:
-    try:
-        return datetime.fromisoformat(value)
-    except ValueError:
-        return parse_clock_text(value, _CLOCK_TIMEZONE)
-
-
 def _select_option(
     payload: dict[str, Any],
     options: list[str],
-    results: dict[str, Any] | None = None,
 ) -> tuple[int | None, str]:
     """Reconcile the generated answer text with the generated index.
 
@@ -2069,17 +1867,10 @@ def _select_option(
     the declared index is the next authority, and a single containment match is the last
     resort.
 
-    A clock the operators computed outranks all three. When every option is a wall-clock time and
-    the graph produced exactly one, the generation stage's job is to report that time, not to
-    revise it — and revising is what it did: a trace reading 14:40 was answered as 16:33
-    "accounting for real-world traffic, parking, and navigation variations", and one reading
-    13:36 as 15:46 for an "unrecorded return trip". Both adjustments are invented evidence, and
-    both moved the answer exactly one option.
+    Operator state is evidence supplied to the generation stage, not a second answer channel in
+    the harness. Keeping selection here limited to the model's declared answer makes every intent
+    follow the same rule; deterministic clock values no longer receive a family-specific override.
     """
-
-    computed = _computed_clock_option(results, options)
-    if computed is not None:
-        return computed, "computed_clock"
     text = payload.get("predicted_answer")
     exact = _match_option_text(text, options, strict=True) if isinstance(text, str) else None
     if exact is not None:
@@ -2127,7 +1918,9 @@ def _heuristic_intent(question: str) -> str:
 
 def _explicit_intent(question: str) -> str | None:
     lowered = question.lower()
-    if any(word in lowered for word in ("반경", "이내", "radius", "within")):
+    if any(word in lowered for word in ("반경", "이내", "radius", "within")) or re.search(
+        r"[\d,.]+\s*(?:km|m)\s*(?:내|안)(?:에|의)", lowered
+    ):
         return "radius"
     if any(word in lowered for word in ("장소 유형", "유형은", "카테고리", "종류", "type")):
         return "type"
@@ -2138,10 +1931,10 @@ def _explicit_intent(question: str) -> str | None:
         for word in ("어느 방향", "방향에", "동쪽", "서쪽", "남쪽", "북쪽", "direction")
     ):
         return "direction"
-    if any(word in lowered for word in ("일정", "여행", "순서", "경유", "itinerary")):
+    if any(word in lowered for word in ("일정", "여행", "순서", "경유", "둘러", "itinerary")):
         return "trip"
     if any(word in lowered for word in ("경로", "운전", "자동차", "주행", "route", "driving")):
         return "routing"
-    if any(word in lowered for word in ("가까운", "근처", "nearest", "nearby")):
+    if any(word in lowered for word in ("가까운", "인접한", "근처", "nearest", "nearby")):
         return "nearby"
     return None

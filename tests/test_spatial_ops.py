@@ -71,6 +71,24 @@ def test_filter_by_direction_returns_only_sector_matches_nearest_first() -> None
     assert all(place["cardinal_direction_ko"] == "북쪽" for place in matches)
 
 
+def test_filter_by_direction_preserves_a_diagonal_sector() -> None:
+    ops = SpatialOperatorRegistry()
+    center = {"name": "기준", "latitude": 37.5, "longitude": 127.0}
+    places = [
+        {"name": "북동", "latitude": 37.51, "longitude": 127.01},
+        {"name": "동", "latitude": 37.5, "longitude": 127.01},
+        {"name": "북", "latitude": 37.51, "longitude": 127.0},
+    ]
+
+    matches = ops.invoke(
+        "filter_by_direction",
+        {"center": center, "places": places, "direction": "북동쪽"},
+    )
+
+    assert [place["name"] for place in matches] == ["북동"]
+    assert matches[0]["direction"] == "NE"
+
+
 def test_place_shaped_operator_inputs_are_normalized_before_computation() -> None:
     ops = SpatialOperatorRegistry()
     geocoded = {
@@ -445,6 +463,10 @@ def test_an_inferred_place_type_grounds_the_retrieval() -> None:
         ("현재 서울역에 있습니다.", "nearby", "서울역"),
         ("경복궁에서 가장 가까운 카페 중", "nearby", "경복궁"),
         ("서울생활사박물관에서 직선거리 600m 이내", "radius", "서울생활사박물관"),
+        ("서울역과 가장 인접한 약국은", "nearby", "서울역"),
+        ("서울역으로부터 500m 내에 위치한 카페는", "radius", "서울역"),
+        ("서울역에서 북동쪽에 있는 가장 가까운 편의점은", "direction", "서울역"),
+        ("서울역 기준 북쪽에서 가장 가까운 편의점은", "direction", "서울역"),
     ],
 )
 def test_the_anchor_is_found_however_the_question_states_it(
@@ -948,6 +970,7 @@ def test_a_departure_time_counts_the_stops_on_the_way() -> None:
         ("A를 2시간, B를 1.5시간 둘러봅니다", [7200.0, 5400.0]),
         ("A에서 30분, B에서 45분씩 들러야 합니다", [1800.0, 2700.0]),
         ("A를 1시간, B에서 15분 들릅니다", [3600.0, 900.0]),
+        ("A에서 출발해 B를 30분, C를 20분 둘러봅니다", [1800.0, 1200.0]),
     ],
 )
 def test_a_stop_is_stated_in_either_shape(question: str, expected: list[float]) -> None:
@@ -958,6 +981,39 @@ def test_a_stop_is_stated_in_either_shape(question: str, expected: list[float]) 
 
     stays, _ = _extract_trip_schedule(question)
     assert sorted(stays.values()) == sorted(expected)
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("총 90분이 있습니다", 5400.0),
+        ("총 1시간 30분이 있습니다", 5400.0),
+        ("전체 2시간 동안 이동합니다", 7200.0),
+    ],
+)
+def test_a_trip_budget_accepts_equivalent_duration_forms(
+    question: str, expected: float
+) -> None:
+    from src.agent.spatial import _extract_trip_schedule
+
+    _, budget = _extract_trip_schedule(question)
+    assert budget == expected
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("A와 B 사이의 직선거리는 얼마인가요?", ("A", "B")),
+        ("A와 B 간 직선 거리는 얼마인가요?", ("A", "B")),
+        ("A에서 B까지의 직선 거리는 얼마인가요?", ("A", "B")),
+    ],
+)
+def test_compared_places_are_not_tied_to_one_sentence_template(
+    question: str, expected: tuple[str, str]
+) -> None:
+    from src.agent.spatial import _extract_compared_places
+
+    assert _extract_compared_places(question) == expected
 
 
 def test_an_empty_measure_takes_the_node_it_depends_on() -> None:
@@ -1440,56 +1496,6 @@ def test_the_itinerary_carries_its_stays_even_when_it_is_a_reference() -> None:
     assert grounded[-1]["arguments"]["stay_durations_s"] == [0.0, 3600.0, 5400.0, 3600.0, 0.0]
 
 
-def test_a_computed_clock_outranks_the_answer_the_generation_stage_wrote() -> None:
-    """When the graph produced the time, reporting it is the generation stage's whole job.
-
-    Revising is what it did instead: a trace reading 14:40 came back as 16:33 "accounting for
-    real-world traffic, parking, and navigation variations", and one reading 13:36 as 15:46 for
-    an "unrecorded return trip". Both are invented evidence and both moved the answer one option.
-    """
-
-    from src.agent.spatial import _select_option
-
-    options = ["오후 5시 41분", "오후 4시 46분", "오후 3시 46분", "오후 2시 21분"]
-    # `calculate_finish_time` echoes the start it was given, so the result carries both fields;
-    # the answer is the one it derived.
-    results = {
-        "trip": {
-            "start_time": "2026-08-19T09:00:00+09:00",
-            "finish_time": "2026-08-19T13:36:04+09:00",
-            "derived_clock": "finish_time",
-        }
-    }
-    assert _select_option(
-        {"predicted_answer": "오후 3시 46분", "predicted_option": 2}, options, results
-    ) == (3, "computed_clock")
-
-    # `arrival_time` is the deadline the question states, never a computed value.
-    reverse = {
-        "start": {
-            "arrival_time": "2024-01-01T17:00:00+09:00",
-            "start_time": "2024-01-01T13:56:13+09:00",
-            "derived_clock": "start_time",
-        }
-    }
-    reverse_options = ["오후 1시 52분", "오후 12시 17분", "오전 10시 42분", "오후 3시 27분"]
-    assert _select_option({"predicted_answer": "오후 12시 17분"}, reverse_options, reverse) == (
-        0,
-        "computed_clock",
-    )
-
-    # Without a computed clock, or with options that are not clocks, the old path decides.
-    no_clock: dict[str, object] = {"x": {"nearest": {}}}
-    assert _select_option({"predicted_answer": "오후 3시 46분"}, options, no_clock) == (
-        2,
-        "exact_answer_text",
-    )
-    assert _select_option({"predicted_answer": "2번"}, ["1번", "2번", "3번"], results) == (
-        1,
-        "exact_answer_text",
-    )
-
-
 def test_a_bare_tour_total_is_not_topped_up_with_stays_either() -> None:
     """`$tsp.total_cost` carries the stays whether or not the planner also wrote an addition."""
 
@@ -1570,51 +1576,6 @@ def test_a_stated_return_leg_is_part_of_the_itinerary() -> None:
     steps[0]["arguments"]["place_names"] = [*open_names, "동산장모텔"]
     grounded = _ground_graph_literals(steps, question, [], "trip")
     assert grounded[-1]["arguments"]["locations"] == "$p"
-
-
-def test_the_derived_clock_is_the_one_the_operator_computed() -> None:
-    """A clock operator reports both ends and computes one of them.
-
-    Run forwards the start is the question's and the finish is the answer; run backwards it is
-    the other way round, and nothing in the field names says which. Preferring `finish_time`
-    answered "when must I leave" with the deadline the question had just handed over — six
-    questions in one run, every prediction later than its gold.
-    """
-
-    from src.agent.spatial import _select_option
-
-    reverse_options = ["오후 3시 32분", "오후 5시 52분", "오후 2시 07분", "오후 7시 17분"]
-    reverse = {
-        "s": {
-            "start_time": "2026-08-19T15:58:14+09:00",
-            "finish_time": "2026-08-19T18:00:00+09:00",
-            "derived_clock": "start_time",
-        }
-    }
-    assert _select_option({"predicted_answer": "오후 5시 52분"}, reverse_options, reverse) == (
-        0,
-        "computed_clock",
-    )
-
-    forward_options = ["오후 5시 41분", "오후 4시 46분", "오후 3시 46분", "오후 2시 21분"]
-    forward = {
-        "s": {
-            "start_time": "2026-08-19T09:00:00+09:00",
-            "finish_time": "2026-08-19T13:36:04+09:00",
-            "derived_clock": "finish_time",
-        }
-    }
-    assert _select_option({"predicted_answer": "오후 3시 46분"}, forward_options, forward) == (
-        3,
-        "computed_clock",
-    )
-
-    # A result that does not say what it derived is not a computed clock.
-    silent: dict[str, object] = {"s": {"finish_time": "2026-08-19T13:36:04+09:00"}}
-    assert _select_option({"predicted_answer": "오후 3시 46분"}, forward_options, silent) == (
-        2,
-        "exact_answer_text",
-    )
 
 
 def test_a_clock_operator_says_which_end_it_derived() -> None:
@@ -1901,43 +1862,6 @@ def test_a_kind_the_category_vocabulary_misses_drops_the_filter() -> None:
          "latitude": 1.0, "longitude": 1.0}
     ]
     assert ops.filter_places(places=places, required_types=["우산가게"]) == places
-
-
-def test_a_clock_that_cannot_tell_two_options_apart_is_not_evidence_for_either() -> None:
-    """A computed clock counts only when it picks an option decisively.
-
-    A plan whose stays failed to bind computed a travel-only 12:30 for an itinerary with four
-    stated hours of visits. That is 113 minutes from one option and 173 from the next, which
-    tells the two apart no better than a coin — and it overruled a generation stage that had
-    added the four hours itself and written the correct answer.
-    """
-
-    from src.agent.spatial import _select_option
-
-    options = ["오후 7시 18분", "오후 4시 53분", "오후 2시 23분", "오후 3시 23분"]
-    travel_only = {
-        "s": {
-            "start_time": "2026-08-19T10:00:00+09:00",
-            "finish_time": "2026-08-19T12:30:32+09:00",
-            "derived_clock": "finish_time",
-        }
-    }
-    assert _select_option({"predicted_answer": "오후 4시 53분"}, options, travel_only) == (
-        1,
-        "exact_answer_text",
-    )
-
-    complete = {
-        "s": {
-            "start_time": "2026-08-19T10:00:00+09:00",
-            "finish_time": "2026-08-19T16:53:00+09:00",
-            "derived_clock": "finish_time",
-        }
-    }
-    assert _select_option({"predicted_answer": "오후 2시 23분"}, options, complete) == (
-        1,
-        "computed_clock",
-    )
 
 
 def test_the_diagonal_of_a_matrix_costs_nothing_and_no_api_call() -> None:

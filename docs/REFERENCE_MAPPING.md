@@ -719,12 +719,13 @@ result, and they are worth writing down because three of them survive into v4 in
    (53.1% and the 20 rows it excludes). v4 fixes the composition — its `mapeval_class` mix is
    28/22/22/21/7 against upstream's 27.7/22.3/22.0/21.3/6.7 — and v3 does not have it.
 
-`_select_option` also carries a deterministic override, `_computed_clock_option`, that outranks the
+`_select_option` also carried a deterministic override, `_computed_clock_option`, that outranked the
 generation stage whenever every option is a wall clock and the graph computed exactly one. It
 decided **27 of the 100** answers in that Spatial-Agent run. On this run it agreed with the
 generation stage's own answer text on all 27, so it did not move the score, but it is answer
 selection performed by the harness rather than by the architecture and it should be reported
-whenever the trace shows `"selection_method": "computed_clock"`.
+whenever a historical trace shows `"selection_method": "computed_clock"`. The current revision
+removes that override; see "Removing family-specific recovery and answer selection" below.
 
 ## No held-out split, and what v5 is for
 
@@ -2552,3 +2553,40 @@ with the largest Spatial-Agent cross-draw range already on record (30.8 points o
 **Every dataset here is spent by this.** These changes strengthen Spatial-Agent's operator surface,
 so no accuracy measured before `e114f4b` is comparable to one after it, and v7d's 80.4 is what
 `c7d49cb` scored. The next held-out number needs a fresh draw.
+
+## Removing family-specific recovery and answer selection
+
+An overfitting audit separated two kinds of changes that benchmark-driven development had mixed
+together:
+
+- Operator corrections remain when they follow from the question or the operator contract without
+  reference to a gold answer. A stated itinerary must not be reordered, a distance objective must
+  read metres, a closed tour must include its return leg, and a stop outside a time budget was not
+  visited. These are semantic and unit invariants, not family knobs.
+- Recovery or answer selection is removed when only selected intents receive it or when its
+  threshold comes from the spacing of benchmark options.
+
+Three code changes implement that boundary:
+
+1. `_computed_clock_option` is deleted. The evaluator LLM still receives the complete operator
+   trace and is instructed to prefer computed evidence, but `_select_option` now reconciles only
+   the answer text and index that generation returned. Clock questions no longer have a second,
+   harness-owned answer channel or the option-relative `nearest_gap * 2` threshold.
+2. The handwritten post-repair solver for `distance`, `nearby`, `direction` and `radius` is
+   deleted. After the normal repair round, every intent gets the same last attempt: execute the
+   planner's original graph with this port's type/role restrictions relaxed, while retaining the
+   structural graph rules. A validation miss is no longer forgiven according to its family.
+3. Question literals are parsed by semantic components rather than only by the generator's full
+   sentence shapes. Direction constraints now preserve all eight compass sectors; anchors accept
+   ordinary `에서`, `으로부터`, `기준` and proximity constructions; straight-line pairs
+   accept `사이`, `간` and `에서 …까지`; trip durations accept hours, minutes and mixed
+   forms such as `1시간 30분`. Metamorphic tests cover variants not emitted by the datasets.
+
+The ordinal-nearby operator and template remain. "The k-th nearest place in the neighbourhood"
+and "the nearest among these options" are mathematically different queries, and retrieval before
+ranking follows from that distinction without a gold answer. It remains a deliberate capability
+addition beyond upstream's ten Appendix E macro families and must be reported as such.
+
+This revision changes Spatial-Agent behaviour, so every existing dataset is spent for it. No
+accuracy is claimed here: a result for this code requires a fresh seed and an untouched holdout,
+and neither dataset construction nor a live benchmark was run as part of this change.

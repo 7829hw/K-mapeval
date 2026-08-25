@@ -17,7 +17,6 @@ from src.agent.geoflow import (
 from src.agent.spatial import (
     RETRIEVAL_LIMIT,
     _bind_named_places,
-    _bind_prevalidated_template,
     _ground_graph_literals,
     _heuristic_intent,
     _resolve_output_binding,
@@ -1180,29 +1179,6 @@ def test_graph_grounding_restores_verbatim_anchor_and_options() -> None:
     ]
 
 
-def test_radius_grounding_builds_candidate_set_graph() -> None:
-    grounded = _bind_prevalidated_template(
-        "radius",
-        "기준점 반경 500m 안에 있는 패스트푸드점 목록은 무엇인가요?",
-        ["롯데리아 | 윤토스트", "롯데리아 | 노브랜드버거"],
-        "기준점",
-    )
-
-    assert grounded is not None
-    assert grounded[0]["operator"] == "batch_geocode"
-    assert grounded[0]["arguments"]["place_names"] == ["기준점"]
-    assert [step["operator"] for step in grounded] == [
-        "batch_geocode",
-        "nearby_places",
-        "nearby_places",
-        "merge_places",
-        "match_options",
-    ]
-    assert grounded[1]["arguments"]["query"] == "패스트푸드"
-    assert grounded[2]["arguments"]["category_code"] == "FD6"
-    assert grounded[-1]["arguments"]["mode"] == "radius_set"
-
-
 def test_radius_literals_are_factors_not_synthetic_output_references() -> None:
     steps = [
         {
@@ -1292,28 +1268,6 @@ def test_retrieval_grounding_fans_out_over_kakao_place_type_synonyms() -> None:
     assert merged["id"] == "nearby"
     assert merged["arguments"]["items"] == [f"${step['id']}" for step in retrievals]
     assert grounded[-1]["arguments"]["options"] == ["동묘파출소", "안임지구대"]
-
-
-def test_prevalidated_template_retrieval_is_not_expanded_twice() -> None:
-    fallback = _bind_prevalidated_template(
-        "nearby",
-        "기준점에서 가장 가까운 경찰서 중 어디인가요?",
-        ["동묘파출소", "안임지구대"],
-        "기준점",
-    )
-    assert fallback is not None
-
-    grounded = _ground_graph_literals(
-        fallback,
-        "기준점에서 가장 가까운 경찰서 중 어디인가요?",
-        ["동묘파출소", "안임지구대"],
-        "nearby",
-        expand_retrieval=False,
-    )
-
-    assert [step["operator"] for step in grounded] == [
-        step["operator"] for step in fallback
-    ]
 
 
 def test_distance_measure_grounding_restores_verbatim_option_texts() -> None:
@@ -2582,31 +2536,43 @@ def test_option_recovery_stays_in_the_sector_the_question_asks_about() -> None:
         def nearby_search(self, center: Any, **kwargs: Any) -> list[Place]:
             self._api_calls += 1
             query = str(kwargs.get("query") or "")
-            offsets = {"북쪽마트": 0.01, "남쪽마트": -0.01}
+            offsets = {
+                "북쪽마트": (0.01, 0.0),
+                "남쪽마트": (-0.01, 0.0),
+                "대각마트": (0.01, 0.01),
+            }
             if query not in offsets:
                 return []
+            latitude, longitude = offsets[query]
             return [
                 Place(
                     place_id=query,
                     name=query,
-                    latitude=self.place.latitude + offsets[query],
-                    longitude=self.place.longitude,
+                    latitude=self.place.latitude + latitude,
+                    longitude=self.place.longitude + longitude,
                     category="가정,생활 > 대형마트",
                 )
             ]
 
     registry = ToolRegistry(_Provider())
     arguments = {
-        "options": ["북쪽마트", "남쪽마트"],
+        "options": ["북쪽마트", "남쪽마트", "대각마트"],
         "candidates": [],
         "anchor": FakeProvider().place.model_dump(),
         "radius_m": 5000,
     }
     unconstrained = registry.invoke("recover_option_places", arguments)
-    assert {place["name"] for place in unconstrained.output} == {"북쪽마트", "남쪽마트"}
+    assert {place["name"] for place in unconstrained.output} == {
+        "북쪽마트",
+        "남쪽마트",
+        "대각마트",
+    }
 
     constrained = registry.invoke("recover_option_places", {**arguments, "direction": "북쪽"})
-    assert [place["name"] for place in constrained.output] == ["북쪽마트"]
+    assert {place["name"] for place in constrained.output} == {"북쪽마트", "대각마트"}
+
+    diagonal = registry.invoke("recover_option_places", {**arguments, "direction": "북동쪽"})
+    assert [place["name"] for place in diagonal.output] == ["대각마트"]
 
 
 @pytest.mark.parametrize(
@@ -2639,8 +2605,10 @@ def test_option_recovery_stays_in_the_sector_the_question_asks_about() -> None:
         # Phrasings no row in `dataset/` uses. The lead-in carries the intent, the ending is
         # just Korean, and a question that ends differently still states its kind.
         ("서울역에서 가장 가까운 약국은 어디인가요?", "nearby", "약국"),
+        ("서울역과 가장 인접한 약국은 어디인가요?", "nearby", "약국"),
         ("경복궁 남동쪽 방향에 있는 카페 중 어느 곳이 가장 가깝나요?", "direction", "카페"),
         ("홍대입구역 반경 500m 안에 있는 서점 목록을 알려주세요", "radius", "서점"),
+        ("홍대입구역으로부터 500m 내에 위치한 서점은 어디인가요?", "radius", "서점"),
         ("서울역 북쪽에 있는 가장 가까운 지하철역은 어디인가요?", "direction", "지하철역"),
     ],
 )
@@ -2653,26 +2621,13 @@ def test_the_kind_of_place_is_read_from_the_phrasings_the_questions_use(
     "안에 있는 X 목록" — against benchmarks that say "북쪽 방향에 있는 X 중 가장 가까운 곳" and
     "이내에 있는 X는". Nothing matched, and a literal sitting in plain sight reached the retrieval
     only as the Analysis stage's guess. Rewriting the sentences we had seen would have made the
-    extractor a function of the test set, so the split is structural: the last four cases use
+    extractor a function of the test set, so the split is structural: the final cases use
     endings no dataset row does.
     """
 
     from src.agent.spatial import _extract_target_type
 
     assert _extract_target_type(question, intent) == expected
-
-
-def test_a_direction_question_has_a_template_to_fall_back_on() -> None:
-    from src.agent.spatial import _bind_prevalidated_template, _extract_anchor
-
-    question = "로데오모텔에서 남쪽 방향에 있는 은행 중 가장 가까운 곳은 다음 중 어디인가요?"
-    graph = _bind_prevalidated_template(
-        "direction", question, ["A", "B", "C", "D"], _extract_anchor(question, "direction")
-    )
-    assert graph is not None
-    # The constraint comes after the enrichment, which is the order recovery needs.
-    operators = [step["operator"] for step in graph]
-    assert operators.index("recover_option_places") < operators.index("filter_by_direction")
 
 
 def test_a_geocode_node_written_where_its_places_belong_is_flattened() -> None:

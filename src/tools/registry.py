@@ -1290,7 +1290,8 @@ def _within_anchor_sector(anchor: Place, place: Place, direction: str | None) ->
         {"latitude": anchor.latitude, "longitude": anchor.longitude},
         {"latitude": place.latitude, "longitude": place.longitude},
     )
-    return bool(bearing["cardinal_direction"] == expected)
+    measured = bearing["direction"] if len(expected) == 2 else bearing["cardinal_direction"]
+    return bool(measured == expected)
 
 
 def _within_anchor_radius(anchor: Place, place: Place, radius_m: int) -> bool:

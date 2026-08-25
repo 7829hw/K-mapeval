@@ -194,7 +194,10 @@ class SpatialOperatorRegistry:
         matches: list[dict[str, Any]] = []
         for candidate_index, place in _excluding_self(center, _as_place_list(places)):
             bearing = cls.bearing_to_direction(center, place)
-            if bearing["cardinal_direction"] != expected:
+            measured = (
+                bearing["direction"] if len(expected) == 2 else bearing["cardinal_direction"]
+            )
+            if measured != expected:
                 continue
             distance = cls.haversine_distance(center, place)
             matches.append({"candidate_index": candidate_index, **place, **bearing, **distance})
@@ -2198,23 +2201,42 @@ def _cardinal_direction(value: str) -> str:
         "north": "N",
         "북": "N",
         "북쪽": "N",
+        "ne": "NE",
+        "northeast": "NE",
+        "북동": "NE",
+        "북동쪽": "NE",
         "e": "E",
         "east": "E",
         "동": "E",
         "동쪽": "E",
+        "se": "SE",
+        "southeast": "SE",
+        "남동": "SE",
+        "남동쪽": "SE",
         "s": "S",
         "south": "S",
         "남": "S",
         "남쪽": "S",
+        "sw": "SW",
+        "southwest": "SW",
+        "남서": "SW",
+        "남서쪽": "SW",
         "w": "W",
         "west": "W",
         "서": "W",
         "서쪽": "W",
+        "nw": "NW",
+        "northwest": "NW",
+        "북서": "NW",
+        "북서쪽": "NW",
     }
     try:
         return aliases[normalized]
     except KeyError as exc:
-        raise ValueError("direction must be north/east/south/west (북쪽/동쪽/남쪽/서쪽)") from exc
+        raise ValueError(
+            "direction must be one of the eight compass sectors "
+            "(N/NE/E/SE/S/SW/W/NW or Korean equivalent)"
+        ) from exc
 
 
 def _ranking_key(items: Any) -> str:

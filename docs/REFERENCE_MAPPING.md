@@ -2574,9 +2574,10 @@ Three code changes implement that boundary:
    longer have a second, harness-owned answer channel or the option-relative `nearest_gap * 2`
    threshold.
 2. The handwritten post-repair solver for `distance`, `nearby`, `direction` and `radius` is
-   deleted. After the normal repair round, every intent gets the same last attempt: execute the
-   planner's original graph with this port's type/role restrictions relaxed, while retaining the
-   structural graph rules. A validation miss is no longer forgiven according to its family.
+   deleted. After the normal repair round, every intent gets the same last attempts: execute the
+   repaired graph with this port's type/role restrictions relaxed, then the original graph under
+   the same rules only if the repair is structurally invalid. Structural graph rules remain in
+   force throughout. A validation miss is no longer forgiven according to its family.
 3. Question literals are parsed by semantic components rather than only by the generator's full
    sentence shapes. Direction constraints now preserve all eight compass sectors; anchors accept
    ordinary `에서`, `으로부터`, `기준` and proximity constructions; straight-line pairs
@@ -2624,3 +2625,47 @@ Neither repair selects an answer, recognizes a benchmark family, or changes an o
 Regression tests use synthetic output shapes and 45 fabricated places rather than benchmark
 answers. Because `src/` changed after the run, every existing accuracy is again training-set
 evidence for this revision; the next result must use a fresh untouched draw.
+
+### Preserve a structural repair on the lenient attempt
+
+The three-pass run at `b508631` verified both changes above: context overflows fell from six to
+zero, mean prompt tokens fell 28.6%, and `poi_farthest_of_three` rose from 14/30 to 26/30 repeated
+answers as the origin was included in the distance calculations. It also exposed an ordering bug
+in the architecture-wide fallback. One graph used impossible named fields on a `batch_geocode`
+list; the repair rewrote them as valid indexed references, then failed only this port's declared
+type check. The old fallback discarded that structurally valid repair and applied lenient
+validation to the original graph, reproducing the structural error it had just repaired.
+
+The fallback order is now `repaired strict -> repaired lenient -> original lenient`. Trace entries
+record `plan_source` for every accepted or rejected lenient attempt. Structural rules are never
+relaxed, and the original graph remains available when the repair itself is malformed. This is one
+policy for every intent, not the removed family-specific recovery path.
+
+The follow-up was exercised before it was committed. Consequently the eight reports below carry
+`code_revision=b5086310a651`, which identifies their checked-out commit but not the modified source
+loaded by the process. The new `plan_source` trace field, which does not exist at `b508631`, pins the
+executed behaviour to this follow-up. This provenance limitation is why a commit hash alone must
+not be read as proof of a clean worktree.
+
+- `test_20260825T135117Z.json` through `test_20260825T141310Z.json` are three paired passes over
+  the spent 100-row v7 set at concurrency 32, temperature 0 and 15 steps. ReAct scored
+  50/45/52 (147/300, 49.0%) and Spatial-Agent 83/80/85 (248/300, 82.7%), a 33.7-point aggregate
+  gap. The preceding `b508631` Spatial-Agent passes scored 77/86/82 (245/300, 81.7%); the
+  one-point change is inside the endpoint's measured spread and is not attributed to this fix.
+  Spatial-Agent retained zero context overflows. Its six reasoning failures became two reasoning
+  failures plus one unrelated 61,315-completion-token truncation, while total tokens were
+  effectively unchanged (5,236,731 versus 5,237,697 over the three passes).
+- `test_20260825T142821Z.json` and `test_20260825T143739Z.json` are one paired pass over the spent
+  283-row v7 set under the same conditions. ReAct scored 141/283 (49.8%) and Spatial-Agent
+  228/283 (80.6%). One pass is not a result, and this draw's known `nearby_kth_nearest` audit
+  failure also rules out quoting that family.
+
+The trace is the direct regression check. Repaired-lenient plans were accepted and executed 10
+times in the 100-row passes (7 correct) and 9 times in the 283-row pass (5 correct); none became an
+`agent_reasoning_failure`. The remaining five reasoning failures across these Spatial-Agent runs
+were all nearby plans where both the repair and the original projected a named field such as
+`place_ids` or `candidates` directly from a `batch_geocode` list. Validation correctly rejected
+those structurally impossible references. They are unresolved planner/repair misses, not evidence
+that the repaired-first fallback was skipped. These are training-set diagnostics only: all named
+datasets were already spent, so the revision still needs a fresh untouched draw for a holdout
+accuracy.

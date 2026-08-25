@@ -446,27 +446,71 @@ class SpatialAgent(BenchmarkAgent):
                         self.max_steps,
                     )
                 except ValueError as repair_error:
-                    # Upstream has no type or role check to fail in the first place, so make the
-                    # same final attempt for every intent. The former path substituted a
-                    # handwritten solver only for distance/nearby/direction/radius, which meant a
-                    # validation miss was forgiven according to the benchmark family rather than
-                    # according to one architecture-wide rule.
-                    trace.append(
-                        {
-                            "stage": "validate",
-                            "status": "lenient",
-                            "error": str(repair_error),
-                        }
-                    )
-                    factorized, steps, constraints = _factorize_validate_plan(
-                        analysis,
-                        plan,
-                        question,
-                        options,
-                        intent,
-                        self.max_steps,
-                        strict_types=False,
-                    )
+                    # Upstream has no type or role check to fail in the first place. The repair
+                    # may already have fixed the structural error and be rejected only by one of
+                    # those local checks, so relax the *repaired* graph first. Going straight back
+                    # to the original discarded a valid repair and retried the very structural
+                    # error the repair had removed. The original remains the final fallback when
+                    # the repair is structurally invalid too; this order is identical for every
+                    # intent and introduces no family-specific solver.
+                    try:
+                        factorized, steps, constraints = _factorize_validate_plan(
+                            analysis,
+                            repaired_plan,
+                            question,
+                            options,
+                            intent,
+                            self.max_steps,
+                            strict_types=False,
+                        )
+                    except ValueError as repaired_lenient_error:
+                        trace.append(
+                            {
+                                "stage": "validate",
+                                "status": "invalid",
+                                "mode": "lenient",
+                                "plan_source": "repaired",
+                                "error": str(repaired_lenient_error),
+                            }
+                        )
+                        try:
+                            factorized, steps, constraints = _factorize_validate_plan(
+                                analysis,
+                                plan,
+                                question,
+                                options,
+                                intent,
+                                self.max_steps,
+                                strict_types=False,
+                            )
+                        except ValueError as original_lenient_error:
+                            trace.append(
+                                {
+                                    "stage": "validate",
+                                    "status": "invalid",
+                                    "mode": "lenient",
+                                    "plan_source": "original",
+                                    "error": str(original_lenient_error),
+                                }
+                            )
+                            raise
+                        trace.append(
+                            {
+                                "stage": "validate",
+                                "status": "lenient",
+                                "plan_source": "original",
+                                "error": str(graph_error),
+                            }
+                        )
+                    else:
+                        trace.append(
+                            {
+                                "stage": "validate",
+                                "status": "lenient",
+                                "plan_source": "repaired",
+                                "error": str(repair_error),
+                            }
+                        )
             trace.append({"stage": "factorize", **factorized.as_dict()})
             trace.append(
                 {

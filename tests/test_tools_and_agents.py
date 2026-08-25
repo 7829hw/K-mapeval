@@ -444,11 +444,15 @@ def test_a_plan_only_our_own_rules_reject_still_gets_executed() -> None:
         '{"id":"s2","operator":"sum_route_metrics","arguments":{"routes":"$s1"},'
         '"depends_on":["s1"],"role":"measure"}]}'
     )
+    structurally_invalid_repair = (
+        '{"graph":[{"id":"broken","operator":"operator_that_does_not_exist",'
+        '"arguments":{},"role":"measure"}]}'
+    )
     llm = QueuedLLM(
         [
             LLMResponse('{"intent":"poi"}'),
             LLMResponse(typed_wrong),
-            LLMResponse(typed_wrong),  # the repair round does not fix it either
+            LLMResponse(structurally_invalid_repair),
             LLMResponse('{"predicted_option":1,"confidence":0.9,"reason":"evidence"}'),
         ]
     )
@@ -467,6 +471,62 @@ def test_a_plan_only_our_own_rules_reject_still_gets_executed() -> None:
         if entry["stage"] == "validate" and entry.get("status") == "lenient"
     ]
     assert lenient and "Type compatibility" in lenient[0]["error"]
+    assert lenient[0]["plan_source"] == "original"
+    rejected_repair = next(
+        entry
+        for entry in result.trace
+        if entry["stage"] == "validate"
+        and entry.get("mode") == "lenient"
+        and entry.get("plan_source") == "repaired"
+    )
+    assert rejected_repair["status"] == "invalid"
+
+
+def test_lenient_validation_executes_a_structurally_repaired_graph_first() -> None:
+    """A repaired graph rejected only by local typing must not be replaced by the broken draft."""
+
+    invalid_original = (
+        '{"graph":['
+        '{"id":"places","operator":"batch_geocode",'
+        '"arguments":{"place_names":["경복궁"]},"role":"extent"},'
+        '{"id":"answer","operator":"identity_measure",'
+        '"arguments":{"value":"$places.anchor_place"},'
+        '"depends_on":["places"],"role":"measure"}]}'
+    )
+    repaired_but_typed_wrong = (
+        '{"graph":['
+        '{"id":"repaired_place","operator":"place_search",'
+        '"arguments":{"query":"경복궁"},"role":"extent"},'
+        '{"id":"repaired_measure","operator":"sum_route_metrics",'
+        '"arguments":{"routes":"$repaired_place"},'
+        '"depends_on":["repaired_place"],"role":"measure"}]}'
+    )
+    llm = QueuedLLM(
+        [
+            LLMResponse('{"intent":"poi"}'),
+            LLMResponse(invalid_original),
+            LLMResponse(repaired_but_typed_wrong),
+            LLMResponse('{"predicted_option":1,"confidence":0.5,"reason":"evidence"}'),
+        ]
+    )
+
+    result = SpatialAgent(llm, ToolRegistry(FakeProvider()), max_steps=4).answer(
+        "질문", ["A", "B"]
+    )
+
+    assert result.failure_type is None
+    assert result.predicted_answer == 1
+    execute = next(entry for entry in result.trace if entry["stage"] == "execute")
+    assert [step["id"] for step in execute["steps"]] == [
+        "repaired_place",
+        "repaired_measure",
+    ]
+    lenient = next(
+        entry
+        for entry in result.trace
+        if entry["stage"] == "validate" and entry.get("status") == "lenient"
+    )
+    assert lenient["plan_source"] == "repaired"
 
 
 def test_registry_returns_error_observation_instead_of_raising() -> None:

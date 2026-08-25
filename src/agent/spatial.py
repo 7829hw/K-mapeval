@@ -178,10 +178,15 @@ Exact operator contracts:
   summing legs into calculate_start_time by hand
 - calculate_start_time(arrival_time,duration_s,timezone) -> event
 - tsp_tw(nodes,distance_matrix,time_windows?,service_times?,start_index=0,time_budget?,
-  end_index?,fixed_order=false) -> network; end_index fixes the last stop when the trip must finish
-  somewhere (an appointment), leaving only the stops between it and the start to order;
+  end_index?,fixed_order=false,metric=duration,return_to_start=false) -> network; end_index fixes
+  the last stop when the trip must finish somewhere (an appointment), leaving only the stops
+  between it and the start to order;
   fixed_order=true when the question states the sequence ("적힌 순서대로", "A → B → C 순서로") so
   the stops are walked as listed instead of reordered — end_index is then meaningless;
+  metric="distance" when the question ranks by 주행거리/이동거리 rather than by time, which makes
+  total_cost metres and rules out service_times/time_budget/time_windows — they are seconds, and a
+  distance question states the stays as decoys; return_to_start=true when the trip comes home
+  ("다시 …로 돌아옵니다"), because the cheapest way out is not the cheapest loop;
   distance_matrix accepts a distance_matrix node directly ($legs), which carries the square
   duration matrix in seconds; nodes must be the matching place list in the same order, with the
   starting place at start_index. service_times are the stay durations in seconds (0 for the start)
@@ -210,7 +215,10 @@ For a trip question, geocode the start and every named stop once, then call dist
 origins = destinations = that full place list so every ordered leg is looked up in one node, and
 pass that node to tsp_tw as distance_matrix with the stays as service_times and the stated total
 time as time_budget. When the options are visiting orders, still build the same matrix and compare
-the orders the options name. When the options are counts of places ("한 곳"/"두 곳"/…), the answer
+the orders the options name — by the measure the question names, and over the whole loop if the
+trip returns to where it started. "총 주행거리가 가장 짧은 방문 순서" is decided in metres, and the
+orders it offers sit about 2% apart, so ranking them by travel time answers a different question.
+When the options are counts of places ("한 곳"/"두 곳"/…), the answer
 is how many stops fit the budget, so let tsp_tw decide feasibility — never guess from the number
 of places mentioned, and read tsp_tw.visited_count rather than counting order yourself. A count
 question lists its stops 적힌 순서대로, so set fixed_order=true and leave end_index off: the trip
@@ -1253,9 +1261,21 @@ def _ground_graph_literals(
             continue
         if operator == "tsp_tw" and intent == "trip":
             stays, budget = _extract_trip_schedule(question)
+            if _asks_for_distance(question):
+                # "총 주행거리가 가장 짧은 방문 순서" is a question about metres. The tours it
+                # chooses between are ~2% apart, so ranking them by seconds is not an
+                # approximation of ranking them by metres — it is a different answer. The stays
+                # and the budget are decoys in a distance question and the operator refuses them
+                # beside a metre matrix, so they go.
+                arguments["metric"] = "distance"
+                stays, budget = {}, None
+                for key in ("service_times", "time_budget", "time_windows"):
+                    arguments.pop(key, None)
             if budget is not None:
                 arguments["time_budget"] = budget
             names = trip_node_names
+            if _returns_to_start(question):
+                arguments["return_to_start"] = True
             if _states_visiting_order(question):
                 # The order is a question literal exactly as the stays and the budget are. Left to
                 # the planner it was set in one graph out of fifty-nine, and the search reordered
@@ -1727,6 +1747,33 @@ def _stay_for(stays: dict[str, float], name: str) -> float:
         if stated in name or name in stated:
             return seconds
     return 0.0
+
+
+# What the question is asking to minimise, in its own words. `거리`/`주행거리`/`km` is metres;
+# `시간`/`분` is seconds. A trip question states one or the other outright, so this is a literal
+# to read, not a preference to infer.
+_ASKS_DISTANCE = re.compile(r"(주행\s*거리|이동\s*거리|총\s*거리|거리가\s*가장\s*짧|distance)")
+_ASKS_DURATION = re.compile(
+    r"(소요\s*시간|이동\s*시간|시간이\s*가장\s*짧|가장\s*빠(?:른|르)|duration)"
+)
+
+
+def _asks_for_distance(question: str) -> bool:
+    """Does the trip question rank its options by metres rather than by seconds?"""
+
+    return bool(_ASKS_DISTANCE.search(question)) and not _ASKS_DURATION.search(question)
+
+
+# "…둘러본 뒤 다시 제일모텔로 돌아옵니다" closes the tour. The cheapest open path is not the
+# cheapest loop, so whether the drive home counts is a question literal like the stays are.
+_RETURNS_TO_START = re.compile(r"(다시\s*\S+(?:으)?로\s*돌아|돌아옵니다|돌아온다|돌아와|출발지로"
+                               r"|return(?:ing)?\s+to\s+(?:the\s+)?start)")
+
+
+def _returns_to_start(question: str) -> bool:
+    """Does the trip come back to where it started?"""
+
+    return bool(_RETURNS_TO_START.search(question))
 
 
 # A trip question that fixes its own sequence says so in the sentence that lists the stops.

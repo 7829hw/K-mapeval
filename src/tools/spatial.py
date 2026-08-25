@@ -956,6 +956,8 @@ class SpatialOperatorRegistry:
         time_budget: float | None = None,
         end_index: int | None = None,
         fixed_order: bool = False,
+        metric: str = "duration",
+        return_to_start: bool = False,
     ) -> dict[str, Any]:
         """Order an itinerary, or walk one the question already ordered.
 
@@ -966,7 +968,18 @@ class SpatialOperatorRegistry:
         which was 15 of 26 misses in that family.
         """
 
-        matrix = _matrix_argument(distance_matrix, len(nodes))
+        if metric not in MATRIX_METRICS:
+            raise ValueError(f"tsp_tw metric must be one of {sorted(MATRIX_METRICS)}")
+        clock = (service_times, time_windows, time_budget)
+        if metric != "duration" and any(value is not None for value in clock):
+            # Seconds have no meaning in a matrix of metres. A stay added to a distance, or a
+            # budget compared against one, is an invented measurement, and the tour it picks is
+            # arithmetic nobody can read. Refuse rather than let the units cancel out silently.
+            raise ValueError(
+                "tsp_tw metric='distance' measures metres, so service_times, time_windows and "
+                "time_budget do not apply; drop them or ask for metric='duration'"
+            )
+        matrix = _matrix_argument(distance_matrix, len(nodes), metric)
         if matrix is None:
             raise ValueError("tsp_tw distance_matrix must be square and match nodes")
         if len(nodes) > 9:
@@ -979,12 +992,18 @@ class SpatialOperatorRegistry:
             # The sequence is the question's, so `end_index` has nothing left to fix: whatever the
             # order ends on is where the trip ends.
             return _walk_stated_order(
-                nodes, matrix, time_windows, service_times, start_index, time_budget
+                nodes, matrix, time_windows, service_times, start_index, time_budget, metric
             )
         # A tour that must end somewhere is not free to end anywhere. "I have an appointment at X
         # at 7pm, with errands on the way" fixes the last stop and leaves only the errands to
         # order; without saying so, the search finds a cheaper route that ends at an errand and
         # answers a departure time for a trip that never reaches the appointment.
+        # "…를 둘러본 뒤 다시 제일모텔로 돌아옵니다" is a closed tour, and the cheapest open path
+        # is not the cheapest loop: the order that ends furthest from the start looks best right
+        # up until the drive home is counted. `end_index` cannot express it — it refuses to name
+        # the start — so the closing leg is its own flag.
+        if return_to_start and end_index is not None and int(end_index) != start_index:
+            raise ValueError("tsp_tw cannot both return to the start and end somewhere else")
         fixed_end = None if end_index is None else int(end_index)
         visit_indexes = [
             index for index in range(len(nodes)) if index not in (start_index, fixed_end)
@@ -1007,14 +1026,19 @@ class SpatialOperatorRegistry:
                 if time_budget is not None and elapsed > float(time_budget):
                     feasible = False
                     break
+            if feasible and return_to_start:
+                elapsed += float(matrix[route[-1]][start_index])
+                if time_budget is not None and elapsed > float(time_budget):
+                    feasible = False
             if feasible and (best is None or elapsed < best["total_cost"]):
                 stays = service_times or [0.0] * len(nodes)
                 service = sum(float(stays[index]) for index in route)
                 best = {
-                    "order": list(route),
+                    "order": [*route, start_index] if return_to_start else list(route),
                     # How many of the requested stops the trip actually reaches, start excluded.
                     # "몇 곳을 방문할 수 있나요" is answered by this number, and leaving it to be
-                    # counted off `order` in prose is what made the count a guess.
+                    # counted off `order` in prose is what made the count a guess. The drive home
+                    # is not a visit, so a closed tour counts the same stops an open one does.
                     "visited_count": len(route) - 1,
                     "unvisited": [],
                     "total_cost": elapsed,
@@ -1025,6 +1049,7 @@ class SpatialOperatorRegistry:
                     "service_cost": service,
                     "feasible": True,
                     "objective": "optimal_order",
+                    "metric": MATRIX_METRICS[metric],
                 }
         if best is not None:
             return {**best, "fallback_used": False}
@@ -1079,6 +1104,7 @@ class SpatialOperatorRegistry:
             # failed: how many stops a nearest-first walk reaches. Say so, rather than let a
             # reader take `order` for the itinerary they asked about.
             "objective": "greedy_partial",
+            "metric": MATRIX_METRICS[metric],
         }
 
 
@@ -1089,6 +1115,7 @@ def _walk_stated_order(
     service_times: list[float] | None,
     start_index: int,
     time_budget: float | None,
+    metric: str = "duration",
 ) -> dict[str, Any]:
     """Follow the itinerary as listed and report how much of it fits.
 
@@ -1131,6 +1158,7 @@ def _walk_stated_order(
         "fallback_used": False,
         "unvisited": unvisited,
         "objective": "stated_order",
+        "metric": MATRIX_METRICS[metric],
     }
 
 
@@ -1263,7 +1291,10 @@ def matches_required_type(place: dict[str, Any], required_type: str) -> bool:
     return not _finer_type_overrides(place.get("category"), terms)
 
 
-def build_duration_matrix(routes: Any) -> dict[str, Any]:
+MATRIX_METRICS: dict[str, str] = {"duration": "duration_s", "distance": "distance_m"}
+
+
+def build_duration_matrix(routes: Any, metric: str = "duration") -> dict[str, Any]:
     """Turn a `distance_matrix` route list into the square matrix `tsp_tw` consumes.
 
     Without this the paper's flagship trip path is unreachable: `distance_matrix` returns
@@ -1271,7 +1302,17 @@ def build_duration_matrix(routes: Any) -> dict[str, Any]:
     planner could supply was one it invented. Legs are keyed by the endpoint labels the routes
     carry, and a matrix missing any off-diagonal leg is reported as incomplete rather than
     silently filled — an absent leg is missing evidence, not a zero-cost hop.
+
+    `metric` decides which of the two numbers every leg carries fills it. "총 주행거리가 가장 짧은
+    방문 순서" asks for metres and the tours it chooses between are separated by about 2% of their
+    length, so ranking them by seconds is not an approximation of ranking them by metres: over the
+    `trip_optimal_order` rows here, replayed on real cached legs, the distance-optimal order is the
+    gold answer 93 times in 114 and the duration-optimal order 42 times.
     """
+
+    field = MATRIX_METRICS.get(metric)
+    if field is None:
+        raise ValueError(f"Unknown matrix metric {metric!r}: use one of {sorted(MATRIX_METRICS)}")
 
     if isinstance(routes, dict):
         routes = routes.get("routes", routes)
@@ -1294,30 +1335,48 @@ def build_duration_matrix(routes: Any) -> dict[str, Any]:
         column = index_of.get(str(entry.get("destination")))
         if row is None or column is None or row == column:
             continue
-        duration = entry.get("duration_s")
-        if duration is None:
+        measure = entry.get(field)
+        if measure is None:
             continue
-        matrix[row][column] = float(duration)
+        matrix[row][column] = float(measure)
     missing = [
         [labels[row], labels[column]]
         for row in range(size)
         for column in range(size)
         if row != column and matrix[row][column] is None
     ]
-    return {"nodes": labels, "matrix": matrix, "missing_legs": missing, "complete": not missing}
+    return {
+        "nodes": labels,
+        "matrix": matrix,
+        "missing_legs": missing,
+        "complete": not missing,
+        "metric": field,
+    }
 
 
-def _matrix_argument(value: Any, node_count: int) -> list[list[float]] | None:
+def _matrix_argument(
+    value: Any, node_count: int, metric: str = "duration"
+) -> list[list[float]] | None:
     """Accept the shapes a planner can actually produce for `tsp_tw.distance_matrix`."""
 
     candidate: Any = value
     if isinstance(value, dict):
+        # A pre-built `matrix` is whatever the node that built it measured, and only a route list
+        # can still be read in either metric. Asking for distances and being handed somebody's
+        # duration matrix is the silent unit swap this argument exists to prevent.
         candidate = value.get("matrix")
+        if candidate is not None and metric != "duration":
+            built_metric = value.get("metric")
+            if built_metric not in (None, MATRIX_METRICS[metric]):
+                raise ValueError(
+                    f"tsp_tw was asked for {metric} but the matrix it was given holds "
+                    f"{built_metric}"
+                )
         if candidate is None and "routes" in value:
-            built = build_duration_matrix(value)
+            built = build_duration_matrix(value, metric)
             candidate = built["matrix"] if built["complete"] else None
     if isinstance(value, list) and value and isinstance(value[0], dict):
-        built = build_duration_matrix(value)
+        built = build_duration_matrix(value, metric)
         candidate = built["matrix"] if built["complete"] else None
     if not isinstance(candidate, list) or len(candidate) != node_count:
         return None

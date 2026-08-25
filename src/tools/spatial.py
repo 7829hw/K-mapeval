@@ -1361,20 +1361,24 @@ def _matrix_argument(
 
     candidate: Any = value
     if isinstance(value, dict):
-        # A pre-built `matrix` is whatever the node that built it measured, and only a route list
-        # can still be read in either metric. Asking for distances and being handed somebody's
-        # duration matrix is the silent unit swap this argument exists to prevent.
-        candidate = value.get("matrix")
-        if candidate is not None and metric != "duration":
+        # The routes are the source of truth and every leg carries both numbers, so read them
+        # again in the metric that was asked for. `distance_matrix` returns a pre-built `matrix`
+        # *beside* its routes, and that one is always durations — preferring it is how asking for
+        # metres silently got seconds, which made this whole argument a no-op on the one input
+        # shape the graphs actually use.
+        built = build_duration_matrix(value, metric) if "routes" in value else None
+        if built is not None and built["complete"]:
+            candidate = built["matrix"]
+        else:
+            candidate = value.get("matrix")
             built_metric = value.get("metric")
-            if built_metric not in (None, MATRIX_METRICS[metric]):
+            if candidate is not None and MATRIX_METRICS[metric] != (built_metric or "duration_s"):
+                # No routes left to re-read, and the matrix in hand is in the other unit. An
+                # unlabelled one is a duration matrix: that is what every producer here emits.
                 raise ValueError(
                     f"tsp_tw was asked for {metric} but the matrix it was given holds "
-                    f"{built_metric}"
+                    f"{built_metric or 'duration_s'} and carries no routes to re-read"
                 )
-        if candidate is None and "routes" in value:
-            built = build_duration_matrix(value, metric)
-            candidate = built["matrix"] if built["complete"] else None
     if isinstance(value, list) and value and isinstance(value[0], dict):
         built = build_duration_matrix(value, metric)
         candidate = built["matrix"] if built["complete"] else None

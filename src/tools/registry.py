@@ -1216,6 +1216,9 @@ class ToolRegistry:
             "route_count": len(routes),
             "nodes": built["nodes"],
             "matrix": built["matrix"] if built["complete"] else None,
+            # Say which number fills it. `tsp_tw` can re-read the routes in either metric, but an
+            # unlabelled matrix beside them is the thing it used to pick up by mistake.
+            "matrix_metric": built["metric"],
             "matrix_complete": built["complete"],
             "missing_legs": built["missing_legs"],
         }

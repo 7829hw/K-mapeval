@@ -98,14 +98,6 @@ def test_seconds_are_refused_beside_a_matrix_of_metres() -> None:
             )
 
 
-def test_a_prebuilt_matrix_in_the_wrong_unit_is_refused() -> None:
-    """Asking for metres and being handed somebody's duration matrix is a silent unit swap."""
-
-    built = build_duration_matrix(_ROUTES)
-    with pytest.raises(ValueError, match="duration_s"):
-        SpatialOperatorRegistry.tsp_tw(nodes=_NODES, distance_matrix=built, metric="distance")
-
-
 def test_a_tour_cannot_both_come_home_and_end_elsewhere() -> None:
     with pytest.raises(ValueError, match="return to the start"):
         SpatialOperatorRegistry.tsp_tw(
@@ -189,3 +181,47 @@ def test_a_count_question_keeps_its_clock_and_stays_open() -> None:
     assert arguments.get("metric") != "distance"
     assert arguments["time_budget"] == 10800
     assert not arguments.get("return_to_start")
+
+
+def _legs_node() -> dict:
+    """What the `distance_matrix` tool actually returns: routes *and* a duration matrix."""
+
+    built = build_duration_matrix(_ROUTES)
+    return {
+        "routes": _ROUTES,
+        "route_count": len(_ROUTES),
+        "nodes": built["nodes"],
+        "matrix": built["matrix"],
+        "matrix_metric": built["metric"],
+        "matrix_complete": True,
+        "missing_legs": [],
+    }
+
+
+def test_the_metric_is_read_off_the_routes_not_the_matrix_beside_them() -> None:
+    """`$legs` carries both, and the pre-built one is always seconds.
+
+    Preferring it made `metric="distance"` a no-op on the one input shape every trip graph here
+    uses -- the operator returned a duration and called it metres.
+    """
+
+    legs = _legs_node()
+    by_length = SpatialOperatorRegistry.tsp_tw(
+        nodes=_NODES, distance_matrix=legs, metric="distance", return_to_start=True
+    )
+    by_time = SpatialOperatorRegistry.tsp_tw(
+        nodes=_NODES, distance_matrix=legs, metric="duration", return_to_start=True
+    )
+    assert by_length["total_cost"] == 5100.0
+    assert by_time["total_cost"] == 2400.0
+    assert by_length["order"] != by_time["order"]
+
+
+def test_a_matrix_with_no_routes_to_re_read_is_refused_not_reinterpreted() -> None:
+    built = build_duration_matrix(_ROUTES)
+    with pytest.raises(ValueError, match="no routes to re-read"):
+        SpatialOperatorRegistry.tsp_tw(
+            nodes=_NODES,
+            distance_matrix={"matrix": built["matrix"], "nodes": built["nodes"]},
+            metric="distance",
+        )

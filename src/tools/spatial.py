@@ -955,7 +955,17 @@ class SpatialOperatorRegistry:
         start_index: int = 0,
         time_budget: float | None = None,
         end_index: int | None = None,
+        fixed_order: bool = False,
     ) -> dict[str, Any]:
+        """Order an itinerary, or walk one the question already ordered.
+
+        `fixed_order` is not a tuning knob, it is the other half of the problem. "몇 곳을 방문할
+        수 있나요" over stops listed 적힌 순서대로 states the sequence and asks how much of it
+        fits; permuting it answers a question nobody asked. Left to reorder, the greedy fallback
+        below visited stops nearest-first and reported one more than the stated order can reach,
+        which was 15 of 26 misses in that family.
+        """
+
         matrix = _matrix_argument(distance_matrix, len(nodes))
         if matrix is None:
             raise ValueError("tsp_tw distance_matrix must be square and match nodes")
@@ -965,6 +975,12 @@ class SpatialOperatorRegistry:
             raise ValueError("tsp_tw end_index must name one of the nodes")
         if end_index is not None and int(end_index) == start_index:
             raise ValueError("tsp_tw end_index must differ from start_index")
+        if fixed_order:
+            # The sequence is the question's, so `end_index` has nothing left to fix: whatever the
+            # order ends on is where the trip ends.
+            return _walk_stated_order(
+                nodes, matrix, time_windows, service_times, start_index, time_budget
+            )
         # A tour that must end somewhere is not free to end anywhere. "I have an appointment at X
         # at 7pm, with errands on the way" fixes the last stop and leaves only the errands to
         # order; without saying so, the search finds a cheaper route that ends at an errand and
@@ -996,6 +1012,11 @@ class SpatialOperatorRegistry:
                 service = sum(float(stays[index]) for index in route)
                 best = {
                     "order": list(route),
+                    # How many of the requested stops the trip actually reaches, start excluded.
+                    # "몇 곳을 방문할 수 있나요" is answered by this number, and leaving it to be
+                    # counted off `order` in prose is what made the count a guess.
+                    "visited_count": len(route) - 1,
+                    "unvisited": [],
                     "total_cost": elapsed,
                     # `total_cost` is the whole tour, stays included. Reporting the halves as well
                     # is what stops a planner adding the stays a second time on the way into
@@ -1003,6 +1024,7 @@ class SpatialOperatorRegistry:
                     "travel_cost": elapsed - service,
                     "service_cost": service,
                     "feasible": True,
+                    "objective": "optimal_order",
                 }
         if best is not None:
             return {**best, "fallback_used": False}
@@ -1029,16 +1051,87 @@ class SpatialOperatorRegistry:
             order.append(accepted)
             remaining.remove(accepted)
         if fixed_end is not None:
-            elapsed += float(matrix[order[-1]][fixed_end])
-            elapsed += float((service_times or [0.0] * len(nodes))[fixed_end])
-            order.append(fixed_end)
+            finish = (
+                elapsed
+                + float(matrix[order[-1]][fixed_end])
+                + float((service_times or [0.0] * len(nodes))[fixed_end])
+            )
+            # The end was appended unconditionally, so a tour that had already spent its budget
+            # came back naming a stop it cannot reach and a `total_cost` above the `time_budget`
+            # it was handed. A stop that does not fit is unvisited, like any other.
+            if time_budget is None or finish <= float(time_budget):
+                elapsed = finish
+                order.append(fixed_end)
+            else:
+                remaining.add(fixed_end)
+        stays = service_times or [0.0] * len(nodes)
+        service = sum(float(stays[index]) for index in order)
         return {
             "order": order,
+            "visited_count": len(order) - 1,
             "total_cost": elapsed,
+            "travel_cost": elapsed - service,
+            "service_cost": service,
             "feasible": not remaining,
             "fallback_used": True,
             "unvisited": sorted(remaining),
+            # The whole tour did not fit, so this answers a *different* question than the one that
+            # failed: how many stops a nearest-first walk reaches. Say so, rather than let a
+            # reader take `order` for the itinerary they asked about.
+            "objective": "greedy_partial",
         }
+
+
+def _walk_stated_order(
+    nodes: list[dict[str, Any]],
+    matrix: list[list[float]],
+    time_windows: list[list[float]] | None,
+    service_times: list[float] | None,
+    start_index: int,
+    time_budget: float | None,
+) -> dict[str, Any]:
+    """Follow the itinerary as listed and report how much of it fits.
+
+    The stops arrive in the order the question wrote them, so the only question left is where the
+    budget runs out. Travel counts: a walk that adds only the stays reaches exactly one stop too
+    many, which is the shape of nearly every miss this family recorded.
+    """
+
+    stays = [float(value) for value in (service_times or [0.0] * len(nodes))]
+    sequence = [start_index, *(index for index in range(len(nodes)) if index != start_index)]
+    order = [start_index]
+    elapsed = 0.0
+    unvisited: list[int] = []
+    for previous, current in zip(sequence, sequence[1:], strict=False):
+        if unvisited:
+            # Once one stop is out of reach the rest of a stated order is too: they sit behind it.
+            unvisited.append(current)
+            continue
+        arrival = elapsed + float(matrix[previous][current])
+        if time_windows:
+            earliest, latest = map(float, time_windows[current])
+            arrival = max(arrival, earliest)
+            if arrival > latest:
+                unvisited.append(current)
+                continue
+        finish = arrival + stays[current]
+        if time_budget is not None and finish > float(time_budget):
+            unvisited.append(current)
+            continue
+        elapsed = finish
+        order.append(current)
+    service = sum(stays[index] for index in order)
+    return {
+        "order": order,
+        "visited_count": len(order) - 1,
+        "total_cost": elapsed,
+        "travel_cost": elapsed - service,
+        "service_cost": service,
+        "feasible": not unvisited,
+        "fallback_used": False,
+        "unvisited": unvisited,
+        "objective": "stated_order",
+    }
 
 
 # What a kind of place is called in a question is not what Kakao calls it in a category path:
@@ -1321,10 +1414,26 @@ def _has_comparable(value: dict[str, Any], path: str) -> bool:
     return True
 
 
+def _as_flag(value: Any) -> bool:
+    """A boolean the planner may have written as a word."""
+
+    if isinstance(value, str):
+        return value.strip().casefold() not in {"", "false", "no", "0", "none"}
+    return bool(value)
+
+
 def _normalize_arguments(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """Accept common planner aliases while keeping one canonical operator implementation."""
 
     args = dict(arguments)
+    if name == "tsp_tw":
+        # A planner writing "the order is given" reaches for whichever of these words it thinks in.
+        for alias in ("preserve_order", "keep_order", "in_order", "sequential", "ordered"):
+            if alias in args:
+                args.setdefault("fixed_order", args.pop(alias))
+        if "fixed_order" in args:
+            args["fixed_order"] = _as_flag(args["fixed_order"])
+
     if name in {"haversine_distance", "bearing_to_direction"}:
         if "place_a" in args and "place_b" in args:
             return {"place_a": args["place_a"], "place_b": args["place_b"]}

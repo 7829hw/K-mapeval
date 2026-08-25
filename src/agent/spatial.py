@@ -178,13 +178,16 @@ Exact operator contracts:
   summing legs into calculate_start_time by hand
 - calculate_start_time(arrival_time,duration_s,timezone) -> event
 - tsp_tw(nodes,distance_matrix,time_windows?,service_times?,start_index=0,time_budget?,
-  end_index?) -> network; end_index fixes the last stop when the trip must finish
+  end_index?,fixed_order=false) -> network; end_index fixes the last stop when the trip must finish
   somewhere (an appointment), leaving only the stops between it and the start to order;
+  fixed_order=true when the question states the sequence ("적힌 순서대로", "A → B → C 순서로") so
+  the stops are walked as listed instead of reordered — end_index is then meaningless;
   distance_matrix accepts a distance_matrix node directly ($legs), which carries the square
   duration matrix in seconds; nodes must be the matching place list in the same order, with the
   starting place at start_index. service_times are the stay durations in seconds (0 for the start)
-  and time_budget is the available time in seconds. Output is {order, total_cost, feasible}, where
-  order indexes nodes.
+  and time_budget is the available time in seconds. Output is {order, visited_count, unvisited,
+  total_cost, feasible, objective}, where order indexes nodes and visited_count is how many
+  requested stops the trip reaches, start excluded.
 - identity_measure(value) -> object; explicit Measure projection for a single source operator
 
 Use normalized fields only: latitude, longitude, distance_m, duration_s. Complete Place objects,
@@ -209,7 +212,11 @@ pass that node to tsp_tw as distance_matrix with the stays as service_times and 
 time as time_budget. When the options are visiting orders, still build the same matrix and compare
 the orders the options name. When the options are counts of places ("한 곳"/"두 곳"/…), the answer
 is how many stops fit the budget, so let tsp_tw decide feasibility — never guess from the number
-of places mentioned. Convert hours to seconds (1시간 = 3600).
+of places mentioned, and read tsp_tw.visited_count rather than counting order yourself. A count
+question lists its stops 적힌 순서대로, so set fixed_order=true and leave end_index off: the trip
+ends where the time runs out, not at the last place named. Travel time counts against the budget
+just as the stays do — a count that adds only the stays is one too many.
+Convert hours to seconds (1시간 = 3600).
 tsp_tw.total_cost is the whole tour with the stays already in it, and travel_cost/service_cost are
 its halves. Feed calculate_start_time the total_cost itself; adding the stays beside it counts
 every visit twice. When the trip must finish somewhere — an appointment at a named place, with
@@ -1249,8 +1256,16 @@ def _ground_graph_literals(
             if budget is not None:
                 arguments["time_budget"] = budget
             names = trip_node_names
+            if _states_visiting_order(question):
+                # The order is a question literal exactly as the stays and the budget are. Left to
+                # the planner it was set in one graph out of fifty-nine, and the search reordered
+                # an itinerary the question had already ordered.
+                arguments["fixed_order"] = True
+                # Under a stated order the sequence names its own last stop, so a fixed end is at
+                # best redundant and at worst contradicts it.
+                arguments.pop("end_index", None)
             destination = _extract_trip_destination(question)
-            if destination and names:
+            if destination and names and not arguments.get("fixed_order"):
                 # The place the deadline names is where the trip ends, positionally against the
                 # same node list the stays line up with. Left free, the search reordered the
                 # itinerary so the tour finished at an errand — cheaper, and an answer to a
@@ -1712,6 +1727,21 @@ def _stay_for(stays: dict[str, float], name: str) -> float:
         if stated in name or name in stated:
             return seconds
     return 0.0
+
+
+# A trip question that fixes its own sequence says so in the sentence that lists the stops.
+# These are the phrasings the Korean generators produce and the ones a person writes: "적힌 순서
+# 대로", "순서대로", "차례대로", "이 순서로", and the English a mixed-language question may use.
+_STATED_ORDER = re.compile(
+    r"(적힌\s*순서|나열된\s*순서|이\s*순서|위\s*순서|순서대로|차례대로|순서로"
+    r"|in\s+(?:the\s+)?(?:listed|written|given|stated|this)\s+order|in\s+order)"
+)
+
+
+def _states_visiting_order(question: str) -> bool:
+    """Does the question fix the order of the stops, or only the set of them?"""
+
+    return bool(_STATED_ORDER.search(question))
 
 
 def _extract_trip_schedule(question: str) -> tuple[dict[str, float], float | None]:

@@ -1375,11 +1375,22 @@ def _ground_graph_literals(
                 stays, budget = {}, None
                 for key in ("service_times", "time_budget", "time_windows"):
                     arguments.pop(key, None)
+            elif stays or budget is not None or arguments.get("time_windows") is not None:
+                # A stay, a time window or a time budget can only be combined with seconds. The
+                # question supplied the clock constraint, so binding `duration` is the same kind
+                # of literal grounding as binding the budget itself; retaining a planner's
+                # `distance` here creates metre-plus-second arithmetic the operator must refuse.
+                arguments["metric"] = "duration"
             if budget is not None:
                 arguments["time_budget"] = budget
             names = trip_node_names
             if _returns_to_start(question):
                 arguments["return_to_start"] = True
+                # `return_to_start` is how the operator represents a closed tour. `end_index=0`
+                # is a redundant spelling of the same fact that the runtime deliberately rejects,
+                # while another end contradicts the question. The question literal wins either
+                # way, so no fixed endpoint remains.
+                arguments.pop("end_index", None)
             if _states_visiting_order(question):
                 # The order is a question literal exactly as the stays and the budget are. Left to
                 # the planner it was set in one graph out of fifty-nine, and the search reordered
@@ -1389,7 +1400,12 @@ def _ground_graph_literals(
                 # best redundant and at worst contradicts it.
                 arguments.pop("end_index", None)
             destination = _extract_trip_destination(question)
-            if destination and names and not arguments.get("fixed_order"):
+            if (
+                destination
+                and names
+                and not arguments.get("fixed_order")
+                and not arguments.get("return_to_start")
+            ):
                 # The place the deadline names is where the trip ends, positionally against the
                 # same node list the stays line up with. Left free, the search reordered the
                 # itinerary so the tour finished at an errand — cheaper, and an answer to a

@@ -2751,10 +2751,103 @@ The traces directly exercise all three repairs:
 
 The remaining Spatial-Agent execution errors are value-shape or plan-semantics problems: empty or
 out-of-range selections, list/scalar confusion in arithmetic, malformed `batch_place_details`
-inputs, and one 16-place matrix exceeding the declared limit of 15. The seven terminal failures in
-the 283-row run split into three impossible named-field projections from a `batch_geocode` list and
-four unsupported-argument plans whose one repair response was still invalid. These are visible
-planner/repair misses rather than validation bypasses. ReAct's partial errors are separately
-explained by the provider boundary: all 31 in the 100-row run, and 100 of 102 in the 283-row run,
-are explicit `UnsupportedTravelModeError` results because Kakao routing supports driving only; the
-other two are explicit `RouteNotFoundError` results for endpoints within five metres.
+inputs, and two 16-place matrices exceeding the declared limit of 15 (one in each Spatial-Agent
+run). The seven terminal failures in the 283-row run split into three impossible named-field
+projections from a `batch_geocode` list and four unsupported-argument plans whose one repair
+response was still invalid. These are visible planner/repair misses rather than validation
+bypasses. ReAct's partial errors are separately explained by the provider boundary: all 31 in the
+100-row run, and 100 of 102 in the 283-row run, are explicit `UnsupportedTravelModeError` results
+because Kakao routing supports driving only; the other two are explicit `RouteNotFoundError`
+results for endpoints within five metres.
+
+#### Follow-up: value contracts without broader evidence
+
+A second review separated repeatable contract defects in those partial errors from planner misses
+that have no safe deterministic interpretation. Three general repairs follow in that order:
+
+1. A whole `batch_geocode` output is already a collection. Repeating the same whole-node reference
+   inside one argument list is now a structural data-availability error, so four copies of a
+   four-place node cannot flatten into sixteen endpoints. A single whole-list wrapper, distinct
+   node references and indexed record references remain valid. The validator rejects the
+   ambiguous cardinality rather than guessing whether the planner wanted one collection or four
+   copies of it.
+2. `extract_distance` and `extract_duration` now return one amount for a one-route wrapper and a
+   collection only for several routes. `sum_amounts` flattens list nesting while preserving each
+   measurement record, and `difference` totals either operand when it is a measurement
+   collection. Distance and duration collections remain distinct; mixing the two fails instead of
+   acquiring whichever unit happened to be inspected first.
+3. Validation now checks values that are statically knowable before execution: literal collection
+   limits, pair/route object shapes, ranking keys as literal field names, `tsp_tw` node/clock list
+   lengths and indexes, and mutually incompatible tour arguments. Exact metric synonyms live in
+   one contract module shared by validation and execution. Grounding binds any stated clock
+   constraint to `metric="duration"`, removes a fixed end from a closed tour, and continues to
+   remove clock arguments from a distance objective. `batch_place_details` may read the existing
+   `place_id` from a normalized Place or geocode row, but it never searches a name or invents an
+   id. A mixed list containing an unresolved row fails rather than silently fetching only its
+   resolved subset. Values behind unresolved graph references are deliberately not pre-judged.
+
+The cross-argument review also covered all `return_to_start` execution branches. A stated-order
+closed tour now includes the closing leg without counting the start as another visit, and both
+stated-order and greedy partial tours reserve enough budget to return. Open stated-order tours are
+unchanged. `fixed_order` plus `end_index` is rejected rather than accepting an argument the
+operator would ignore, while question grounding removes that redundant endpoint before
+validation.
+
+The regression suite pins the negative space of each change: repeated whole-list references fail
+while a single wrapper and indexed references pass; nested distance amounts compose while mixed
+distance/duration amounts fail; invalid literal `tsp_tw` combinations fail before execution while
+an exact `time` alias canonicalizes to `duration`; and missing place evidence remains an error.
+No live benchmark had been run for this follow-up at this point. The reports above diagnose it but
+remain scores for the pre-follow-up dirty worktree, and every existing dataset remains spent.
+
+#### Dirty-worktree verification of the value contracts
+
+Four more single passes were run with the follow-up above loaded from the dirty worktree. As with
+the preceding diagnostics, `code_revision=a18719eb2413` records only the checked-out parent and
+does not identify the uncommitted source that the processes imported. All four used concurrency
+32, temperature 0 and 15 reasoning steps; ReAct used the reference surface. No run recorded an
+LLM truncation or context overflow. The 100-row ReAct run reached the iteration limit twice; the
+other three did not.
+
+| report | agent | correct | question failures | questions / steps with execution errors |
+|---|---:|---:|---:|---:|
+| `test_20260825T224021Z.json` (v7 100) | ReAct | 50/100 | 2 | 30 / 35 |
+| `test_20260825T224415Z.json` (v7 100) | Spatial-Agent | 83/100 | 1 | 16 / 36 |
+| `test_20260825T215842Z.json` (v7 283) | ReAct | 140/283 | 0 | 88 / 95 |
+| `test_20260825T220751Z.json` (v7 283) | Spatial-Agent | 227/283 | 6 | 31 / 62 |
+
+The scores do not identify a treatment effect. Against the immediately preceding dirty-worktree
+single passes, ReAct moved 49% to 50% on 100 rows and 47.3% to 49.5% on 283; Spatial-Agent moved
+84% to 83% and 84.1% to 80.2%. Those directions disagree, both sets were already spent, and one
+pass cannot separate a code effect from the endpoint's measured run-to-run variation. The useful
+evidence is narrower and lives in the execution traces:
+
+- The preceding two Spatial-Agent reports contained ten `float(list)` arithmetic failures, two
+  16-endpoint validation failures produced from four-place nodes, four attempts to combine a
+  distance objective with clock arguments, and six `batch_place_details` list/row validation
+  failures. None of those exact failure classes occurs in either new Spatial-Agent report.
+- The old 16-endpoint cases now pass one four-place collection to each side of the matrix. Both
+  produce a 4 by 4 matrix and answer correctly. The four old distance-plus-clock TSP cases also
+  execute without an error and answer correctly. These are contract-level observations, not a
+  claim that every affected answer must improve on another stochastic pass.
+- Spatial-Agent execution-error totals fell from 44 questions / 77 steps to 31 / 62 on the
+  283-row pass, but rose from 14 / 29 to 16 / 36 on the 100-row pass. ReAct's totals also moved in
+  both directions. The totals therefore remain diagnostics of the sampled plans rather than a
+  score for the repair.
+
+The traces exposed one final instance of the same generic amount-shape contract. Five plans used
+`sum_amounts([$leg_1, $leg_2])`, where each resolved item was a `distance_matrix` result wrapping
+one route. Top-level wrappers and nested lists were normalized, but wrappers *inside* a list were
+not, so those five plans failed while the generation call could still read the routes and answer
+all five correctly. Amount collection normalization now recursively opens collection wrappers at
+every list level while preserving route measurement records and their units. A regression test
+covers both `sum_amounts` and `difference` over that exact structural shape. This last correction
+postdates the four reports and has unit-test, not live-benchmark, evidence.
+
+The seven new terminal Spatial-Agent failures are not silent contract bypasses: six are rejected
+projections of named fields such as `place_ids`, `places` or `candidates` directly from a
+`batch_geocode` list, and one retains an unsupported `select_by_index(sort_by=...)` argument. In
+every case the single repair response remained invalid. Other partial errors are explicit missing
+evidence, out-of-range selections, unsupported subjective fields, malformed planner expressions
+or downstream dependency failures. No question-specific fallback was added. These runs spend the
+datasets again and do not create a new holdout result.

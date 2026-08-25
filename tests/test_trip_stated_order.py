@@ -93,6 +93,54 @@ def test_a_stated_order_that_fits_is_feasible_and_complete() -> None:
     assert result["unvisited"] == []
 
 
+def test_a_closed_stated_order_counts_the_return_leg_without_counting_a_visit() -> None:
+    matrix = _matrix(3, {(0, 1): 10.0, (1, 2): 20.0, (2, 0): 70.0}, 999.0)
+
+    open_tour = SpatialOperatorRegistry.tsp_tw(
+        nodes=[{"index": index} for index in range(3)],
+        distance_matrix=matrix,
+        start_index=0,
+        fixed_order=True,
+        metric="distance",
+    )
+    closed_tour = SpatialOperatorRegistry.tsp_tw(
+        nodes=[{"index": index} for index in range(3)],
+        distance_matrix=matrix,
+        start_index=0,
+        fixed_order=True,
+        metric="distance",
+        return_to_start=True,
+    )
+
+    assert open_tour["order"] == [0, 1, 2]
+    assert open_tour["total_cost"] == 30.0
+    assert closed_tour["order"] == [0, 1, 2, 0]
+    assert closed_tour["visited_count"] == 2
+    assert closed_tour["total_cost"] == 100.0
+    assert closed_tour["travel_cost"] == 100.0
+
+
+def test_a_closed_stated_order_only_accepts_a_prefix_that_can_return() -> None:
+    result = SpatialOperatorRegistry.tsp_tw(
+        nodes=[{"index": index} for index in range(3)],
+        distance_matrix=_matrix(
+            3,
+            {(0, 1): 10.0, (1, 0): 10.0, (1, 2): 10.0, (2, 0): 100.0},
+            999.0,
+        ),
+        start_index=0,
+        fixed_order=True,
+        return_to_start=True,
+        time_budget=40.0,
+    )
+
+    assert result["order"] == [0, 1, 0]
+    assert result["visited_count"] == 1
+    assert result["total_cost"] == 20.0
+    assert result["unvisited"] == [2]
+    assert result["feasible"] is False
+
+
 def test_a_stop_out_of_reach_takes_the_ones_behind_it_with_it() -> None:
     """A stated order is a chain: the fourth stop is not reachable if the third was not."""
 
@@ -124,6 +172,52 @@ def test_the_greedy_fallback_no_longer_appends_an_end_it_cannot_reach() -> None:
     assert 3 in result["unvisited"]
     assert result["total_cost"] <= 4200.0
     assert result["feasible"] is False
+
+
+def test_the_greedy_fallback_reserves_and_reports_a_required_return_leg() -> None:
+    result = SpatialOperatorRegistry.tsp_tw(
+        nodes=[{"index": index} for index in range(3)],
+        distance_matrix=_matrix(
+            3,
+            {
+                (0, 1): 10.0,
+                (1, 0): 10.0,
+                (0, 2): 30.0,
+                (1, 2): 10.0,
+                (2, 0): 100.0,
+            },
+            999.0,
+        ),
+        start_index=0,
+        return_to_start=True,
+        time_budget=40.0,
+    )
+
+    assert result["fallback_used"] is True
+    assert result["order"] == [0, 1, 0]
+    assert result["visited_count"] == 1
+    assert result["total_cost"] == 20.0
+    assert result["unvisited"] == [2]
+
+
+def test_tsp_rejects_runtime_shapes_that_cannot_match_the_nodes() -> None:
+    nodes = [{"index": index} for index in range(2)]
+    matrix = _matrix(2, {}, 60.0)
+
+    with pytest.raises(ValueError, match="start_index must name"):
+        SpatialOperatorRegistry.tsp_tw(nodes=nodes, distance_matrix=matrix, start_index=2)
+    with pytest.raises(ValueError, match="service_times must have one item per node"):
+        SpatialOperatorRegistry.tsp_tw(
+            nodes=nodes, distance_matrix=matrix, service_times=[0.0]
+        )
+    with pytest.raises(ValueError, match="time_windows must have one item per node"):
+        SpatialOperatorRegistry.tsp_tw(
+            nodes=nodes, distance_matrix=matrix, time_windows=[[0.0, 60.0]]
+        )
+    with pytest.raises(ValueError, match="fixed_order cannot also set end_index"):
+        SpatialOperatorRegistry.tsp_tw(
+            nodes=nodes, distance_matrix=matrix, fixed_order=True, end_index=1
+        )
 
 
 def test_every_branch_reports_a_visited_count() -> None:
@@ -165,6 +259,15 @@ def test_tsp_metric_unit_and_measure_aliases_are_canonical(alias: str, canonical
     assert _normalize_arguments("tsp_tw", {"metric": alias})["metric"] == canonical
 
 
+def test_tsp_boolean_spellings_do_not_turn_false_into_a_truthy_string() -> None:
+    assert _normalize_arguments("tsp_tw", {"return_to_start": "false"})[
+        "return_to_start"
+    ] is False
+    assert _normalize_arguments("tsp_tw", {"return_to_start": "true"})[
+        "return_to_start"
+    ] is True
+
+
 @pytest.mark.parametrize(
     ("question", "expected"),
     [
@@ -184,7 +287,13 @@ def test_grounding_binds_the_stated_order_and_drops_a_fixed_end() -> None:
         {
             "id": "tour",
             "operator": "tsp_tw",
-            "arguments": {"nodes": "$locations", "distance_matrix": "$legs", "end_index": 5},
+            "arguments": {
+                "nodes": "$locations",
+                "distance_matrix": "$legs",
+                "end_index": 5,
+                "metric": "distance",
+                "service_times": [0, 1, 1],
+            },
             "depends_on": ["locations", "legs"],
             "output_type": "network",
             "role": "measure",
@@ -204,6 +313,7 @@ def test_grounding_binds_the_stated_order_and_drops_a_fixed_end() -> None:
     assert arguments["fixed_order"] is True
     assert "end_index" not in arguments
     assert arguments["time_budget"] == 10800
+    assert arguments["metric"] == "duration"
 
 
 def test_grounding_leaves_an_optimal_order_question_free_to_reorder() -> None:
@@ -211,7 +321,14 @@ def test_grounding_leaves_an_optimal_order_question_free_to_reorder() -> None:
         {
             "id": "tour",
             "operator": "tsp_tw",
-            "arguments": {"nodes": "$locations", "distance_matrix": "$legs"},
+            "arguments": {
+                "nodes": "$locations",
+                "distance_matrix": "$legs",
+                "metric": "distance",
+                "service_times": [0, 3600, 5400],
+                "time_budget": 36000,
+                "end_index": 0,
+            },
             "depends_on": ["locations", "legs"],
             "output_type": "network",
             "role": "measure",
@@ -227,4 +344,9 @@ def test_grounding_leaves_an_optimal_order_question_free_to_reorder() -> None:
         options=["A → B", "B → A", "A → A", "B → B"],
         intent="trip",
     )
-    assert not grounded[0]["arguments"].get("fixed_order")
+    arguments = grounded[0]["arguments"]
+    assert not arguments.get("fixed_order")
+    assert arguments["return_to_start"] is True
+    assert arguments["metric"] == "distance"
+    assert "end_index" not in arguments
+    assert "service_times" not in arguments

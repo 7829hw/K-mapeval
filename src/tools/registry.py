@@ -185,6 +185,37 @@ def _as_place_list_argument(value: Any) -> Any:
     return value
 
 
+def _as_place_id_list_argument(value: Any) -> Any:
+    """Read existing normalized place ids from one place, row, or collection of either."""
+
+    if isinstance(value, list):
+        # Preserve unresolved rows here. General place collections may drop them so useful
+        # neighbours can still run, but a details request is specifically a list of ids: silently
+        # shortening it would claim that every requested detail was fetched.
+        values: list[Any] = []
+        for item in value:
+            values.extend(item) if isinstance(item, list) else values.append(item)
+    elif isinstance(value, str | Place | dict):
+        values = [value]
+    else:
+        return value
+    place_ids: list[Any] = []
+    for item in values:
+        if isinstance(item, Place):
+            place_ids.append(item.place_id)
+            continue
+        if isinstance(item, dict):
+            normalized = _as_place_argument(item)
+            if isinstance(normalized, Place):
+                place_ids.append(normalized.place_id)
+                continue
+            if isinstance(normalized, dict) and normalized.get("place_id"):
+                place_ids.append(normalized["place_id"])
+                continue
+        place_ids.append(item)
+    return place_ids
+
+
 class PlaceSearchArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
     query: str | None = None
@@ -242,6 +273,15 @@ class ReverseGeocodeArgs(BaseModel):
 class BatchPlaceDetailsArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
     place_ids: list[str] = Field(min_length=1, max_length=45)
+
+    @field_validator("place_ids", mode="before")
+    @classmethod
+    def normalize_place_ids(cls, value: Any) -> Any:
+        # A batch_geocode record already carries a normalized Place and therefore its provider
+        # id. Requiring the planner to project exactly `.place.place_id` made a safe over-specified
+        # row reference fail as a dict/list mismatch. Extraction here reads only the existing id;
+        # it never searches a name or substitutes another place.
+        return _as_place_id_list_argument(value)
 
 
 class NearbyPlacesArgs(BaseModel):

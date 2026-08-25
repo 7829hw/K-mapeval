@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass, replace
 from typing import Any
 
+from src.spatial_contracts import MATRIX_METRICS, normalize_tsp_metric
+
 CORE_CONCEPTS = frozenset(
     {"location", "object", "field", "event", "network", "amount", "proportion"}
 )
@@ -1544,6 +1546,220 @@ def _reference_argument_names(
     return frozenset(names)
 
 
+def _static_flag(value: Any) -> bool | None:
+    """A literal boolean when the planner wrote one; None for references or unknown spellings."""
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and not value.strip().startswith("$"):
+        normalized = value.strip().casefold()
+        if normalized in {"true", "yes", "1"}:
+            return True
+        if normalized in {"false", "no", "0", "none", ""}:
+            return False
+    return None
+
+
+def _static_int(value: Any, *, name: str) -> int | None:
+    """Read an integer literal without pretending an unresolved reference already has a value."""
+
+    if isinstance(value, str) and value.strip().startswith("$"):
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer, not a boolean")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be an integer") from None
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError(f"{name} must be an integer")
+    return parsed
+
+
+def _normalize_statically_known_argument_values(
+    operator: str, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    """Canonicalize only exact literal equivalents needed by static contract validation."""
+
+    if operator != "tsp_tw":
+        return arguments
+    normalized = dict(arguments)
+    for alias in ARGUMENT_ALIASES["tsp_tw"]["fixed_order"]:
+        if alias in normalized:
+            normalized.setdefault("fixed_order", normalized.pop(alias))
+    if "metric" in normalized:
+        normalized["metric"] = normalize_tsp_metric(normalized["metric"])
+    for name in ("fixed_order", "return_to_start"):
+        if name in normalized and (flag := _static_flag(normalized[name])) is not None:
+            normalized[name] = flag
+    return normalized
+
+
+def _statically_known_collection_length(
+    value: Any, by_id: dict[str, dict[str, Any]]
+) -> int | None:
+    """Collection cardinality when literals or a literal batch_geocode node make it knowable."""
+
+    if isinstance(value, list):
+        total = 0
+        for item in value:
+            if isinstance(item, list):
+                nested = _statically_known_collection_length(item, by_id)
+                if nested is None:
+                    return None
+                total += nested
+                continue
+            if isinstance(item, str):
+                reference = split_reference_arithmetic(canonical_reference(item))[0]
+                if reference.startswith("$") and "." not in reference[1:]:
+                    producer = by_id.get(reference[1:])
+                    if producer and producer["operator"] == "batch_geocode":
+                        names = producer["arguments"].get("place_names")
+                        if not isinstance(names, list):
+                            return None
+                        total += len(names)
+                        continue
+            total += 1
+        return total
+    if isinstance(value, str):
+        reference = split_reference_arithmetic(canonical_reference(value))[0]
+        if reference.startswith("$") and "." not in reference[1:]:
+            producer = by_id.get(reference[1:])
+            if producer and producer["operator"] == "batch_geocode":
+                names = producer["arguments"].get("place_names")
+                return len(names) if isinstance(names, list) else None
+        return None
+    if isinstance(value, dict):
+        return 1
+    return None
+
+
+def _validate_statically_known_argument_values(
+    steps: list[dict[str, Any]], by_id: dict[str, dict[str, Any]]
+) -> None:
+    """Reject literal shapes and cross-argument combinations the implementation cannot run.
+
+    References whose values do not exist until execution stay unknown and are not guessed at.
+    The checks here either mirror a runtime limit/type exactly or compare literals already in the
+    graph, so they belong to the ordinary repair round instead of becoming failed execution steps.
+    """
+
+    for step in steps:
+        operator = step["operator"]
+        arguments = step["arguments"]
+
+        collection_limits = {
+            "batch_geocode": {"place_names": 30},
+            "batch_place_details": {"place_ids": 45},
+            "distance_matrix": {"origins": 15, "destinations": 15, "pairs": 30},
+        }.get(operator, {})
+        for argument_name, maximum in collection_limits.items():
+            if argument_name not in arguments:
+                continue
+            length = _statically_known_collection_length(arguments[argument_name], by_id)
+            if length is not None and length > maximum:
+                raise ValueError(
+                    f"GeoFlow node {step['id']} gives {operator}.{argument_name} {length} items; "
+                    f"the implementation accepts at most {maximum}"
+                )
+
+        if operator == "pairwise_distances":
+            pairs = arguments.get("pairs")
+            if isinstance(pairs, list) and any(
+                not isinstance(pair, dict)
+                and not (isinstance(pair, str) and pair.strip().startswith("$"))
+                for pair in pairs
+            ):
+                raise ValueError(
+                    f"GeoFlow node {step['id']} gives pairwise_distances.pairs items that are "
+                    "not pair objects or pair references"
+                )
+
+        if operator in {"steps_analysis", "open_at_time"}:
+            argument_name = "route" if operator == "steps_analysis" else "schedule"
+            value = arguments.get(argument_name)
+            if isinstance(value, list):
+                raise ValueError(
+                    f"GeoFlow node {step['id']} gives {operator}.{argument_name} a list; "
+                    "the implementation accepts one object"
+                )
+
+        if operator in {"select_min", "select_max", "sort_by"} and "key" in arguments:
+            key = arguments["key"]
+            if not isinstance(key, str) or key.strip().startswith("$"):
+                raise ValueError(
+                    f"GeoFlow node {step['id']} gives {operator}.key a data value; "
+                    "the implementation requires a literal field name"
+                )
+
+        if operator != "tsp_tw":
+            continue
+        metric = arguments.get("metric", "duration")
+        if not isinstance(metric, str) or metric not in MATRIX_METRICS:
+            raise ValueError(
+                f"GeoFlow node {step['id']} gives tsp_tw.metric {metric!r}; "
+                f"use one of {sorted(MATRIX_METRICS)}"
+            )
+        clock_arguments = ("service_times", "time_windows", "time_budget")
+        if metric != "duration" and any(
+            arguments.get(name) is not None for name in clock_arguments
+        ):
+            raise ValueError(
+                f"GeoFlow node {step['id']} combines tsp_tw metric={metric!r} with clock "
+                "arguments; service times, windows and budgets require metric='duration'"
+            )
+
+        node_count = _statically_known_collection_length(arguments.get("nodes"), by_id)
+        if node_count is not None:
+            if node_count > 9:
+                raise ValueError(
+                    f"GeoFlow node {step['id']} gives tsp_tw {node_count} nodes; "
+                    "the deterministic implementation accepts at most 9"
+                )
+            for name in ("service_times", "time_windows"):
+                value = arguments.get(name)
+                if value is not None and isinstance(value, list) and len(value) != node_count:
+                    raise ValueError(
+                        f"GeoFlow node {step['id']} gives tsp_tw.{name} {len(value)} items for "
+                        f"{node_count} nodes"
+                    )
+            for name in ("start_index", "end_index"):
+                value = arguments.get(name)
+                if value is None:
+                    continue
+                index = _static_int(value, name=f"tsp_tw.{name}")
+                if index is not None and not 0 <= index < node_count:
+                    raise ValueError(
+                        f"GeoFlow node {step['id']} gives tsp_tw.{name}={index} for "
+                        f"{node_count} nodes"
+                    )
+
+        start = _static_int(arguments.get("start_index", 0), name="tsp_tw.start_index")
+        end_value = arguments.get("end_index")
+        end = (
+            _static_int(end_value, name="tsp_tw.end_index")
+            if end_value is not None
+            else None
+        )
+        fixed_order = _static_flag(arguments.get("fixed_order", False))
+        if fixed_order and end is not None:
+            raise ValueError(
+                f"GeoFlow node {step['id']} cannot combine tsp_tw.fixed_order with "
+                "end_index; the stated sequence already fixes its end"
+            )
+        returns = _static_flag(arguments.get("return_to_start", False))
+        if returns and end is not None:
+            if start == end:
+                raise ValueError(
+                    f"GeoFlow node {step['id']} redundantly sets tsp_tw.end_index to the "
+                    "start while return_to_start is true; omit end_index"
+                )
+            raise ValueError(
+                f"GeoFlow node {step['id']} cannot both return to the start and end at "
+                "another node"
+            )
+
+
 def _validate_statically_known_reference_shapes(
     steps: list[dict[str, Any]], by_id: dict[str, dict[str, Any]]
 ) -> None:
@@ -1561,7 +1777,43 @@ def _validate_statically_known_reference_shapes(
     ``$places.0.geometry.location`` spelling) remain deliberately lenient.
     """
 
+    def nested_lists(value: Any) -> list[list[Any]]:
+        found: list[list[Any]] = []
+        if isinstance(value, list):
+            found.append(value)
+            for item in value:
+                found.extend(nested_lists(item))
+        elif isinstance(value, dict):
+            for item in value.values():
+                found.extend(nested_lists(item))
+        return found
+
     for step in steps:
+        # A whole batch node is already a collection. Repeating that same reference inside one
+        # list does not name its individual records: after resolution it becomes a list of the
+        # same list several times, and the tool's ordinary one-level flattening multiplies N
+        # places into N*N. Two benchmark plans wrote four copies of `locations`, producing 16
+        # endpoints from four resolved places. Refuse the ambiguous plan rather than silently
+        # changing its cardinality. A single whole-list wrapper and distinct/indexed references
+        # remain valid, because both have one unambiguous flattening.
+        for values in nested_lists(step["arguments"]):
+            references = [
+                split_reference_arithmetic(canonical_reference(item))[0]
+                for item in values
+                if isinstance(item, str) and item.strip().startswith("$")
+            ]
+            for reference in set(references):
+                if references.count(reference) < 2:
+                    continue
+                root = reference[1:] if reference.startswith("$") else ""
+                producer = by_id.get(root)
+                if producer and producer["operator"] == "batch_geocode":
+                    raise ValueError(
+                        "Data availability violation: "
+                        f"GeoFlow node {step['id']!r} repeats whole batch_geocode reference "
+                        f"{reference!r} in one list; use it once or reference individual records"
+                    )
+
         for reference in _reference_strings(step["arguments"]):
             parts = [part for part in reference.lstrip("$").split(".") if part]
             if len(parts) < 2:
@@ -1634,6 +1886,7 @@ def normalize_and_validate_graph(
             arguments = raw.get("params")
         if not isinstance(arguments, dict):
             raise ValueError(f"GeoFlow node {step_id} arguments must be an object")
+        arguments = _normalize_statically_known_argument_values(operator, arguments)
         # `select_min(items, index=1)` is an ordinal, not a minimum, and both questions that
         # wrote it meant the second nearest place. The index is explicit, so honouring it is not
         # reading intent out of a name -- and dropping it would answer with the *nearest* place,
@@ -1726,6 +1979,7 @@ def normalize_and_validate_graph(
 
     by_id = {step["id"]: step for step in steps}
     _validate_statically_known_reference_shapes(steps, by_id)
+    _validate_statically_known_argument_values(steps, by_id)
     consumed = {
         dependency
         for step in steps

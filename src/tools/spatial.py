@@ -8,6 +8,8 @@ from itertools import permutations
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from src.spatial_contracts import MATRIX_METRICS, normalize_tsp_metric
+
 COORDINATE_LITERAL = re.compile(r"(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)")
 
 
@@ -564,20 +566,28 @@ class SpatialOperatorRegistry:
         way would otherwise match no option at all.
         """
 
-        first = _amount_number(minuend, key, where="difference")
-        second = _amount_number(subtrahend, key, where="difference")
+        first = _amount_total(minuend, key, where="difference")
+        second = _amount_total(subtrahend, key, where="difference")
         signed = first - second
         magnitude = abs(signed)
+        operands = [*_amount_collection(minuend), *_amount_collection(subtrahend)]
+        kind = _amount_kind(key, operands)
         result: dict[str, Any] = {
             "minuend": first,
             "subtrahend": second,
             "difference": signed,
             "absolute_difference": magnitude,
-            "value": magnitude,
         }
-        if _amount_kind(key, [minuend, subtrahend]) == "distance":
+        if kind != "duration":
+            # `match_distance_options` accepts a generic value as metres. A duration must not
+            # expose that escape hatch, for the same reason `sum_amounts` withholds it from a
+            # seconds total.
+            result["value"] = magnitude
+        if kind == "distance":
             result["distance_m"] = magnitude
             result["distance_km"] = magnitude / 1000
+        elif kind == "duration":
+            result["duration_s"] = magnitude
         return result
 
     @staticmethod
@@ -982,20 +992,37 @@ class SpatialOperatorRegistry:
                 "tsp_tw metric='distance' measures metres, so service_times, time_windows and "
                 "time_budget do not apply; drop them or ask for metric='duration'"
             )
+        if not nodes:
+            raise ValueError("tsp_tw nodes must contain at least one node")
         matrix = _matrix_argument(distance_matrix, len(nodes), metric)
         if matrix is None:
             raise ValueError("tsp_tw distance_matrix must be square and match nodes")
         if len(nodes) > 9:
             raise ValueError("Deterministic tsp_tw supports at most 9 nodes")
+        if not 0 <= int(start_index) < len(nodes):
+            raise ValueError("tsp_tw start_index must name one of the nodes")
         if end_index is not None and not 0 <= int(end_index) < len(nodes):
             raise ValueError("tsp_tw end_index must name one of the nodes")
         if end_index is not None and int(end_index) == start_index:
             raise ValueError("tsp_tw end_index must differ from start_index")
+        if service_times is not None and len(service_times) != len(nodes):
+            raise ValueError("tsp_tw service_times must have one item per node")
+        if time_windows is not None and len(time_windows) != len(nodes):
+            raise ValueError("tsp_tw time_windows must have one item per node")
         if fixed_order:
-            # The sequence is the question's, so `end_index` has nothing left to fix: whatever the
-            # order ends on is where the trip ends.
+            # The sequence is the question's, so `end_index` has nothing left to fix. Silently
+            # ignoring it would make one accepted argument mean nothing depending on another.
+            if end_index is not None:
+                raise ValueError("tsp_tw fixed_order cannot also set end_index")
             return _walk_stated_order(
-                nodes, matrix, time_windows, service_times, start_index, time_budget, metric
+                nodes,
+                matrix,
+                time_windows,
+                service_times,
+                start_index,
+                time_budget,
+                metric,
+                return_to_start,
             )
         # A tour that must end somewhere is not free to end anywhere. "I have an appointment at X
         # at 7pm, with errands on the way" fixes the last stop and leaves only the errands to
@@ -1071,7 +1098,13 @@ class SpatialOperatorRegistry:
                     if arrival > latest:
                         continue
                 finish = arrival + float((service_times or [0.0] * len(nodes))[candidate])
-                if time_budget is None or finish <= float(time_budget):
+                # A partial closed tour only reaches a stop if it can still get home. Without
+                # reserving this leg, the fallback used the whole budget outbound and returned an
+                # open route for a question that explicitly required a loop.
+                completion = finish
+                if return_to_start:
+                    completion += float(matrix[candidate][start_index])
+                if time_budget is None or completion <= float(time_budget):
                     accepted, elapsed = candidate, finish
                     break
             if accepted is None:
@@ -1092,11 +1125,15 @@ class SpatialOperatorRegistry:
                 order.append(fixed_end)
             else:
                 remaining.add(fixed_end)
+        visited_count = len(order) - 1
         stays = service_times or [0.0] * len(nodes)
         service = sum(float(stays[index]) for index in order)
+        if return_to_start and order[-1] != start_index:
+            elapsed += float(matrix[order[-1]][start_index])
+            order.append(start_index)
         return {
             "order": order,
-            "visited_count": len(order) - 1,
+            "visited_count": visited_count,
             "total_cost": elapsed,
             "travel_cost": elapsed - service,
             "service_cost": service,
@@ -1119,6 +1156,7 @@ def _walk_stated_order(
     start_index: int,
     time_budget: float | None,
     metric: str = "duration",
+    return_to_start: bool = False,
 ) -> dict[str, Any]:
     """Follow the itinerary as listed and report how much of it fits.
 
@@ -1145,15 +1183,22 @@ def _walk_stated_order(
                 unvisited.append(current)
                 continue
         finish = arrival + stays[current]
-        if time_budget is not None and finish > float(time_budget):
+        completion = finish
+        if return_to_start:
+            completion += float(matrix[current][start_index])
+        if time_budget is not None and completion > float(time_budget):
             unvisited.append(current)
             continue
         elapsed = finish
         order.append(current)
+    visited_count = len(order) - 1
     service = sum(stays[index] for index in order)
+    if return_to_start and order[-1] != start_index:
+        elapsed += float(matrix[order[-1]][start_index])
+        order.append(start_index)
     return {
         "order": order,
-        "visited_count": len(order) - 1,
+        "visited_count": visited_count,
         "total_cost": elapsed,
         "travel_cost": elapsed - service,
         "service_cost": service,
@@ -1292,9 +1337,6 @@ def matches_required_type(place: dict[str, Any], required_type: str) -> bool:
     if not any(term.casefold() in _category_haystack(place) for term in terms):
         return False
     return not _finer_type_overrides(place.get("category"), terms)
-
-
-MATRIX_METRICS: dict[str, str] = {"duration": "duration_s", "distance": "distance_m"}
 
 
 def build_duration_matrix(routes: Any, metric: str = "duration") -> dict[str, Any]:
@@ -1499,21 +1541,13 @@ def _normalize_arguments(name: str, arguments: dict[str, Any]) -> dict[str, Any]
                 args.setdefault("fixed_order", args.pop(alias))
         if "fixed_order" in args:
             args["fixed_order"] = _as_flag(args["fixed_order"])
+        if "return_to_start" in args:
+            args["return_to_start"] = _as_flag(args["return_to_start"])
         # The contract names the objective, not its storage unit.  These spellings are exact
         # synonyms for the two supported objectives and do not infer one from the question or
         # from the answer options.
-        metric = args.get("metric")
-        if isinstance(metric, str):
-            normalized_metric = metric.strip().lower()
-            args["metric"] = {
-                "time": "duration",
-                "travel_time": "duration",
-                "duration_s": "duration",
-                "seconds": "duration",
-                "distance_m": "distance",
-                "metres": "distance",
-                "meters": "distance",
-            }.get(normalized_metric, normalized_metric)
+        if "metric" in args:
+            args["metric"] = normalize_tsp_metric(args["metric"])
 
     if name in {"haversine_distance", "bearing_to_direction"}:
         if "place_a" in args and "place_b" in args:
@@ -1848,7 +1882,13 @@ def _extract_metric(route: Any, metric: str) -> dict[str, float] | list[dict[str
 
     route = _route_list(route)
     if isinstance(route, list):
-        return [_single_metric(item, metric) for item in route]
+        measured = [_single_metric(item, metric) for item in route]
+        # A one-route `distance_matrix` is still wrapped in `routes`, but the operator contract
+        # says `extract_distance` produces an amount. Keeping that one amount inside a list made
+        # `difference($direct, $via)` and `sum_amounts([$leg1, $leg2])` receive list/list nesting
+        # and fail at float(list). Preserve a collection only when there are genuinely several
+        # route measurements to preserve.
+        return measured[0] if len(measured) == 1 else measured
     return _single_metric(route, metric)
 
 
@@ -1915,11 +1955,47 @@ def _amount_collection(value: Any) -> list[Any]:
         ):
             found = value.get(key)
             if isinstance(found, list):
-                return found
+                return _flatten_amount_collection(found)
         return [value]
     if isinstance(value, list):
-        return value
+        return _flatten_amount_collection(value)
     return [value]
+
+
+def _flatten_amount_collection(value: list[Any]) -> list[Any]:
+    """Flatten list nesting and collection wrappers, never measurement records themselves."""
+
+    flattened: list[Any] = []
+    for item in value:
+        if isinstance(item, list):
+            flattened.extend(_flatten_amount_collection(item))
+        elif isinstance(item, dict):
+            # A list of separate distance_matrix results is the natural output of composing
+            # several one-leg route nodes: ``[$leg_1, $leg_2]``. The top-level normalizer already
+            # unwraps one matrix's ``routes``; apply the same contract to each item after list
+            # resolution instead of trying to read the matrix wrapper itself as a number.
+            nested = _amount_collection(item)
+            if not nested:
+                # Do not let one empty route wrapper disappear beside a valid leg and turn a
+                # partial measurement into a total. Keeping the wrapper makes `_amount_number`
+                # report the missing evidence explicitly.
+                flattened.append(item)
+            elif len(nested) == 1 and nested[0] is item:
+                flattened.append(item)
+            else:
+                flattened.extend(nested)
+        else:
+            flattened.append(item)
+    return flattened
+
+
+def _amount_total(value: Any, key: str | None = None, *, where: str) -> float:
+    """One scalar total for an amount or a collection of amounts of the same intended kind."""
+
+    values = _amount_collection(value)
+    if not values:
+        raise ValueError(f"{where} received nothing to measure")
+    return float(sum(_amount_number(item, key, where=where) for item in values))
 
 
 def _amount_number(value: Any, key: str | None = None, *, where: str) -> float:
@@ -1963,13 +2039,16 @@ def _amount_kind(key: str | None, values: list[Any]) -> str:
         if key in _DURATION_KEYS:
             return "duration"
         return "plain"
+    kinds: set[str] = set()
     for item in values:
         if isinstance(item, dict):
             if any(name in item for name in _DISTANCE_KEYS):
-                return "distance"
-            if any(name in item for name in _DURATION_KEYS):
-                return "duration"
-    return "plain"
+                kinds.add("distance")
+            elif any(name in item for name in _DURATION_KEYS):
+                kinds.add("duration")
+    if len(kinds) > 1:
+        raise ValueError("amount collection mixes distance and duration measurements")
+    return next(iter(kinds), "plain")
 
 
 def _distance_value(value: Any) -> float:

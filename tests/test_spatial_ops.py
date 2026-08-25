@@ -1180,6 +1180,220 @@ def test_declared_dependencies_in_data_arguments_become_references() -> None:
     }
 
 
+def test_a_whole_collection_reference_cannot_be_repeated_inside_one_list() -> None:
+    """Four copies of a four-place node must not become sixteen routed endpoints.
+
+    Distinct or indexed node references are a real collection. Repeating one whole collection is
+    ambiguous, and accepting it lets the tool's supported one-level flattening multiply the data.
+    """
+
+    from src.agent.geoflow import normalize_and_validate_graph
+
+    repeated = {
+        "graph": [
+            {
+                "id": "locations",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["A", "B", "C", "D"]},
+                "role": "extent",
+            },
+            {
+                "id": "legs",
+                "operator": "distance_matrix",
+                "arguments": {
+                    "origins": ["locations", "locations", "locations", "locations"],
+                    "destinations": ["locations", "locations", "locations", "locations"],
+                },
+                "depends_on": ["locations"],
+                "role": "measure",
+            },
+        ]
+    }
+
+    with pytest.raises(ValueError, match="repeats whole batch_geocode reference"):
+        normalize_and_validate_graph(repeated, max_steps=4)
+
+    indexed = {
+        "graph": [
+            repeated["graph"][0],
+            {
+                **repeated["graph"][1],
+                "arguments": {
+                    "origins": ["$locations.0.place", "$locations.1.place"],
+                    "destinations": ["$locations.0.place", "$locations.1.place"],
+                },
+            },
+        ]
+    }
+    steps, _ = normalize_and_validate_graph(indexed, max_steps=4)
+    assert steps[-1]["arguments"]["origins"] == [
+        "$locations.0.place",
+        "$locations.1.place",
+    ]
+
+    wrapped_once = {
+        "graph": [
+            repeated["graph"][0],
+            {
+                **repeated["graph"][1],
+                "arguments": {
+                    "origins": ["locations"],
+                    "destinations": ["locations"],
+                },
+            },
+        ]
+    }
+    wrapped_steps, _ = normalize_and_validate_graph(wrapped_once, max_steps=4)
+    assert wrapped_steps[-1]["arguments"]["origins"] == ["$locations"]
+
+
+def test_static_value_contracts_reject_known_bad_shapes_before_execution() -> None:
+    """Literal shapes the implementation cannot consume belong in the repair round."""
+
+    from src.agent.geoflow import normalize_and_validate_graph
+
+    extent = {
+        "id": "locations",
+        "operator": "batch_geocode",
+        "arguments": {"place_names": ["A", "B"]},
+        "role": "extent",
+    }
+    bad_pairs = {
+        "graph": [
+            extent,
+            {
+                "id": "distances",
+                "operator": "pairwise_distances",
+                "arguments": {"pairs": [["$locations.0.place", "$locations.1.place"]]},
+                "depends_on": ["locations"],
+                "role": "measure",
+            },
+        ]
+    }
+    with pytest.raises(ValueError, match="not pair objects or pair references"):
+        normalize_and_validate_graph(bad_pairs, max_steps=4)
+
+    bad_route_collection = {
+        "graph": [
+            extent,
+            {
+                "id": "turns",
+                "operator": "steps_analysis",
+                "arguments": {"route": ["$locations.0.place", "$locations.1.place"]},
+                "depends_on": ["locations"],
+                "role": "measure",
+            },
+        ]
+    }
+    with pytest.raises(ValueError, match="steps_analysis.route a list"):
+        normalize_and_validate_graph(bad_route_collection, max_steps=4)
+
+
+def test_tsp_literal_contracts_are_validated_before_execution() -> None:
+    """Unit conflicts and positional mismatches must reach repair, not failed operator steps."""
+
+    from src.agent.geoflow import normalize_and_validate_graph
+
+    def graph(arguments: dict) -> dict:
+        return {
+            "graph": [
+                {
+                    "id": "locations",
+                    "operator": "batch_geocode",
+                    "arguments": {"place_names": ["S", "A", "B", "C"]},
+                    "role": "extent",
+                },
+                {
+                    "id": "legs",
+                    "operator": "distance_matrix",
+                    "arguments": {"origins": "$locations", "destinations": "$locations"},
+                    "depends_on": ["locations"],
+                    "role": "support",
+                },
+                {
+                    "id": "tour",
+                    "operator": "tsp_tw",
+                    "arguments": {
+                        "nodes": "$locations",
+                        "distance_matrix": "$legs",
+                        **arguments,
+                    },
+                    "depends_on": ["locations", "legs"],
+                    "role": "measure",
+                },
+            ]
+        }
+
+    with pytest.raises(ValueError, match="clock arguments.*metric='duration'"):
+        normalize_and_validate_graph(
+            graph({"metric": "distance", "service_times": [0, 60, 60, 60]}),
+            max_steps=5,
+        )
+    with pytest.raises(ValueError, match="service_times 3 items for 4 nodes"):
+        normalize_and_validate_graph(
+            graph({"metric": "duration", "service_times": [0, 60, 60]}),
+            max_steps=5,
+        )
+    with pytest.raises(ValueError, match="redundantly sets tsp_tw.end_index"):
+        normalize_and_validate_graph(
+            graph({"return_to_start": True, "start_index": 0, "end_index": 0}),
+            max_steps=5,
+        )
+    with pytest.raises(ValueError, match="fixed_order.*end_index"):
+        normalize_and_validate_graph(
+            graph({"fixed_order": True, "end_index": 3}),
+            max_steps=5,
+        )
+
+    steps, _ = normalize_and_validate_graph(
+        graph({"metric": "time", "service_times": [0, 60, 60, 60]}),
+        max_steps=5,
+    )
+    assert steps[-1]["arguments"]["metric"] == "duration"
+
+
+def test_batch_place_details_reads_only_existing_ids_from_normalized_places() -> None:
+    """Place-shaped inputs are safe aliases for their own ids, not prompts for a new search."""
+
+    registry = ToolRegistry(_MatrixProvider())
+    row = {
+        "query": "A",
+        "place": {
+            "place_id": "A",
+            "name": "A",
+            "latitude": 37.56,
+            "longitude": 126.98,
+        },
+        "candidates": [],
+    }
+    one = registry.invoke("batch_place_details", {"place_ids": row})
+    second = {
+        **row,
+        "query": "B",
+        "place": {**row["place"], "place_id": "B", "name": "B"},
+    }
+    many = registry.invoke("batch_place_details", {"place_ids": [row, second]})
+
+    assert one.status == "ok" and [place["place_id"] for place in one.output] == ["A"]
+    assert many.status == "ok" and [place["place_id"] for place in many.output] == ["A", "B"]
+
+    missing = registry.invoke(
+        "batch_place_details",
+        {"place_ids": {"query": "missing", "place": None, "candidates": []}},
+    )
+    assert missing.status == "error"
+    partly_missing = registry.invoke(
+        "batch_place_details",
+        {
+            "place_ids": [
+                row,
+                {"query": "missing", "place": None, "candidates": []},
+            ]
+        },
+    )
+    assert partly_missing.status == "error"
+
+
 def test_a_stray_dependency_is_dropped_when_the_references_are_sound() -> None:
     """`depends_on` is a declaration; the `$` references are what execution follows.
 
@@ -2710,6 +2924,94 @@ def test_two_measured_legs_add_up_to_the_via_route_total() -> None:
         {"distance": total, "options": ["약 5.0km", "약 7.6km", "약 9.9km"]},
     )
     assert matched["best_option"] == 1
+
+
+def test_extracted_route_measurements_compose_without_list_shape_failures() -> None:
+    """Single-route wrappers are amounts; multi-route wrappers remain summable collections."""
+
+    ops = SpatialOperatorRegistry()
+    direct = ops.invoke(
+        "extract_distance",
+        {"route": {"routes": [{"distance_m": 5900, "duration_s": 900}]}},
+    )
+    leg_a = ops.invoke(
+        "extract_distance",
+        {"route": {"routes": [{"distance_m": 4200, "duration_s": 600}]}},
+    )
+    leg_b = ops.invoke(
+        "extract_distance",
+        {"route": {"routes": [{"distance_m": 4900, "duration_s": 700}]}},
+    )
+    via = ops.invoke(
+        "extract_distance",
+        {
+            "route": {
+                "routes": [
+                    {"distance_m": 4200, "duration_s": 600},
+                    {"distance_m": 4900, "duration_s": 700},
+                ]
+            }
+        },
+    )
+
+    assert direct == {"distance_m": 5900.0}
+    assert via == [{"distance_m": 4200.0}, {"distance_m": 4900.0}]
+
+    nested_total = ops.invoke("sum_amounts", {"amounts": [[leg_a], [leg_b]]})
+    assert nested_total["distance_m"] == 9100.0
+    assert nested_total["count"] == 2
+
+    detour = ops.invoke("difference", {"minuend": via, "subtrahend": direct})
+    assert detour["difference"] == 3200.0
+    assert detour["distance_m"] == 3200.0
+
+    with pytest.raises(ValueError, match="no measurement"):
+        ops.invoke("sum_amounts", {"amounts": [leg_a, {"routes": [], "route_count": 0}]})
+
+
+def test_separate_route_wrappers_compose_as_one_measurement_collection() -> None:
+    """Resolved ``[$leg_1, $leg_2]`` values retain each wrapper around its one route."""
+
+    ops = SpatialOperatorRegistry()
+    leg_a = {"routes": [{"distance_m": 4200, "duration_s": 600}], "route_count": 1}
+    leg_b = {"routes": [{"distance_m": 4900, "duration_s": 700}], "route_count": 1}
+    direct = {"routes": [{"distance_m": 5900, "duration_s": 900}], "route_count": 1}
+
+    total = ops.invoke("sum_amounts", {"amounts": [leg_a, leg_b]})
+    detour = ops.invoke("difference", {"minuend": [leg_a, leg_b], "subtrahend": direct})
+
+    assert total["count"] == 2
+    assert total["distance_m"] == 9100.0
+    assert total["duration_s"] == 1300.0
+    assert detour["difference"] == 3200.0
+    assert detour["distance_m"] == 3200.0
+
+
+def test_duration_collections_do_not_gain_a_distance_unit_when_subtracted() -> None:
+    """Collection support must not turn seconds into metres as a side effect."""
+
+    result = SpatialOperatorRegistry().invoke(
+        "difference",
+        {
+            "minuend": [{"duration_s": 900}, {"duration_s": 600}],
+            "subtrahend": {"duration_s": 1000},
+        },
+    )
+
+    assert result["difference"] == 500.0
+    assert result["duration_s"] == 500.0
+    assert "value" not in result and "distance_m" not in result and "distance_km" not in result
+    with pytest.raises(ValueError, match="measured distance"):
+        SpatialOperatorRegistry().invoke(
+            "match_distance_options",
+            {"distance": result, "options": ["약 0.5km"]},
+        )
+
+    with pytest.raises(ValueError, match="mixes distance and duration"):
+        SpatialOperatorRegistry().invoke(
+            "sum_amounts",
+            {"amounts": [[{"distance_m": 100}], [{"duration_s": 100}]]},
+        )
 
 
 def test_a_route_shaped_sum_keeps_both_metrics_and_a_duration_sum_is_not_a_distance() -> None:

@@ -2210,10 +2210,11 @@ Four draws hold the gap at 27–30. Spatial-Agent's 81.3 is the highest of the f
 ties its highest; the floor is the lowest of the four, so the lift is the widest measured.
 
 **v7c is the first of these that stays held out.** v7a and v7b were each spent by an `src/` change
-made in response to what they showed. Nothing under `src/` or `data/` has changed since `a50096a`,
-so **52.0/81.3 is a genuine held-out number for the current code** — the fixes were already in when
-it was drawn, not written against it. That is the number to quote for `a50096a`, with the one
-caveat below.
+made in response to what they showed. Nothing under `src/` or `data/` had been changed in response
+to v7c, so **52.0/81.3 is a genuine held-out number for `a50096a`** — the fixes were already in
+when it was drawn, not written against it. (`src/` has changed twice since: `c7d49cb` deleted the
+context cache provider, a path these runs never took, and the v7d entry's crash fix. Neither was
+written against v7c, so the number stands as `a50096a`'s; it is no longer *current* code's.)
 
 ### Both operator fixes, measured on an independent draw
 
@@ -2261,9 +2262,14 @@ worse than v7's 79% and past v7a/v7b, which cleared the 70% threshold at 66.7%. 
 `ba92d9c` addressed by growing the coverage scan — and it is addressed: the scan now runs far
 enough. What it cannot manufacture is anchors the city does not have. An anchor whose ranks one
 through five are all separable by the 90 m ordinal margin is rare, and a draw that happens to find
-few of them lands most of its rows on k=2 no matter how long the scan runs. v7a and v7b found
-enough; v7 and v7c did not. This is draw variance in what Seoul offers, not a generator bug, and it
-does not warrant another scan-limit change — the last one already does everything code can do here.
+few of them lands most of its rows on k=2 no matter how long the scan runs.
+
+> **Corrected by v7d.** This paragraph originally continued: "v7a and v7b found enough; v7 and v7c
+> did not. This is draw variance in what Seoul offers, not a generator bug." It is not variance.
+> A fifth draw made it five for five in this family against zero for five in `nearby_subtype_kth`,
+> which draws k identically, and the mechanism is measurable in the two families' rank gaps: this
+> one anchors on Seoul's four densest chain categories. It is a generator defect in the category
+> pool. See the v7d entry.
 
 The consequence is bounded and the same as v7's: the 24 `nearby_kth_nearest` rows are not a second
 answer key (place-name options, shuffled gold), so **the overall 52.0/81.3 and every other family
@@ -2271,3 +2277,161 @@ stand**; what does not stand is a `nearby_kth_nearest` family number for this dr
 mostly "second nearest." If a future draw needs that family to discriminate at k∈{3,4}, the lever
 is the ordinal margin or the anchor category pool, not the scan limit — and changing either would
 spend whatever set exposed the need.
+
+## v7d: the fifth draw, and two claims the fifth draw retires
+
+`dataset/seoul_kmapeval_v7d_mcq_300.jsonl` is the standard builder's fifth 300-question draw; it
+drew 281. Built and run at `c7d49cb`, which is `a50096a` plus the removal of the context cache
+provider — a deletion of a path these runs never took (`--provider` resolved to `kakao` for every
+v7 dataset, none of which carries a `context`), so v7d and v7c are measured on the same runtime.
+
+| | passes | mean | pooled |
+| --- | --- | --- | --- |
+| no-tool floor | 79, 75 | **27.4** | 154/562 |
+| ReAct (reference) | 47.0, 48.0, 47.7 | **47.6** | 401/843 |
+| Spatial-Agent | 81.5, 80.1, 79.7 | **80.4** | 678/843 |
+
+| | floor | ReAct | Spatial-Agent | gap |
+| --- | --- | --- | --- | --- |
+| v7 (`6bae55c`) | 28.8 | 48.9 | 78.9 | 30.0 |
+| v7a (`ba92d9c`) | 26.8 | 52.1 | 79.2 | 27.1 |
+| v7b (`796c683`) | 29.5 | 48.5 | 76.8 | 28.3 |
+| v7c (`a50096a`) | 25.2 | 52.0 | 81.3 | 29.3 |
+| v7d (`c7d49cb`) | 27.4 | 47.6 | 80.4 | **32.8** |
+
+Five independent draws, three passes a side each, hold the gap at 27–33. Excluding the
+`unanswerable_*` families the floor is **21.9**, below four-way chance, and the chosen-option
+histogram is flat on both passes.
+
+### Where each architecture's accuracy actually comes from
+
+| class | rows | floor | ReAct | lift | Spatial-Agent | lift |
+| --- | --- | --- | --- | --- | --- | --- |
+| `distance` | 46 | 16.3 | 18.8 | **+2.5** | 89.1 | +72.8 |
+| `routing` | 66 | 18.2 | 26.3 | **+8.1** | 96.0 | +77.8 |
+| `nearby` | 91 | 42.3 | 59.7 | +17.4 | 79.5 | +37.2 |
+| `radius` | 12 | 25.0 | 58.3 | +33.3 | 61.1 | +36.1 |
+| `trip` | 66 | 24.2 | 70.2 | **+46.0** | 63.6 | +39.4 |
+| overall | 281 | 27.4 | 47.6 | +20.2 | 80.4 | +53.0 |
+
+Two readings the pooled number hides. First, **ReAct's 47.6 is almost entirely `trip` and
+`radius`**: on `distance` it clears its own closed-book floor by 2.5 points and on `routing` by
+8.1, which is the v7a finding (25.9 against a floor of 25.6 on `distance`) reproduced on an
+independent draw and extended to routing. Five tools and fifteen iterations buy nearly nothing on
+109 of 281 rows. Spatial-Agent gains 72.8 and 77.8 on those same rows, so the rows are answerable
+and it is the baseline's surface that cannot reach them.
+
+Second, **ReAct out-lifts Spatial-Agent on `trip` for the first time** (+46.0 against +39.4), and
+wins the class outright 70.2 to 63.6. Spatial-Agent's `trip_optimal_order` fell to 52.8 — its worst
+of the five draws — and `trip_feasible_count_five` to 58.7, also its worst, while ReAct's
+`trip_total_distance` came in at 90.5, its second best. This is a per-family swing, not a finding
+about the architectures; see the next section for why that is now the expected shape.
+
+### Per-family accuracy is the *baseline's* instability, not the family's
+
+With five draws each measured over three passes, the spread of a family's accuracy across draws can
+be separated from pass noise. Mean cross-draw range per family, excluding the `unanswerable_*`
+families:
+
+| | mean cross-draw range | worst family |
+| --- | --- | --- |
+| ReAct | **23.6 pts** | `trip_total_distance`, 57.9 (34.9 → 92.9) |
+| Spatial-Agent | **13.6 pts** | `poi_farthest_of_three`, 30.8 (43.6 → 74.4) |
+
+Same rows, same three-pass averaging, same endpoint: ReAct's family score moves nearly twice as far
+between draws as Spatial-Agent's. Ten of the twelve measured families swing more for ReAct than for
+Spatial-Agent. So "quote a family number across draws or as one draw's" is not symmetric advice —
+it binds hardest on the baseline, and a single-draw family comparison flatters or damns ReAct by up
+to 30 points for reasons that have nothing to do with the architecture.
+
+### The trip-length hypothesis is retired
+
+The v7b entry proposed that ReAct's lift on `trip_total_distance` rises with median trip length;
+the v7c entry downgraded it to "positive but not monotonic." At five draws it is nothing:
+
+| draw | median total | floor | ReAct | lift |
+| --- | --- | --- | --- | --- |
+| v7 | 22.2 km | 23.8 | 34.9 | 11.1 |
+| **v7d** | **25.1 km** | **26.2** | **90.5** | **64.3** |
+| v7b | 26.5 km | 21.4 | 52.4 | 31.0 |
+| v7c | 30.5 km | 35.7 | 63.5 | 27.8 |
+| v7a | 30.9 km | 40.5 | 92.9 | 52.4 |
+
+v7d is the second *shortest* draw and carries the *largest* lift of the five. Across the five
+points the correlation between median length and lift is r = 0.34, which at n = 5 is indistinguishable
+from none. The hypothesis was three points in a row and should not have been written as a mechanism.
+What survives is the reason it was noticed at all — this family's per-draw score is unstable for
+ReAct by 58 points, which the table above now explains as the general case rather than a special one.
+
+### The audit failed again, and the correction: this is the code, not the city
+
+    nearby_kth_nearest: k varies across [2, 3] but 20 of 24 rows ask for k=2
+
+The v7c entry called this "draw variance in what Seoul offers, not a generator bug, and it does not
+warrant another scan-limit change." **The first half of that is wrong.** Five draws for five:
+
+| draw | k distribution, `nearby_kth_nearest` | `nearby_subtype_kth` |
+| --- | --- | --- |
+| v7 | {2: 19, 3: 3, 4: 2} | {2: 15, 3: 15} |
+| v7a | {2: 16, 3: 6, 4: 2} | {2: 15, 3: 15} |
+| v7b | {2: 16, 3: 5, 4: 3} | {2: 15, 3: 15} |
+| v7c | {2: 20, 3: 3, 4: 1} | {2: 15, 3: 15} |
+| v7d | {2: 20, 3: 4, 4: 0} | {2: 14, 3: 14} |
+
+`nearby_kth_nearest` has never once balanced; `nearby_subtype_kth`, which draws k the same way in
+the same builder, has balanced perfectly every time. Five for five in one family and zero for five
+in the other is not variance, and the difference between them is measurable in the datasets
+themselves — the consecutive rank gaps each family's gold evidence records:
+
+| draw | `kth_nearest` median rank gap | under 90 m | `subtype_kth` median | under 90 m |
+| --- | --- | --- | --- | --- |
+| v7 | 70 m | 50% | 139 m | 25% |
+| v7a | 84 m | 50% | 154 m | 14% |
+| v7b | 96 m | 45% | 148 m | 20% |
+| v7c | 77 m | 50% | 137 m | 18% |
+| v7d | 83 m | 51% | 131 m | 21% |
+
+Stable to a few metres across five independent draws. `nearby_kth_nearest` anchors its ordinal in
+`CE7`/`BK9`/`PM9`/`CS2` — cafés, banks, pharmacies, convenience stores, the four densest chain
+categories in Seoul — where about half of all consecutive rank gaps fall under the 90 m
+`ORDINAL_MARGIN_M`. k = 3 needs three consecutive gaps to clear it and k = 4 needs four, so even
+treating the gaps as independent that is ~12% and ~6% of anchors, and they are not independent: a
+dense neighbourhood is dense at every rank. `nearby_subtype_kth` searches a *subtype* keyword
+(내과, 정형외과) where only ~20% of gaps are under the margin, k = 3 clears at ~51%, and the
+balancing code that is identical in both families has candidates to work with.
+
+So the cause is the family's category pool, and `ba92d9c`'s scan-limit fix could not have addressed
+it — the scan ceiling is `max(24, count * 3)` = 72 *successful* rows at this quota, and among 72
+anchors that produced a row v7d found four that supported k = 3 and none that supported k = 4,
+which is exactly what a 12%/6% rate predicts. Two levers remain, and they trade off:
+
+- **Sparser anchor categories** (what `nearby_subtype_kth` already does): balances k without extra
+  quota, but changes what the family asks — "the k-th nearest hospital" is not "the k-th nearest
+  café", and the family's benchmarks of record were all drawn on the dense pool.
+- **Scan for the scarce value rather than for a multiple of `count`**: keeps the family identical,
+  but reaching eight k = 4 rows at a ~6% rate needs on the order of 150–250 successful rows against
+  today's 72, i.e. roughly 2,000 extra Kakao calls in one family of one build.
+
+**What the skew does and does not cost.** The docstring's guessability argument — ranking the four
+options alone answers a k-th question 60% of the time at k = 2, 30% at k = 3, 10% at k = 4 — assumes
+a guesser who can order the options by distance, which a closed-book model cannot. Measured, the
+family's floor on v7d is 10/48 = **20.8%, below four-way chance**, and 2/24 on v7. The skew is a
+real generator defect, five for five, but it has not made the family guessable in practice: the
+overall 47.6/80.4 and every other family stand, and what does not stand is a `nearby_kth_nearest`
+family number for this draw, which measured mostly "second nearest."
+
+### One crash the run surfaced
+
+Two of 843 Spatial-Agent runs died on `AttributeError: 'dict' object has no attribute 'split'`.
+`kmapeval_196` composed `batch_geocode(place_names=[{"cost": "$cost_0", "index": 0}, ...])` — using
+the geocoder to build a list of records rather than to resolve names. `ToolRegistry` refuses that
+cleanly with a pydantic validation error the repair round can read, but grounding runs first, and
+`_is_shortened_name` called `.split()` on the dict, so the question was thrown away with a Python
+internals leak instead of being refused. Same class as the bare-`$ref` crash at `1cb6bdc`: a
+planner mistake surfacing as a harness crash. `_is_shortened_name` is now total — whatever is not a
+name is not a shortened one — and the operator does the refusing.
+`tests/test_spatial_nonstring_place_names.py` pins it, including that the fix is causal (the
+grounding test fails on the unpatched predicate) and that the operator's own refusal still fires.
+
+**v7d is spent by that fix**, as v7a and v7b were before it: 47.6/80.4 is what `c7d49cb` scored,
+not a number to hold the next draw against.

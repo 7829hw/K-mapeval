@@ -1913,7 +1913,14 @@ def _single_anchor(candidate: str) -> str | None:
     return candidate or None
 
 
-def _is_shortened_name(candidate: str, expected: str) -> bool:
+def _is_shortened_name(candidate: Any, expected: Any) -> bool:
+    # A planner may fill `place_names` with objects rather than names -- one graph passed
+    # `{"cost": "$cost_0", "index": 0}` per entry, using `batch_geocode` to build a record list.
+    # The registry refuses that cleanly, but this predicate ran first and `.split()` on a dict
+    # threw the whole question away with a Python internals leak. Whatever is not a name is not
+    # a shortened one, so answer the question that was asked and let the operator do the refusing.
+    if not isinstance(candidate, str) or not isinstance(expected, str):
+        return False
     candidate_key = "".join(candidate.split()).casefold()
     expected_key = "".join(expected.split()).casefold()
     return bool(candidate_key and candidate_key != expected_key and candidate_key in expected_key)

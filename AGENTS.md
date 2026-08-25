@@ -125,7 +125,21 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   values has to be bounded by something that grows with `count`, or the balancing runs out of
   candidates the moment the build gets bigger than the constant was sized for. That is how
   `nearby_kth_nearest` shipped 19 of 24 rows at k=2 in the 283-row set with correct balancing code.
-  Re-run `data/audit_dataset.py` at the size you are actually building.
+  Re-run `data/audit_dataset.py` at the size you are actually building. And when a scan that does
+  grow with `count` still cannot balance, the parameter is not the scan — it is what the family
+  draws from. `nearby_kth_nearest` has skewed to k=2 in five draws for five while
+  `nearby_subtype_kth`, which draws k identically in the same builder, balanced in all five,
+  because the first anchors on Seoul's four densest chain categories where half of all consecutive
+  rank gaps fall under `ORDINAL_MARGIN_M` and the second searches a sparse subtype where a fifth
+  do. One audit failure is a draw; five in one family and none in its twin is a generator defect,
+  and the lever is the pool or the margin, not the scan.
+- A family's accuracy on one draw is worth less for ReAct than for Spatial-Agent. Over five draws
+  at three passes a side, mean cross-draw range per family is 23.6 points for ReAct against 13.6
+  for Spatial-Agent, and ten of twelve families swing further for ReAct. So a single-draw family
+  comparison can flatter or damn the baseline by ~30 points for reasons that are not the
+  architecture — and a hypothesis fitted to three draws of one family is probably fitting that
+  noise, which is how the "ReAct's `trip_total_distance` lift rises with trip length" reading
+  survived two entries before the fifth draw put it at r = 0.34.
 - Every benchmark in `dataset/` has been tuned against, so an accuracy on one is a training-set
   accuracy. Build a held-out set with `--seed`/`--id-prefix` on a builder, change nothing under
   `src/` afterwards, and report that number separately. The reference point is upstream
@@ -134,15 +148,27 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
 
 ## Benchmarks
 
+- `dataset/seoul_kmapeval_v7d_mcq_300.jsonl`: the fifth 300-question draw, built and run at
+  `c7d49cb` (= `a50096a` plus the context-provider deletion, a path these runs never took). 281
+  rows. Floor 27.4 (21.9 excluding `unanswerable_*`), ReAct 47.6, Spatial-Agent 80.4 over three
+  passes a side — **gap 32.8, the widest of the five draws**. Two things it establishes. *ReAct
+  barely measures on half the set*: it clears its own floor by 2.5 points on `distance` and 8.1 on
+  `routing` (109 of 281 rows), where Spatial-Agent gains 72.8 and 77.8 — the v7a `distance` finding
+  reproduced on an independent draw and extended to routing. *Per-family instability is the
+  baseline's*: mean cross-draw range 23.6 points for ReAct against 13.6 for Spatial-Agent, so the
+  "quote across draws" rule binds hardest on ReAct. **Spent** — the run surfaced a grounding crash
+  and `src/` changed to close it, so 47.6/80.4 is what `c7d49cb` scored. Also **fails
+  `data/audit_dataset.py`** on `nearby_kth_nearest`; see the next bullet. See
+  `docs/REFERENCE_MAPPING.md`.
 - `dataset/seoul_kmapeval_v7c_mcq_300.jsonl`: the fourth 300-question draw, built and run at
   `a50096a` (both operator fixes in). 282 rows. Floor 25.2 (19.3 excluding `unanswerable_*`), ReAct
-  52.0, Spatial-Agent 81.3 over three passes a side — the widest lift of the four draws, gap 29.3.
-  **The first of these that stays held out**: nothing under `src/` or `data/` has changed since it
-  was drawn, so 52.0/81.3 is a genuine held-out number for `a50096a`. Spatial-Agent had **zero
+  52.0, Spatial-Agent 81.3 over three passes a side, gap 29.3. Held out when measured — nothing had
+  been changed in response to it — so 52.0/81.3 is a genuine held-out number **for `a50096a`**;
+  `src/` has changed twice since, neither time against v7c. Spatial-Agent had **zero
   `agent_reasoning_failure`** this draw — the two operator fixes measured on a set neither was
   tuned against. Caveat: it **fails `data/audit_dataset.py`** on `nearby_kth_nearest` (20/24 at
-  k=2, city-limited draw variance, not a generator bug), so that one family's number is not
-  quotable; the overall and every other family stand. See `docs/REFERENCE_MAPPING.md`.
+  k=2), so that one family's number is not quotable; the overall and every other family stand. See
+  `docs/REFERENCE_MAPPING.md`.
 - `dataset/seoul_kmapeval_v7b_mcq_300.jsonl`: the standard builder's third 300-question draw; it
   drew 283. Built and run at `796c683`. Floor 29.5 (24.2 excluding `unanswerable_*`), ReAct 48.5,
   Spatial-Agent 76.8 over three passes a side — a third draw agreeing the gap sits at 27–30. Also

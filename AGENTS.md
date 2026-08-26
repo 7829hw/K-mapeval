@@ -72,7 +72,21 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   metadata to an agent or derive provider configuration from it.
 - Use 0-based option indices in datasets, predictions, logs, and reports. The answer wire format is
   `^^N^^`.
+- A question carries three labels and a report splits by all three: `mapeval_class` (MapEval-API's
+  four task categories plus this port's `unanswerable`), `classification` (what is measured), and
+  `template_id` (which generator wrote it). None is derivable from another — the `unanswerable_*`
+  families are written as `nearby` questions and only the first label tells them apart, which is
+  why `resolve_mapeval_class` reads the stored field before its `classification` fallback. Report
+  `unanswerable` as its own row: it is an addition to the paper's four, and a mean over five
+  categories is not comparable to a mean over four. v1, v2 and v3 predate `mapeval_class`; every
+  set from v4 on states it per row.
 - Never special-case a question ID or option string, and never hardcode an answer.
+- For a change to Spatial-Agent *grounding*, the replay is `data/replay_grounding.py` and it is
+  cheap: grounding is a pure function of the planner's graph, the Analysis output, the question
+  and its options, and `logs/` already holds all four per question. Dump the grounded graphs at
+  both revisions and diff them — same graphs on both sides, no LLM calls, no Kakao quota. It has
+  already earned it twice: it proved the intent conjuncts changed zero of 2,577 graphs, and it
+  caught two regressions in the intent-free grounding before they reached a benchmark.
 - Before shipping a change, measure which families it moves, not just whether the overall accuracy
   went up. Naming no family in the code is not enough — a rule can still be a family patch by
   effect, and the point is to measure the architecture, not to handle types. The cheap check is a
@@ -315,6 +329,18 @@ when the user explicitly asks for live execution.
 ## Change checklist
 
 - Add regression tests for changed behavior. Keep live-API tests separate and optional.
+- `lint.dummy-variable-rgx` is narrowed to `^_$` on purpose. F811 (a second definition shadowing
+  the first) is in ruff's default `F` set and still said nothing about `_returns_to_start` being
+  defined twice in `src/agent/spatial.py`, because ruff skips it for any leading-underscore
+  binding — which is every helper here. Keep the narrowing; it also means a deliberately
+  discarded value must be named `_`, not `_something`.
+- Grounding takes `GroundingFacts`, not an intent. Every branch in `_ground_graph_literals` asks
+  whether the fact it needs is present in the question; none asks what the Analysis stage called
+  the question. `analysis["intent"]` still reaches template retrieval, the evaluation prompt and
+  the `predicted_intent` a report records — see `docs/REFERENCE_MAPPING.md` for what removing the
+  first of those would take. Do not reintroduce an intent conjunct: the label is wrong often
+  enough to matter (53 of 72 `routing_detour_cost` graphs were called `poi`), and a gate on it
+  fails silently rather than loudly.
 - When changing `Place` or `Route`, update every provider normalizer, cached payload, and cache
   schema version.
 - The declared-type table in `OPERATOR_INPUT_TYPES` describes what an operator's implementation

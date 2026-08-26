@@ -3062,3 +3062,129 @@ a café. The absence of the field across every record *is* the evidence those qu
 and the operator's message does not say so. That is a message-and-prompt change in the generation
 stage, the same place a decline flag cost 5.8 points, so it wants its own footprint replay and its
 own passes before anything is written.
+
+## Removing the runtime intent router
+
+Upstream Spatial-Agent's official implementation carries an intent classification stage and
+per-intent prompts. The paper's chapter 3 has neither: the claim there is that decomposing a
+question into scientific core concepts and functional roles *replaces* intent-style pattern
+matching. So "does the port answer as well without an intent router" is a direct check on that
+claim rather than a refactor, and it is worth its own entry.
+
+This port had two intent surfaces. The concept and factorization core never had one —
+`src/agent/geoflow.py` has no per-intent branch outside template retrieval, and all four prompts
+(`ANALYSIS`, `GRAPH`, `REPAIR`, `EVALUATOR`) are intent-independent. The router lived in
+`_ground_graph_literals`, which took `analysis["intent"]` and gated eleven branches on it.
+
+### The label is a guess, and it misses
+
+Every recorded run logs the Analysis stage's intent beside the question, so how often the router
+routes wrong is measurable from the logs alone. Over 849 graphs from three v7-283 passes at
+`643fe24`:
+
+| family | rows | what the stage called them |
+|---|---|---|
+| `nearby_subtype_kth` | 90 | 69 `nearby`, **21 `poi`** |
+| `nearby_kth_nearest` | 72 | 57 `nearby`, **14 `poi`**, 1 `distance` |
+| `routing_detour_cost` | 72 | 10 `routing`, **53 `poi`**, 8 `distance`, 1 `trip` |
+| `routing_turn_count_via` | 63 | 21 `routing`, **42 `trip`** |
+| `unanswerable_*` (all five) | 63 | 41 `nearby`, 21 `poi`, 1 `type` |
+
+A mislabel is not a failure. Grounding does not raise when it declines to bind something; it
+simply hands the executor a graph with no `required_type` on its ranking, or no anchor on its
+geocode, and every stage afterwards reports success.
+
+### Replaying grounding instead of re-running the benchmark
+
+Grounding is a pure function of the planner's graph, the Analysis output, the question and its
+options, and a recorded run wrote all four to `logs/`. `data/replay_grounding.py` re-runs it
+offline at any revision — no LLM calls, no Kakao quota, and the *same* graphs on both sides,
+which three fresh passes cannot offer against a ±8-point endpoint. It counts changed graphs by
+`template_id` and by `mapeval_class`, because "the accuracy did not move" and "no family moved"
+are different claims and only the second is evidence.
+
+The corpus below is 2,577 graphs: the latest Spatial-Agent report for each of the 16 benchmarks
+in `dataset/`, plus all three v7-283 passes at `643fe24`.
+
+### A-class: the conjuncts the operator already implied
+
+`calculate_start_time`, `calculate_finish_time` and `tsp_tw` appear only in a trip plan and
+`filter_by_direction` only in a direction plan, so `operator == X and intent == Y` never admitted
+a node `operator == X` would not have. It could only *exclude* one — and given the table above,
+it did: a `tsp_tw` node in a plan the stage called `routing` ran with the stays, the budget, the
+stated order and the closure all withheld, which is a confident wrong answer rather than a
+failure. The trip itinerary lookup lost its gate too; the structural test underneath it (a
+`batch_geocode` node listing more than two places) is what identifies an itinerary.
+
+**Zero of 2,577 graphs changed**, on every one of 28 templates and all five task categories.
+Byte-identical grounded graphs mean identical execution downstream, so this step needs no
+benchmark run to be established as equivalent — a stronger statement than three passes could
+make.
+
+### B/C-class: presence as the gate
+
+`GroundingFacts` is one reading of the question — anchor, kind of place, radius, sector, compared
+pair, route preference, closing leg, stated order — taken once by `extract_facts`, and each
+branch now asks whether the fact it needs is present. Which source leads is decided per fact:
+
+- A radius, a sector, a pair of names, a route preference, a closure and a fixed order are
+  written in the sentence verbatim, so the scan over the question goes first and the concept
+  graph is consulted only to recover what the scan missed. An LLM re-transcription of a literal
+  can only add error, which is already why option texts and place names are bound from the
+  question rather than accepted from the planner.
+- `target_type` is the other kind. "우산을 사야 합니다" names no category, and inferring 편의점 is
+  the Analysis stage's job, not a regex's — so the question's words win when it names one and
+  `analysis["target_type"]` fills the rest.
+
+Three intent-keyed tables became single ordered lists (target-type leads; anchor relations, with
+the sector pattern ahead of the nearest-of one because a sector question also says "가장 가까운";
+anchor phrase splits). The option splice, which asked `intent in {"nearby", "direction",
+"routing"}`, asks the graph instead: do this batch's places flow into an option ranking rather
+than into a tour? That was what the intent set meant — the excluded label that mattered was
+`trip`, because overwriting an itinerary's stops with the option texts answers a different trip.
+
+Footprint over the same 2,577 graphs: **821 changed**, none in any `trip_*` family and none in
+`routing_nth_turn`.
+
+| argument slot | nodes changed | what changed |
+|---|---|---|
+| `batch_geocode.anchor` | 965 | 908 `None` → a name; 57 a `$reference` → a name; none the other way |
+| `nearest.required_type` | 140 | the kind the question names, reaching the ranking |
+| `nearby_places.*` | 142 | retrieval specs built from that kind |
+| `batch_geocode.place_names` | 16 | verbatim-name repairs the anchor path now reaches |
+| `batch_geocode.strict_names` | 8 | |
+
+The option splice fires on the **same 61 nodes** before and after, neither more nor fewer.
+
+### Two regressions the replay caught before they shipped
+
+Both come from a scan that now runs on every question instead of on a labelled subset, which is
+the predictable cost of ungating and the reason to measure rather than reason about it.
+
+"헤이갤러리 근처에서 분위기가 가장 좋은 카페는?" bound `헤이갤러리 근처` as the anchor — a place
+that does not exist — and wrote it over an option the plan had already geocoded. A vicinity word
+is stripped from the anchor's tail now.
+
+"A에서 B까지의 직선거리와 A에서 C까지의 직선거리는 얼마나 차이가 나나요?" read `(A, B)` as its
+compared pair and bound `place_names` to it, deleting C — so `poi_distance_difference`, the
+largest `poi` family, would have measured one of the two distances it was asked to compare. That
+was *already* happening to the 15 of 99 rows the stage happened to label `distance`; a pair is
+refused outright now when the question states more than one separation.
+
+### What is measured and what is not
+
+The A-class step is settled offline. The B/C-class step has a measured *footprint* and no
+measured *accuracy*: 821 graphs execute differently, and whether that is better is a benchmark
+question. Read it beside the fact that every changed slot moved from "nothing bound" toward "the
+literal the question states", and that no anchor was lost.
+
+Two things remain unmeasured and are deliberately separate commits. The `ANALYSIS_PROMPT` now
+names `radius_m` and `direction` as typed attributes, because the recovery path had nothing to
+read — 7 of 979 recorded analyses carried a radius attribute at all, under a free-form key,
+against 36 questions that state one. And `retrieve_templates` still scores templates with a
+weight-4 term for a matching intent against weight-1 keyword hits. Removing that term is *not*
+the same kind of change as the ones above: it alters what the planner is shown, so no replay can
+predict the graph it then writes, and dropping it outright leaves keyword matching only. The
+principled replacement scores a template against the concept graph rather than against a label,
+which means re-authoring every template's affinity. That is the remaining work, and it should be
+done with a benchmark run beside it rather than on the argument alone.

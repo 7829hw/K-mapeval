@@ -3260,4 +3260,33 @@ recorded analyses. The largest changes are the mislabeled shapes this stage is m
 `trip_total_distance` (26). In those rows the label-selected example and the question structure
 disagree; the live A3 result must decide whether the new planner context helps. Unit coverage is
 546 passing tests, and both `spatial.py` and `geoflow.py` contain zero `intent ==`/`intent in`
-branches. Benchmark results belong immediately below once the A3 run completes.
+branches. The live A3 run below measures the resulting planner change.
+
+Three live A3 passes at `af51e93`, on the same v7-283 rows and run conditions as A0/A2, read
+81.6/81.3/83.4 (pooled **82.1%**). A2 read 82.3/84.5/86.6 (pooled **84.5%**), so the observed
+difference is -2.4 points. A question-cluster paired interval is approximately [-5.8, +1.1]
+points: the runs do not distinguish an overall change from endpoint variation, but they also do
+not prove equivalence under a narrow predeclared margin.
+
+| `mapeval_class` | A2 | A3 | delta |
+|---|---:|---:|---:|
+| nearby | 80.2 | 78.6 | -1.6 |
+| poi | 89.1 | 94.2 | +5.1 |
+| routing | 89.4 | 88.9 | -0.5 |
+| trip | 85.9 | 74.2 | -11.6 |
+| unanswerable (port-added) | 71.4 | 73.0 | +1.6 |
+
+The family split is the useful warning. `trip_total_distance`, the fixed-order shape, held at
+95.2%; `trip_optimal_order` moved 80.6 -> 56.9 and `trip_feasible_count_five` 85.7 -> 73.0.
+Conversely `nearby_cuisine_subtype` moved 55.6 -> 83.3. Those rows say template affinity is now a
+material planner input, not that any one direction is architectural signal: the endpoint's known
+cross-pass family variance is large, and these datasets are spent. Investigate the split on a
+fresh draw rather than tuning the affinity table against it.
+
+Repair occurrence rose from 122/849 (14.4%) at A2 to 141/849 (16.6%) at A3; terminal
+`agent_reasoning_failure` rows rose from 3 to 8. The requested robustness runs on the three already
+spent holdout files read 83.7% (v7h), 82.0% (v7h2) and 84.0% (v7h3), each pooled over three passes.
+Their pass spreads were 7, 11 and 3 points respectively, and there are no same-revision A0/A2
+runs on those files, so they are A3 levels rather than controlled deltas. The complete A0-A3
+table, all source report names, three label axes, failure distribution and repair rates are in
+`reports/intent_removal_a0_a3.md`.

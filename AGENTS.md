@@ -243,7 +243,11 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   score did not move. The check that makes it readable is in the same table: the `trip` class had
   **zero** changed graphs and moved +4.0, `trip_optimal_order` zero and +9.7. No family whose
   graphs changed moved further than one whose graphs did not, which is what a family delta is
-  worth on this endpoint. See `docs/REFERENCE_MAPPING.md`.
+  worth on this endpoint. The remaining planner/evaluator label paths were removed at `af51e93`:
+  three passes read 81.6/81.3/83.4 (mean 82.1), against 84.5 at `c07b998`. The -2.4-point
+  question-cluster interval includes zero, while the `trip` class moved -11.6 and
+  `trip_optimal_order` -23.6; treat that family split as a fresh-draw question, not a tuning
+  target. See `docs/REFERENCE_MAPPING.md` and `reports/intent_removal_a0_a3.md`.
 - `dataset/seoul_kmapeval_v7_mcq_300.jsonl`: the standard builder asked for 300; it drew 283. The
   largest set here and the one whose numbers carry the least sampling noise — three passes a side
   at `6bae55c` spanned 2.1 points for ReAct and 1.8 for Spatial-Agent, against the ±8 a hundred
@@ -270,17 +274,20 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
 - `dataset/seoul_kmapeval_v7h3_holdout_100.jsonl`: the v7 builder under seed 750914, `v7h3` ids.
   **Held out** — built and run at `8797217`, the first draw for code carrying the arithmetic
   operators, the ordinal template and a drawn ordinal. Three passes against a floor of 23.5: ReAct
-  51.0, Spatial-Agent 72.0. This is the only holdout number that belongs to the current code, and
-  it is spent the moment `src/` or `data/` changes again.
+  51.0, Spatial-Agent 72.0. It was run again after intent removal at `af51e93`: Spatial-Agent
+  86.0/83.0/83.0 (mean 84.0). It is spent and is no longer a held-out claim.
 - `dataset/seoul_kmapeval_v7h2_holdout_100.jsonl`: seed 481203. Spent — `src/` changed in response
-  to what it showed. ReAct 45.7, Spatial-Agent 72.3 at `38566f3`, floor 25.5.
+  to what it showed. ReAct 45.7, Spatial-Agent 72.3 at `38566f3`, floor 25.5. Intent-free
+  Spatial-Agent at `af51e93` read 75.0/86.0/85.0 (mean 82.0); this is a level, not a controlled
+  delta against the earlier revision.
 - `dataset/seoul_kmapeval_v7h_holdout_100.jsonl`: the v7 builder under seed 927451, `v7h` ids, one
   question and 30 of 236 place names in common with v7. Held out at `0aabaa9` and measured there
   over three passes against a floor of 29.5 — ReAct 48.0, Spatial-Agent 70.7. **That number is
   now spent**: the run exposed the missing arithmetic operators, `src/` changed to close them,
   and a held-out set stops being held out the moment it is answered against. Rebuild under a new
   seed before quoting a holdout again, and quote 48.0/70.7 only as what the code at `0aabaa9`
-  scored.
+  scored. Intent-free Spatial-Agent at `af51e93` read 84.0/87.0/80.0 (mean 83.7); again this is a
+  robustness level on spent rows, not a controlled delta.
 - `dataset/seoul_kmapeval_v6_mcq_100.jsonl`: v5's families each raised one step (composition or
   ordinality) and the radius family's word order fixed. Built by
   `data/build_mapeval_v6_benchmark.py`. It no longer passes `data/audit_dataset.py` either, on

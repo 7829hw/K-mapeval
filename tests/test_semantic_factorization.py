@@ -379,3 +379,93 @@ def test_a_total_over_a_matrix_is_not_an_extract_from_a_route() -> None:
 
     assert built.graph[2]["operator"] == "sum_route_metrics"
     assert built.graph[2]["arguments"] == {"routes": "$m"}
+
+
+# ---------------------------------------------------------------------------------------------
+# Semantic skeletons carry the question-shape knowledge.
+#
+# Deleting the 163-line planner prompt deleted operator documentation *and* graph-shape guidance
+# together, and only the first was redundant. The second cost 31 points: a
+# "네 번째로 가까운 은행" question retrieved `Geocode-Batch-Compare` -- pattern "resolve the
+# anchor and the candidates, then rank them" -- as its only guidance and copied it, ranking the
+# four answer texts. `SKELETONS` is that knowledge as transformation structure.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_nothing_the_planner_is_shown_names_an_operator() -> None:
+    """0% concrete operator leakage, over the prompt, the patterns and the skeletons.
+
+    `nearest` and `difference` are ordinary English words that happen to collide with operator
+    names; they appear only in prose and in a factor value. The names that could only be an
+    instruction to call a tool are the compound ones, and none of those appears at all.
+    """
+
+    import json
+    import re
+
+    from src.agent.geoflow import SKELETONS, TEMPLATES
+    from src.agent.semantics import transform_catalogue
+    from src.agent.spatial import GRAPH_PROMPT
+
+    shown = (
+        GRAPH_PROMPT.replace("{transform_catalogue}", transform_catalogue())
+        + json.dumps([t["pattern"] for t in TEMPLATES.values()], ensure_ascii=False)
+        + json.dumps(SKELETONS, ensure_ascii=False)
+    )
+
+    assert not [name for name in OPERATOR_CONTRACTS if "_" in name and name in shown]
+    assert not re.search(r"\b(?:MT1|CS2|PS3|SC4|AC5|PK6|OL7|SW8|BK9|FD6|CE7|HP8|PM9)\b", shown)
+    assert not [node["id"] for sk in SKELETONS.values() for node in sk if "operator" in node]
+    # Every skeleton node names a transformation from the vocabulary and nothing else.
+    for skeleton in SKELETONS.values():
+        for node in skeleton:
+            assert node["transform"] in TRANSFORMS
+
+
+def test_the_ordinal_skeleton_searches_rather_than_ranking_the_answers() -> None:
+    """The shape the 31 points were lost to, stated as a skeleton.
+
+    Only the anchor is resolved. The candidate texts are answers: `nearby_kth_nearest` draws its
+    gold as rank k of the whole neighbourhood and its decoys from ranks 1 to 6, so a graph that
+    resolves the four options and ranks them is answering "which of these four is closest".
+    """
+
+    from src.agent.geoflow import SKELETONS
+
+    shape = [node["transform"] for node in SKELETONS["search_rank_ordinal"]]
+    assert shape == [
+        "RESOLVE_PLACES",
+        "PLACE_SEARCH",
+        "DISTANCE_MEASURE",
+        "ORDINAL_SELECT",
+        "MATCH_OPTIONS",
+    ]
+    # One RESOLVE_PLACES, and it is the anchor.
+    assert sum(t == "RESOLVE_PLACES" for t in shape) == 1
+    # k is a factor on the selection, which is the whole difference from the superlative.
+    ordinal = next(
+        node
+        for node in SKELETONS["search_rank_ordinal"]
+        if node["transform"] == "ORDINAL_SELECT"
+    )
+    assert "ordinal" in ordinal["factors"]
+
+
+def test_a_stated_radius_reaches_the_filter_that_applies_it() -> None:
+    """`within_radius` never received its radius, because no planner had ever written one.
+
+    Grounding bound `radius_m` onto the retrieval and onto option recovery only. The semantic
+    layer composes FILTER over a stated radius, so a radius question now produces a filter node
+    on every one -- and it was being validated as missing its only argument.
+    `nearby_within_radius_count` read 8.3%.
+    """
+
+    from src.agent.geoflow import SKELETONS
+    from src.agent.spatial import GroundingFacts, _ground_graph_literals
+
+    facts = GroundingFacts(anchor="기준점", target_type="약국", radius_m=600)
+    built = _build(SKELETONS["radius"], options=["가", "나"], facts=facts)
+    grounded = _ground_graph_literals(built.graph, "질문", ["가", "나"], facts)
+
+    filtering = next(step for step in grounded if step["operator"] == "within_radius")
+    assert filtering["arguments"]["radius_m"] == 600

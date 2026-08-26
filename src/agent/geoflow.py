@@ -658,8 +658,14 @@ TEMPLATES = {
     "geocode_compare": {
         "name": "Geocode-Batch-Compare",
         "affinity": {"nearest", "closest", "distance", "proximity", "comparison"},
-        "keywords": ("가까운", "거리", "짧은", "nearest", "distance"),
-        "pattern": "RESOLVE_PLACES (anchor and candidates) -> SORT -> MATCH_OPTIONS",
+        "keywords": ("가까운", "거리", "짧은", "먼", "멀리", "nearest", "farthest", "distance"),
+        # Narrowed deliberately. It used to read "anchor and candidates", which a question asking
+        # for a *kind* of place copied -- resolving the four answer texts and ranking those.
+        "pattern": (
+            "RESOLVE_PLACES (every place the question names) -> DISTANCE_MEASURE -> "
+            "EXTREME_SELECT -> MATCH_OPTIONS; for questions whose candidates are themselves the "
+            "places being measured, never for one that asks for a kind of place"
+        ),
         "example": {
             "graph": [
                 {
@@ -694,9 +700,37 @@ TEMPLATES = {
     # for these two families composed a graph and 4 of them retrieved anything, because
     # `Geocode-Batch-Compare` outranked everything else on "가까운" and its example does exactly
     # what the planner then did.
+    "search_rank_ordinal": {
+        "name": "Search-Rank-Ordinal",
+        # A shape, not a task type. What made the deleted `Retrieve-Rank-Ordinal` a benchmark
+        # family wearing a template's clothes was that it carried its own operator recipe and was
+        # retrieved on "번째"; this carries a transformation structure, the factorizer still picks
+        # every operator, and `k` is a factor. Without it a "네 번째로 가까운 은행" question
+        # retrieves `Geocode-Batch-Compare` and ranks the four answer texts.
+        "affinity": {"nearest", "closest", "ordinal", "rank", "proximity", "kind"},
+        "keywords": ("가까운", "번째", "인접한", "nearest", "closest"),
+        "target_literal": True,
+        "supersedes": ("geocode_compare",),
+        "pattern": (
+            "RESOLVE_PLACES (the anchor only) -> PLACE_SEARCH (the kind asked for) -> "
+            "DISTANCE_MEASURE -> ORDINAL_SELECT (ordinal=k) -> MATCH_OPTIONS"
+        ),
+        "example": {"graph": []},
+    },
+    "distance_difference": {
+        "name": "Pairwise-Difference",
+        "affinity": {"difference", "comparison", "distance", "gap"},
+        "keywords": ("차이", "차이가", "difference"),
+        "pattern": (
+            "RESOLVE_PLACES -> DISTANCE_MEASURE x2 -> AGGREGATE (aggregate=difference) -> "
+            "MATCH_OPTIONS"
+        ),
+        "example": {"graph": []},
+    },
     "radius": {
         "name": "Filter-Aggregate-Measure",
         "affinity": {"radius", "within", "count"},
+        "radius_literal": True,
         "keywords": ("반경", "이내", "within", "radius"),
         "pattern": (
             "RESOLVE_PLACES -> PLACE_SEARCH -> FILTER (the stated radius) -> AGGREGATE -> MEASURE"
@@ -910,6 +944,152 @@ TEMPLATES = {
 }
 
 
+# ---------------------------------------------------------------------------------------------
+# Semantic skeletons
+#
+# What shape of graph a question needs is not operator knowledge and does not belong in the
+# factorizer, but it is knowledge, and deleting the 163-line planner prompt threw it away: the
+# semantic rewrite scored 50.9% against 82.1%, and the single clearest cause was that a
+# "네 번째로 가까운 은행" question retrieved `Geocode-Batch-Compare` -- whose pattern reads
+# "resolve the anchor and the candidates, then rank them" -- and copied it. That answers "which
+# of these four is closest", which is a different question with a different answer.
+#
+# These are that knowledge, rewritten as transformation structure. They name no operator, no
+# argument and no provider category; the factorizer still decides all three. Each is one worked
+# composition with the factors that make it the shape it is.
+# ---------------------------------------------------------------------------------------------
+
+SKELETONS: dict[str, list[dict[str, Any]]] = {
+    # A kind of place around one anchor, ranked, and the k-th taken. `ordinal` is the whole
+    # difference between "가장 가까운" (1) and "네 번째로 가까운" (4) -- one factor, not a family.
+    # Only the anchor is resolved: the candidate texts are answers, and resolving them makes the
+    # ranking a ranking of the answers.
+    "search_rank_ordinal": [
+        {"id": "anchor", "transform": "RESOLVE_PLACES", "inputs": [],
+         "concept_ids": ["<the anchor concept>"], "role": "extent"},
+        {"id": "found", "transform": "PLACE_SEARCH", "inputs": ["anchor"], "role": "support"},
+        {"id": "ranked", "transform": "DISTANCE_MEASURE", "inputs": ["anchor", "found"],
+         "role": "support"},
+        {"id": "kth", "transform": "ORDINAL_SELECT", "inputs": ["ranked"],
+         "factors": {"ordinal": 4}, "role": "support"},
+        {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["kth"], "role": "measure"},
+    ],
+    # A count or a set inside a stated radius. The radius is a fact the analysis extracted; the
+    # skeleton only says where it applies.
+    "radius": [
+        {"id": "anchor", "transform": "RESOLVE_PLACES", "inputs": [],
+         "concept_ids": ["<the anchor concept>"], "role": "extent"},
+        {"id": "found", "transform": "PLACE_SEARCH", "inputs": ["anchor"], "role": "support"},
+        {"id": "inside", "transform": "FILTER", "inputs": ["anchor", "found"],
+         "role": "support"},
+        {"id": "count", "transform": "AGGREGATE", "inputs": ["inside"],
+         "factors": {"aggregate": "sum"}, "role": "support"},
+        {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["count"], "role": "measure"},
+    ],
+    # A compass sector narrows the candidates before the ranking does. Filtering after the rank
+    # answers with whichever place was nearest regardless of where it lies.
+    "bearing": [
+        {"id": "anchor", "transform": "RESOLVE_PLACES", "inputs": [],
+         "concept_ids": ["<the anchor concept>"], "role": "extent"},
+        {"id": "found", "transform": "PLACE_SEARCH", "inputs": ["anchor"], "role": "support"},
+        {"id": "sector", "transform": "FILTER", "inputs": ["anchor", "found"],
+         "role": "support"},
+        {"id": "ranked", "transform": "DISTANCE_MEASURE", "inputs": ["anchor", "sector"],
+         "role": "support"},
+        {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["ranked"], "role": "measure"},
+    ],
+    # Places the question itself names, compared against each other. This is the shape for
+    # "which pair is farthest", "which of A and B is nearer to C" -- questions whose candidates
+    # *are* the things being measured. It is not the shape for a question that asks for a kind.
+    "geocode_compare": [
+        {"id": "places", "transform": "RESOLVE_PLACES", "inputs": [],
+         "concept_ids": ["<every place the question names>"], "role": "extent"},
+        {"id": "spans", "transform": "DISTANCE_MEASURE", "inputs": ["places"], "role": "support"},
+        {"id": "pick", "transform": "EXTREME_SELECT", "inputs": ["spans"],
+         "factors": {"extreme": "max"}, "role": "support"},
+        {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["pick"], "role": "measure"},
+    ],
+    # Two separations and the gap between them: three places, two measures, one difference.
+    "distance_difference": [
+        {"id": "places", "transform": "RESOLVE_PLACES", "inputs": [],
+         "concept_ids": ["<the anchor and both destinations>"], "role": "extent"},
+        {"id": "first", "transform": "DISTANCE_MEASURE", "inputs": ["places"], "role": "support"},
+        {"id": "second", "transform": "DISTANCE_MEASURE", "inputs": ["places"],
+         "role": "support"},
+        {"id": "gap", "transform": "AGGREGATE", "inputs": ["first", "second"],
+         "factors": {"aggregate": "difference"}, "role": "support"},
+        {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["gap"], "role": "measure"},
+    ],
+    # One road route and something read off its guidance: a turn count, the n-th turn, the road
+    # a turn happens on. A via-point is part of the route, not a second route.
+    "route_step_extract": [
+        {"id": "ends", "transform": "RESOLVE_PLACES", "inputs": [],
+         "concept_ids": ["<origin, any via point, destination>"], "role": "extent"},
+        {"id": "route", "transform": "ROUTE_MEASURE", "inputs": ["ends"], "role": "support"},
+        {"id": "steps", "transform": "ROUTE_STEPS", "inputs": ["route"], "role": "support"},
+        {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["steps"], "role": "measure"},
+    ],
+    # Road routes compared against each other -- which detour is cheapest, which option lies on
+    # the way. Every candidate route is measured before any of them is chosen.
+    "routes": [
+        {"id": "places", "transform": "RESOLVE_PLACES", "inputs": [],
+         "concept_ids": ["<the endpoints and every candidate>"], "role": "extent"},
+        {"id": "legs", "transform": "ROUTE_MATRIX", "inputs": ["places"], "role": "support"},
+        {"id": "pick", "transform": "ROUTE_COMPARE", "inputs": ["legs"], "role": "support"},
+        {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["pick"], "role": "measure"},
+    ],
+    # The whole distance or duration of an itinerary the question already orders. Every leg is
+    # looked up in one matrix and totalled; the measure the question names decides the unit.
+    "trip": [
+        {"id": "stops", "transform": "RESOLVE_PLACES", "inputs": [],
+         "concept_ids": ["<the start and every stop, in the order stated>"], "role": "extent"},
+        {"id": "legs", "transform": "ROUTE_MATRIX", "inputs": ["stops"], "role": "support"},
+        {"id": "total", "transform": "AGGREGATE", "inputs": ["legs"],
+         "factors": {"aggregate": "sum", "scope": "groups", "measure": "distance"},
+         "role": "support"},
+        {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["total"], "role": "measure"},
+    ],
+    # An itinerary the question does *not* order: which sequence is shortest, or how many stops
+    # fit the time. The stays, the budget, the closure and the stated order are facts the
+    # analysis extracted and the factorizer binds -- the skeleton only asks for the ordering.
+    "route_optimize": [
+        {"id": "stops", "transform": "RESOLVE_PLACES", "inputs": [],
+         "concept_ids": ["<the start and every stop>"], "role": "extent"},
+        {"id": "legs", "transform": "ROUTE_MATRIX", "inputs": ["stops"], "role": "support"},
+        {"id": "tour", "transform": "ROUTE_OPTIMIZE", "inputs": ["stops", "legs"],
+         "factors": {"measure": "distance"}, "role": "support"},
+        {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["tour"], "role": "measure"},
+    ],
+    # When a clock is involved: how long the drive takes, then what time that makes it.
+    "time_window_reverse": [
+        {"id": "ends", "transform": "RESOLVE_PLACES", "inputs": [],
+         "concept_ids": ["<origin and destination>"], "role": "extent"},
+        {"id": "drive", "transform": "ROUTE_MEASURE", "inputs": ["ends"],
+         "factors": {"measure": "duration"}, "role": "support"},
+        {"id": "clock", "transform": "SCHEDULE", "inputs": ["drive"], "role": "support"},
+        {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["clock"], "role": "measure"},
+    ],
+    # A property of one named place, read off the record rather than computed.
+    "place_attribute": [
+        {"id": "place", "transform": "RESOLVE_PLACES", "inputs": [],
+         "concept_ids": ["<the named place>"], "role": "extent"},
+        {"id": "detail", "transform": "PLACE_DETAILS", "inputs": ["place"], "role": "support"},
+        {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["detail"], "role": "measure"},
+    ],
+    # A share or a count over a neighbourhood.
+    "object_field_measure": [
+        {"id": "anchor", "transform": "RESOLVE_PLACES", "inputs": [],
+         "concept_ids": ["<the anchor concept>"], "role": "extent"},
+        {"id": "found", "transform": "PLACE_SEARCH", "inputs": ["anchor"], "role": "support"},
+        {"id": "matching", "transform": "FILTER", "inputs": ["anchor", "found"],
+         "role": "support"},
+        {"id": "share", "transform": "AGGREGATE", "inputs": ["matching", "found"],
+         "factors": {"aggregate": "proportion"}, "role": "support"},
+        {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["share"], "role": "measure"},
+    ],
+}
+
+
 def retrieve_templates(
     analysis: dict[str, Any], question: str, *, limit: int = 2
 ) -> list[dict[str, Any]]:
@@ -920,6 +1100,17 @@ def retrieve_templates(
     constraints, attributes, or target object, not because a classifier put the question in one
     bucket. Question keywords remain the exact-literal fallback for a graph that omitted a hint.
     """
+
+    return [
+        {"name": template["name"], "pattern": template["pattern"]}
+        for _key, template in _rank_templates(analysis, question, limit=limit)
+    ]
+
+
+def _rank_templates(
+    analysis: dict[str, Any], question: str, *, limit: int
+) -> list[tuple[str, dict[str, Any]]]:
+    """Score every template on concept/role structure, then on the question's literal wording."""
 
     lowered = question.casefold()
     concept_hints = _analysis_retrieval_hints(analysis)
@@ -933,17 +1124,20 @@ def retrieve_templates(
         if score:
             ranked.append((score, key, template))
     ranked.sort(key=lambda item: (-item[0], item[1]))
-    chosen: list[dict[str, Any]] = []
+    chosen: list[tuple[str, dict[str, Any]]] = []
     blocked: set[str] = set()
     for _, key, template in ranked:
         if key in blocked:
             continue
-        chosen.append(template)
+        chosen.append((key, template))
         # Only a template that already outranked it can supersede one, since `ranked` is sorted.
+        # `Search-Rank-Ordinal` supersedes `Geocode-Batch-Compare` for exactly the reason the
+        # measurement gave: they are rival shapes for one question, and the loser's worked
+        # example is the wrong answer sitting beside the right one.
         blocked |= set(template.get("supersedes", ()))
         if len(chosen) >= limit:
             break
-    return [{"name": template["name"], "pattern": template["pattern"]} for template in chosen]
+    return chosen
 
 
 #: Turn texts into vectors. Supplied by the caller so the retrieval policy is a configuration
@@ -973,23 +1167,18 @@ def retrieve_examples(
     concept overlap as before, so behaviour is unchanged where no embedding service exists.
     """
 
-    bank = _example_bank()
     if embed is not None:
-        ranked = _embedding_ranking(bank, question, embed)
-    else:
-        hints = _analysis_retrieval_hints(analysis)
-        lowered = question.casefold()
-        ranked = sorted(
-            bank,
-            key=lambda entry: (
-                -(
-                    4 * sum(1 for hint in entry["affinity"] if hint.casefold() in hints)
-                    + sum(1 for word in entry["keywords"] if word.casefold() in lowered)
-                ),
-                entry["name"],
-            ),
-        )
-    return [{"name": entry["name"], "example": entry["example"]} for entry in ranked[:limit]]
+        ranked = _embedding_ranking(_example_bank(), question, embed)
+        return [{"name": e["name"], "example": e["example"]} for e in ranked[:limit]]
+    # Structural retrieval, and the *same* structural retrieval the templates got. Ranking the
+    # two independently let them disagree -- a trip question was shown `Route-Optimize`'s pattern
+    # beside `Geocode-Batch-Compare`'s worked graph, and a planner copies the graph.
+    bank = {entry["key"]: entry for entry in _example_bank()}
+    return [
+        {"name": bank[key]["name"], "example": bank[key]["example"]}
+        for key, _template in _rank_templates(analysis, question, limit=limit)
+        if key in bank
+    ]
 
 
 def _example_bank() -> list[dict[str, Any]]:
@@ -1002,15 +1191,20 @@ def _example_bank() -> list[dict[str, Any]]:
 
     return [
         {
+            "key": key,
             "name": template["name"],
-            # Stored as the operator graph they produce -- which is what makes the round-trip
-            # test possible -- and shown to the planner in the vocabulary it answers in.
-            "example": {"graph": lift_to_semantic(template["example"]["graph"])},
+            # The authored skeleton when there is one -- that is where the question-shape
+            # knowledge lives. Otherwise the worked operator graph lifted into the vocabulary,
+            # which is also what makes the round-trip test possible.
+            "example": {
+                "graph": SKELETONS.get(key)
+                or lift_to_semantic(template["example"]["graph"])
+            },
             "pattern": template["pattern"],
             "affinity": tuple(template.get("affinity", ())),
             "keywords": tuple(template.get("keywords", ())),
         }
-        for template in TEMPLATES.values()
+        for key, template in TEMPLATES.items()
     ]
 
 
@@ -1081,10 +1275,28 @@ def _template_shape_score(
         and spatial_count >= 3
         and re.search(
             r"(→.*→|(?:\d+(?:\.\d+)?\s*(?:시간|분)).*(?:\d+(?:\.\d+)?\s*(?:시간|분))"
-            r"|방문\s*순서|몇\s*곳|일정|차례|순서로|itinerary|trip)",
+            r"|방문\s*순서|몇\s*곳|일정|차례|순서로|순서대로|둘러|itinerary|trip)",
             lowered_question,
         )
     ):
+        score += 16
+    if template.get("target_literal") and (
+        analysis.get("target_type")
+        or any(
+            concept.get("concept_type") == "object" and concept.get("role") != "measure"
+            for concept in concepts
+        )
+    ):
+        # The question asks for a *kind* of place, which is what separates "the nearest bank"
+        # from "which of these two is nearer". Structural: it reads the concept graph, not the
+        # question's wording, and `target_type` is what the Analysis stage is for.
+        score += 16
+    if template.get("radius_literal") and re.search(
+        r"(반경|이내|안에|내에)\s*|[\d,.]+\s*(?:km|m)\s*(?:이내|안|이하)", lowered_question
+    ):
+        # A stated radius is a sub-condition, and it decides the shape: the candidates are
+        # everything inside it, not the k nearest. Without this a radius question asking for a
+        # kind of place retrieved the ordinal shape, which ranks instead of counting.
         score += 16
     if template.get("network_literal") and re.search(
         r"(자동차|차량|운전|주행|도로|경로|route|driv)", lowered_question

@@ -9,6 +9,7 @@ from src.agent import ReactAgent, SpatialAgent
 from src.agent.geoflow import (
     CORE_CONCEPTS,
     OPERATOR_CONTRACTS,
+    SKELETONS,
     TEMPLATES,
     build_concept_graph,
     factorize_geoflow,
@@ -1216,11 +1217,26 @@ def test_template_catalog_covers_appendix_e_macro_families() -> None:
     # planner as a worked example, so adding one changes what every question of that shape gets
     # composed from -- keep the catalogue at Appendix E's ten unless there is a reason recorded
     # in docs/REFERENCE_MAPPING.md.
-    assert names == appendix_e
+    # Two additions, both recorded in docs/REFERENCE_MAPPING.md. They are *shapes*, not task
+    # types: neither carries an operator recipe, the factorizer still picks every operator, and
+    # `Search-Rank-Ordinal`'s k is a factor. They exist because deleting the 163-line planner
+    # prompt deleted the question-shape knowledge with it and cost 31 points -- a
+    # "네 번째로 가까운 은행" question retrieved `Geocode-Batch-Compare`, whose pattern says to
+    # resolve the candidates and rank them, and copied it.
+    assert names - appendix_e == {"Search-Rank-Ordinal", "Pairwise-Difference"}
+    assert appendix_e <= names
 
 
-@pytest.mark.parametrize("template_key", sorted(TEMPLATES))
+@pytest.mark.parametrize(
+    "template_key", sorted(key for key in TEMPLATES if TEMPLATES[key]["example"]["graph"])
+)
 def test_each_appendix_e_template_is_executable(template_key: str) -> None:
+    """The worked operator graphs, for the templates that still carry one.
+
+    `Search-Rank-Ordinal` and `Pairwise-Difference` carry only a skeleton -- they were written in
+    the semantic vocabulary and never had a concrete example. The test below validates those.
+    """
+
     provider_tools = ToolRegistry(FakeProvider())
     operators = SpatialOperatorRegistry()
     provider_names = {
@@ -1240,6 +1256,37 @@ def test_each_appendix_e_template_is_executable(template_key: str) -> None:
             results[step["id"]] = operators.invoke(step["operator"], arguments)
     assert constraints["connectivity"] is True
     assert results[ordered[-1]["id"]] is not None
+
+
+@pytest.mark.parametrize("template_key", sorted(SKELETONS))
+def test_every_skeleton_the_planner_is_shown_factorizes_and_validates(template_key: str) -> None:
+    """A skeleton is what a planner copies, so one that cannot be built teaches a broken shape.
+
+    Run in the pipeline's own order -- factorize, ground, validate -- with the facts a question
+    of that shape supplies. The placeholders in `concept_ids` are prose for the planner to
+    replace; the name fallback chain covers them here.
+    """
+
+    from src.agent.semantics import factorize_semantic_graph
+    from src.agent.spatial import GroundingFacts, _ground_graph_literals
+
+    facts = GroundingFacts(anchor="기준점", target_type="약국", radius_m=600)
+    options = ["가", "나", "다", "라"]
+    built = factorize_semantic_graph(
+        SKELETONS[template_key],
+        concepts=[],
+        options=options,
+        facts=facts,
+        available=frozenset(OPERATOR_CONTRACTS),
+    )
+    assert built.concrete_nodes == (), "a skeleton must name no operator"
+
+    grounded = _ground_graph_literals(built.graph, "질문", options, facts)
+    ordered, constraints = normalize_and_validate_graph(
+        {"graph": grounded}, max_steps=20, strict_types=False
+    )
+    assert constraints["connectivity"] is True
+    assert ordered[-1]["role"] == "measure"
 
 
 def test_concept_edges_are_not_inferred_from_role_levels() -> None:

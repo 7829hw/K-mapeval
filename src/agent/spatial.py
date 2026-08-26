@@ -1611,6 +1611,14 @@ def _ground_graph_literals(
                 arguments["direction"] = facts.direction
             grounded.append({**step, "arguments": arguments})
             continue
+        if operator == "within_radius" and radius_m is not None:
+            # The radius is the whole content of this filter, and it is a question literal like
+            # any other. Grounding bound it onto the retrieval and onto option recovery but never
+            # onto the filter itself, because no planner had written one -- the semantic layer
+            # composes FILTER over a stated radius, so now one exists on every radius question.
+            arguments["radius_m"] = radius_m
+            grounded.append({**step, "arguments": arguments})
+            continue
         if operator == "recover_option_places":
             # Recovery has to look for the same kind of place the retrieval did, or an option is
             # satisfied by any namesake: "목동" in a station question matched 교보문고 목동점.

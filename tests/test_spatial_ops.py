@@ -3374,22 +3374,47 @@ def test_template_retrieval_ignores_whichever_intent_the_analysis_guessed() -> N
     assert selections[0] == selections[1]
 
 
-def test_nothing_supersedes_geocode_batch_compare_any_more() -> None:
-    """Suppression existed to keep the ordinal template's rival out of the prompt beside it.
+def test_the_ordinal_shape_suppresses_the_shape_it_competes_with() -> None:
+    """Suppression is back, and the measurement is why.
 
-    27 of the 40 plans offered the ordinal template still built `Geocode-Batch-Compare`'s shape,
-    because the planner copied whichever worked example it recognised. With the ordinal expressed
-    as a factor there is no rival shape to suppress: both questions retrieve the same template
-    and differ by one number.
+    It was removed on the argument that expressing the ordinal as a factor left no rival shape to
+    suppress. That was wrong. `Geocode-Batch-Compare`'s pattern says to resolve the anchor *and
+    the candidates* and rank them, and a "네 번째로 가까운 은행" question retrieved it as its only
+    guidance and copied it -- ranking the four answer texts, which answers a different question.
+    `nearby_kth_nearest` read 41.7% against 75.0% at `af51e93`.
+
+    They are rival shapes for one question, so the loser's worked graph is the wrong answer
+    sitting beside the right one. Suppression only runs downward: a question that is not asking
+    for a kind of place never retrieves the ordinal shape, and `Geocode-Batch-Compare` keeps its
+    place.
     """
 
-    from src.agent.geoflow import TEMPLATES, retrieve_templates
+    from src.agent.geoflow import retrieve_examples, retrieve_templates
 
-    assert not any(template.get("supersedes") for template in TEMPLATES.values())
+    kind = {
+        "target_type": "은행",
+        "concepts": [{"id": "a", "text": "독바위역", "concept_type": "location", "role": "extent"}],
+    }
+    names = [t["name"] for t in retrieve_templates(kind, "독바위역에서 네 번째로 가까운 은행은?")]
+    assert names[0] == "Search-Rank-Ordinal"
+    assert "Geocode-Batch-Compare" not in names
 
-    for question in ("두 번째로 가까운 편의점은?", "가장 가까운 편의점은?"):
-        names = [t["name"] for t in retrieve_templates({}, question)]
-        assert "Geocode-Batch-Compare" in names
+    named_places = {
+        "concepts": [
+            {"id": "a", "text": "A", "concept_type": "location", "role": "extent"},
+            {"id": "b", "text": "B", "concept_type": "location", "role": "extent"},
+        ]
+    }
+    compare = [t["name"] for t in retrieve_templates(named_places, "A와 B 중 가장 먼 곳은?")]
+    assert compare[0] == "Geocode-Batch-Compare"
+
+    # And the skeleton shown is the skeleton of the template shown. Ranking the two separately
+    # let a trip question see one pattern beside another shape's worked graph.
+    for analysis, question in ((kind, "독바위역에서 네 번째로 가까운 은행은?"),
+                              (named_places, "A와 B 중 가장 먼 곳은?")):
+        assert [t["name"] for t in retrieve_templates(analysis, question)] == [
+            e["name"] for e in retrieve_examples(analysis, question)
+        ]
 
 def test_a_value_check_informs_the_repair_round_and_then_steps_aside() -> None:
     """The lenient pass is the last thing tried, so a one-argument miss must not end the question.

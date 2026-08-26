@@ -111,8 +111,16 @@ def _ground(graph: list[dict[str, Any]], question: str, options: list[str], anal
         )
     # Grounding takes the question's stated factors now, and reading them is part of what a
     # replay has to reproduce -- `extract_facts` is where the intent branches went.
+    # The provider's retrieval vocabulary is part of what the agent grounds with, so a replay
+    # that left it at the canonical default would report a footprint the runtime never has.
+    from src.tools.kakao import retrieval_specs
+
     return spatial._ground_graph_literals(
-        graph, question, options, spatial.extract_facts(analysis, question)
+        graph,
+        question,
+        options,
+        spatial.extract_facts(analysis, question),
+        retrieval_specs=retrieval_specs,
     )
 
 

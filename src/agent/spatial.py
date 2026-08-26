@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Any
@@ -33,6 +34,7 @@ from src.llm import (
 )
 from src.parsing import parse_answer, parse_json_object
 from src.tools import SpatialOperatorRegistry, ToolRegistry
+from src.tools.map import canonical_retrieval_specs
 from src.tools.spatial import (
     parse_coordinate_literal,
     strip_location_qualifier,
@@ -392,6 +394,7 @@ class SpatialAgent(BenchmarkAgent):
                     options,
                     facts,
                     self.max_steps,
+                    retrieval_specs=self.tools.retrieval_specs,
                 )
             except ValueError as graph_error:
                 trace.append(
@@ -437,6 +440,7 @@ class SpatialAgent(BenchmarkAgent):
                         options,
                         facts,
                         self.max_steps,
+                        retrieval_specs=self.tools.retrieval_specs,
                     )
                 except ValueError as repair_error:
                     # Upstream has no type or role check to fail in the first place. The repair
@@ -454,6 +458,7 @@ class SpatialAgent(BenchmarkAgent):
                             options,
                             facts,
                             self.max_steps,
+                            retrieval_specs=self.tools.retrieval_specs,
                             strict_types=False,
                         )
                     except ValueError as repaired_lenient_error:
@@ -474,6 +479,7 @@ class SpatialAgent(BenchmarkAgent):
                                 options,
                                 facts,
                                 self.max_steps,
+                                retrieval_specs=self.tools.retrieval_specs,
                                 strict_types=False,
                             )
                         except ValueError as original_lenient_error:
@@ -683,6 +689,12 @@ class SpatialAgent(BenchmarkAgent):
         )
 
 
+#: How a canonical place type is searched for. The provider answers it -- a category code is
+#: Kakao's vocabulary, not the operator graph's -- and the default keeps this module runnable
+#: with no provider at all, which is what every grounding test and the offline replay use.
+RetrievalSpecs = Callable[[str], list[dict[str, Any]]]
+
+
 def _factorize_validate_plan(
     analysis: dict[str, Any],
     plan: dict[str, Any],
@@ -692,6 +704,7 @@ def _factorize_validate_plan(
     max_steps: int,
     *,
     strict_types: bool = True,
+    retrieval_specs: RetrievalSpecs = canonical_retrieval_specs,
 ):
     raw_steps = plan.get("graph") if plan.get("graph") is not None else plan.get("steps")
     if not isinstance(raw_steps, list):
@@ -701,7 +714,9 @@ def _factorize_validate_plan(
             f"GeoFlow graph has {len(raw_steps)} operators, exceeding "
             f"MAX_REASONING_STEPS={max_steps}"
         )
-    grounded = _ground_graph_literals(raw_steps, question, options, facts)
+    grounded = _ground_graph_literals(
+        raw_steps, question, options, facts, retrieval_specs=retrieval_specs
+    )
     factorized = factorize_geoflow(analysis, {"graph": grounded}, strict_types=strict_types)
     # The planner budget above governs what the planner authored. Retrieval fan-out added
     # during grounding is deterministic and gets its own allowance on top of it.
@@ -1080,13 +1095,17 @@ def _name_key_for_match(value: str) -> str:
 
 
 def _closed_itinerary(
-    itinerary: list[Any], question: str, trip_node_names: list[str]
+    itinerary: list[Any], facts: GroundingFacts, trip_node_names: list[str]
 ) -> list[Any] | None:
-    """The round trip the question states: out from the base, through the stops, back to it."""
+    """The round trip the question states: out from the base, through the stops, back to it.
 
-    base = _trip_origin(question, [_location_name(stop) for stop in itinerary])
+    The base is the departure `extract_facts` already read out of the question; matching it here
+    against the plan's own names is binding, not a second reading of the sentence.
+    """
+
+    base = _match_stated_name(facts.trip_origin, [_location_name(stop) for stop in itinerary])
     if base is None:
-        base = _trip_origin(question, trip_node_names)
+        base = _match_stated_name(facts.trip_origin, trip_node_names)
     if base is None:
         # Without a stated departure place there is nothing to close the loop on; leave the
         # plan's own itinerary alone rather than guess which end is the base.
@@ -1097,18 +1116,21 @@ def _closed_itinerary(
     return closed if closed != itinerary else None
 
 
-def _trip_origin(question: str, names: list[str]) -> str | None:
-    """Which of the plan's own names the question departs from.
+def _match_stated_name(stated: str | None, names: list[str]) -> str | None:
+    """Which of the plan's own names is the one the question stated.
 
-    Matched against the names in hand rather than read out of the sentence: a free-form parse of
-    "오전 10시 00분에 키이토에서 자동차로 출발해" has to decide for itself where the clock ends
-    and the place begins, and the plan already knows what the places are called.
+    Matched rather than re-parsed: the plan already knows what its places are called, and the
+    stated name may carry a particle or a clause the plan's copy dropped.
     """
 
+    if not stated:
+        return None
+    key = _name_key_for_match(stated)
     for name in names:
-        if name and re.search(
-            rf"{re.escape(name)}\s*(?:에서|에)\s*(?:자동차로\s*)?출발", question
-        ):
+        if name and _name_key_for_match(name) == key:
+            return name
+    for name in names:
+        if name and (key in _name_key_for_match(name) or _name_key_for_match(name) in key):
             return name
     return None
 
@@ -1180,6 +1202,43 @@ class GroundingFacts:
     route_priority: str | None = None
     returns_to_start: bool = False
     stated_order: bool = False
+    # The temporal sub-conditions a trip states. `stays` is a tuple of pairs rather than a mapping
+    # so the whole record stays frozen and hashable, which is what lets it be attached to the
+    # concept graph and compared between revisions.
+    stays: tuple[tuple[str, float], ...] = ()
+    time_budget_s: float | None = None
+    trip_destination: str | None = None
+    trip_origin: str | None = None
+    # Which measure the question ranks by. `None` is "the question did not say", not "seconds".
+    route_objective: str | None = None
+
+    def stated_stay(self, name: str) -> float:
+        """The stay stated for exactly this place, or zero when the question states none."""
+
+        key = name.strip()
+        return next((seconds for stated, seconds in self.stays if stated == key), 0.0)
+
+    def stay_for(self, name: str) -> float:
+        """The same, tolerating a node label the plan decorated around the stated name."""
+
+        exact = self.stated_stay(name)
+        if exact:
+            return exact
+        for stated, seconds in self.stays:
+            if stated and (stated in name or name in stated):
+                return seconds
+        return 0.0
+
+    def stated_places(self) -> tuple[str, ...]:
+        """Every place the question names outright, for repairing one a plan copied short."""
+
+        named = (
+            self.anchor,
+            self.trip_destination,
+            *(self.compared_pair or ()),
+            *(name for name, _ in self.stays),
+        )
+        return tuple(name for name in named if name)
 
 
 def extract_facts(analysis: dict[str, Any], question: str) -> GroundingFacts:
@@ -1207,8 +1266,14 @@ def extract_facts(analysis: dict[str, Any], question: str) -> GroundingFacts:
     direction = _extract_requested_direction(question) or _stated_text(
         analysis, "direction", "bearing"
     )
+    stays, budget = _extract_trip_schedule(question)
+    if not stays:
+        stays = _stated_stays(analysis)
+    if budget is None:
+        budget = _stated_seconds(analysis, "time_budget_s", "time_budget")
+    anchor = _extract_anchor(question)
     return GroundingFacts(
-        anchor=_extract_anchor(question),
+        anchor=anchor,
         target_type=_extract_target_type(question) or analysis.get("target_type"),
         radius_m=radius_m,
         direction=direction,
@@ -1216,6 +1281,11 @@ def extract_facts(analysis: dict[str, Any], question: str) -> GroundingFacts:
         route_priority=_extract_route_priority(question),
         returns_to_start=_returns_to_start(question),
         stated_order=_states_visiting_order(question),
+        stays=tuple(stays.items()),
+        time_budget_s=budget,
+        trip_destination=_extract_trip_destination(question),
+        trip_origin=_stated_departure(question, anchor, stays),
+        route_objective="distance" if _asks_for_distance(question) else None,
     )
 
 
@@ -1247,6 +1317,77 @@ def _stated_number(analysis: dict[str, Any], *keys: str) -> int | None:
     return None
 
 
+def _stated_stays(analysis: dict[str, Any]) -> dict[str, float]:
+    """Visit durations the Analysis stage attached to concepts, when the question scan found none.
+
+    Same standing as the radius and the sector recovery below it: the sentence is the record and
+    the scan over it is exact, so this only runs when the scan came back empty. A concept carries
+    its own name in `text`, so the stay is keyed by that.
+    """
+
+    stays: dict[str, float] = {}
+    for concept in analysis.get("concepts") or []:
+        if not isinstance(concept, dict):
+            continue
+        attributes = concept.get("attributes")
+        name = str(concept.get("text") or "").strip()
+        if not isinstance(attributes, dict) or not name:
+            continue
+        for key in ("visit_duration_s", "visit_duration", "stay_duration_s", "stay_duration"):
+            seconds = _seconds_from(attributes.get(key)) if key in attributes else None
+            if seconds is not None:
+                stays[name] = seconds
+                break
+    return stays
+
+
+def _stated_seconds(analysis: dict[str, Any], *keys: str) -> float | None:
+    for attributes in _concept_attributes(analysis):
+        for key in keys:
+            if key in attributes:
+                seconds = _seconds_from(attributes[key])
+                if seconds is not None:
+                    return seconds
+    return None
+
+
+def _seconds_from(value: Any) -> float | None:
+    """A duration an LLM may have written as a number, as "3시간", or as "180분"."""
+
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+    written = _duration_seconds(value.strip())
+    if written is not None:
+        return written
+    try:
+        return float(value.strip())
+    except ValueError:
+        return None
+
+
+# "오전 10시 00분에 키이토에서 자동차로 출발해" — a free parse has to decide for itself where the
+# clock ends and the place begins, so the departure is matched against the places the question has
+# already been read to name rather than segmented out of the sentence a second time.
+_DEPARTS = "(?:에서|에)\\s*(?:자동차로\\s*)?출발"
+
+
+# "오전 10시 00분에 가예에서 출발해" — the anchor splitter keeps the clock, because it splits at
+# the first "에서" and the clock sits in front of it. The place is what is left after it.
+_CLOCK_PREFIX = re.compile(
+    r"^\s*(?:오전|오후|아침|저녁|밤)?\s*\d{1,2}\s*시(?:\s*\d{1,2}\s*분)?\s*에?\s*"
+)
+
+
+def _stated_departure(question: str, anchor: str | None, stays: dict[str, float]) -> str | None:
+    trimmed = _CLOCK_PREFIX.sub("", anchor).strip() if anchor else None
+    for name in (trimmed, anchor, *stays):
+        if name and re.search(rf"{re.escape(name)}\s*{_DEPARTS}", question):
+            return name
+    return None
+
+
 def _stated_text(analysis: dict[str, Any], *keys: str) -> str | None:
     for attributes in _concept_attributes(analysis):
         for key in keys:
@@ -1261,6 +1402,8 @@ def _ground_graph_literals(
     question: str,
     options: list[str],
     facts: GroundingFacts,
+    *,
+    retrieval_specs: RetrievalSpecs = canonical_retrieval_specs,
 ) -> list[dict[str, Any]]:
     """Bind verbatim question literals after drafting, before graph validation.
 
@@ -1273,7 +1416,7 @@ def _ground_graph_literals(
     anchor = facts.anchor
     target = facts.target_type
     radius_m = facts.radius_m
-    specifications = _nearby_retrieval_specs(target) if target else []
+    specifications = list(retrieval_specs(target)) if target else []
     # tsp_tw's service_times are positional, so the stays can only be bound once the node list the
     # plan geocoded is known — it is the place order every downstream index refers to.
     route_priority = facts.route_priority
@@ -1307,17 +1450,7 @@ def _ground_graph_literals(
     # planner that mis-segments a Korean particle -- `백련산꿈마을숲정이를` copied as
     # `백련산꿈마을숲정` -- geocoded nothing, and the loss surfaced three nodes later as
     # `tsp_tw distance_matrix must be square`, which names neither the place nor the problem.
-    trip_stays = _extract_trip_schedule(question)[0]
-    question_places = [
-        name
-        for name in (
-            anchor,
-            _extract_trip_destination(question),
-            *(_extract_compared_places(question) or ()),
-            *trip_stays,
-        )
-        if name
-    ]
+    question_places = list(facts.stated_places())
     indexed_references = _indexed_references_by_root(steps)
     grounded: list[dict[str, Any]] = []
     for step in steps:
@@ -1366,7 +1499,7 @@ def _ground_graph_literals(
         if route_priority and operator in _PRIORITY_OPERATORS:
             arguments["priority"] = route_priority
         if operator == "calculate_start_time":
-            stays, _ = _extract_trip_schedule(question)
+            stays = facts.stays
             # Only when the travel total is computed by another node: a reference to a route sum
             # carries travel and nothing else, so the stays are certainly missing. A literal may
             # already include them, and binding on top of that would count them twice.
@@ -1385,7 +1518,7 @@ def _ground_graph_literals(
                     # would count them twice.
                     arguments.pop("stay_durations_s", None)
                 elif stays:
-                    arguments["stay_durations_s"] = list(stays.values())
+                    arguments["stay_durations_s"] = [seconds for _, seconds in stays]
             grounded.append({**step, "arguments": arguments})
             continue
         if operator == "identity_measure" and not arguments.get("value"):
@@ -1397,7 +1530,7 @@ def _ground_graph_literals(
             grounded.append({**step, "arguments": arguments})
             continue
         if operator == "calculate_finish_time":
-            stays, _ = _extract_trip_schedule(question)
+            stays = facts.stays
             locations = _whole_list_reference(arguments.get("locations"))
             arguments["locations"] = locations
             # One stay per location, in the order the itinerary visits them. The stays are stated
@@ -1423,32 +1556,32 @@ def _ground_graph_literals(
                 itinerary = [_named_stop(item, trip_node_names) for item in locations]
             elif isinstance(locations, str) and len(trip_node_names) > 1:
                 itinerary = list(trip_node_names)
-            if itinerary and _returns_to_start(question):
+            if itinerary and facts.returns_to_start:
                 # "X에서 출발해 …를 둘러본 뒤 X로 돌아옵니다" states both endpoints; only the order
                 # of the stops between them is the plan's business. A plan that drops the return
                 # arrives one drive early, and one that drops the departure loses its first leg
                 # *and* shifts every stay onto the wrong stop — neither fails, both answer an
                 # option away.
-                closed = _closed_itinerary(itinerary, question, trip_node_names)
+                closed = _closed_itinerary(itinerary, facts, trip_node_names)
                 if closed is not None:
                     itinerary = closed
                     arguments["locations"] = closed
             if stays and itinerary:
                 arguments["stay_durations_s"] = [
-                    _stay_stated_for(question, _location_name(item)) for item in itinerary
+                    facts.stated_stay(_location_name(item)) for item in itinerary
                 ]
             grounded.append({**step, "arguments": arguments})
             continue
         if operator == "tsp_tw":
-            stays, budget = _extract_trip_schedule(question)
-            if _asks_for_distance(question):
+            stays, budget = facts.stays, facts.time_budget_s
+            if facts.route_objective == "distance":
                 # "총 주행거리가 가장 짧은 방문 순서" is a question about metres. The tours it
                 # chooses between are ~2% apart, so ranking them by seconds is not an
                 # approximation of ranking them by metres — it is a different answer. The stays
                 # and the budget are decoys in a distance question and the operator refuses them
                 # beside a metre matrix, so they go.
                 arguments["metric"] = "distance"
-                stays, budget = {}, None
+                stays, budget = (), None
                 for key in ("service_times", "time_budget", "time_windows"):
                     arguments.pop(key, None)
             elif stays or budget is not None or arguments.get("time_windows") is not None:
@@ -1460,14 +1593,14 @@ def _ground_graph_literals(
             if budget is not None:
                 arguments["time_budget"] = budget
             names = trip_node_names
-            if _returns_to_start(question):
+            if facts.returns_to_start:
                 arguments["return_to_start"] = True
                 # `return_to_start` is how the operator represents a closed tour. `end_index=0`
                 # is a redundant spelling of the same fact that the runtime deliberately rejects,
                 # while another end contradicts the question. The question literal wins either
                 # way, so no fixed endpoint remains.
                 arguments.pop("end_index", None)
-            if _states_visiting_order(question):
+            if facts.stated_order:
                 # The order is a question literal exactly as the stays and the budget are. Left to
                 # the planner it was set in one graph out of fifty-nine, and the search reordered
                 # an itinerary the question had already ordered.
@@ -1475,7 +1608,7 @@ def _ground_graph_literals(
                 # Under a stated order the sequence names its own last stop, so a fixed end is at
                 # best redundant and at worst contradicts it.
                 arguments.pop("end_index", None)
-            destination = _extract_trip_destination(question)
+            destination = facts.trip_destination
             if (
                 destination
                 and names
@@ -1492,7 +1625,7 @@ def _ground_graph_literals(
             if names and stays:
                 # service_times must line up with the node list, and the start is not a visit.
                 arguments["service_times"] = [
-                    0.0 if index == 0 else _stay_for(stays, name)
+                    0.0 if index == 0 else facts.stay_for(name)
                     for index, name in enumerate(names)
                 ]
             grounded.append({**step, "arguments": arguments})
@@ -1825,64 +1958,6 @@ def _extract_target_type(question: str) -> str | None:
         if found and "".join(found.split()) not in _PLACEHOLDER_TYPES:
             return found
     return None
-
-
-def _nearby_retrieval_specs(target: str) -> list[dict[str, Any]]:
-    """Map a requested Korean place type onto the Kakao searches that actually cover it."""
-
-    compact = "".join(target.split())
-    official = {
-        "대형마트": "MT1",
-        "편의점": "CS2",
-        "어린이집": "PS3",
-        "유치원": "PS3",
-        "학교": "SC4",
-        "학원": "AC5",
-        "주차장": "PK6",
-        "주유소": "OL7",
-        "충전소": "OL7",
-        "역": "SW8",
-        "지하철역": "SW8",
-        "은행": "BK9",
-        "문화시설": "CT1",
-        "부동산": "AG2",
-        "공공기관": "PO3",
-        "관광명소": "AT4",
-        "숙박": "AD5",
-        "음식점": "FD6",
-        "카페": "CE7",
-        "병원": "HP8",
-        "약국": "PM9",
-    }
-    if compact in official:
-        return [{"category_code": official[compact]}]
-    # Korean place types whose Kakao POI names diverge from the requested word. Each family
-    # is generic over the type, never over a question or an option string.
-    expansions = {
-        "패스트푸드점": [{"query": "패스트푸드"}, {"category_code": "FD6"}],
-        "빵집": [{"query": "빵집"}, {"query": "베이커리"}],
-        "슈퍼마켓": [{"query": "슈퍼마켓"}, {"query": "마트"}],
-        "박물관": [{"query": "박물관"}, {"category_code": "CT1"}],
-        "갤러리": [{"query": "갤러리"}, {"category_code": "CT1"}],
-        "경찰서": [
-            {"query": "경찰서"},
-            {"query": "파출소"},
-            {"query": "지구대"},
-            {"query": "치안센터"},
-        ],
-        "도서관": [{"query": "도서관"}, {"query": "문고"}, {"query": "도서실"}],
-        "우체국": [{"query": "우체국"}, {"query": "우편취급국"}],
-        "서점": [{"query": "서점"}, {"query": "책방"}],
-        "화장품매장": [{"query": "화장품"}],
-        "전자제품매장": [{"query": "전자제품"}, {"query": "가전"}],
-        "꽃집": [{"query": "꽃집"}, {"query": "플라워"}],
-        "세탁소": [{"query": "세탁소"}, {"query": "빨래방"}],
-        "정육점": [{"query": "정육점"}, {"query": "축산"}],
-        "문구점": [{"query": "문구"}],
-        "안경점": [{"query": "안경"}],
-        "관광안내소": [{"query": "관광안내소"}, {"query": "관광안내"}],
-    }
-    return expansions.get(compact, [{"query": target}])
 
 
 def _stay_stated_for(question: str, name: str) -> float:

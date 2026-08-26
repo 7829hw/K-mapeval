@@ -1,9 +1,22 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Any
 
 from src.models import Place, Route
 from src.tools.spatial import parse_coordinate_literal
+
+
+def canonical_retrieval_specs(place_type: str) -> list[dict[str, Any]]:
+    """Search a canonical place type by its own name, with no provider vocabulary at all.
+
+    A category code is provider knowledge: `PM9` means 약국 to Kakao and nothing to anyone else.
+    This is what a provider with no category scheme uses, and what the reasoning core falls back
+    to so it can be exercised -- in tests and in the offline grounding replay -- with no provider
+    present.
+    """
+
+    return [{"query": place_type}]
 
 
 class ProviderError(RuntimeError):
@@ -73,6 +86,17 @@ class MapProvider(ABC):
 
     @abstractmethod
     def place_details(self, place_id: str) -> Place: ...
+
+    def retrieval_specs(self, place_type: str) -> list[dict[str, Any]]:
+        """Which searches cover a canonical place type, in this provider's own vocabulary.
+
+        A category code is provider knowledge, not spatial reasoning: `PM9` means 약국 to Kakao
+        and nothing to anyone else, and "빵집 also needs a 베이커리 query" is a fact about one
+        provider's POI names. The default is the canonical type as a plain query, so a provider
+        that has no category scheme needs no ontology of its own.
+        """
+
+        return canonical_retrieval_specs(place_type)
 
     def dereference(self, value: str | Place) -> Place | None:
         """The place this provider already handed out under that reference, or None.

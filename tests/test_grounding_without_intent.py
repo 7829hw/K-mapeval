@@ -17,6 +17,8 @@ state is `None` and its branch does not run.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from src.agent.spatial import (
@@ -215,3 +217,121 @@ def test_a_trip_plan_keeps_its_stays_whatever_the_question_was_labelled() -> Non
     assert tour["metric"] == "distance"
     assert tour["return_to_start"] is True
     assert tour["fixed_order"] is True
+
+
+# ---------------------------------------------------------------------------------------------
+# Grounding binds; it does not read the question a second time.
+#
+# `_ground_graph_literals` used to re-open the question for the stays, the budget, the objective,
+# the closing leg and the stated order -- seven extractors across twelve call sites, all of them
+# after the planner had already drafted a graph. Reinterpreting the question at bind time is the
+# stage doing Concept Analysis' job late and with less context. Every constraint the question
+# states is read once now, by `extract_facts`, and grounding only binds what it was handed.
+# ---------------------------------------------------------------------------------------------
+
+_TRIP = (
+    "오전 10시 00분에 가예에서 자동차로 출발해 가산로데오거리를 1시간, 용양봉저정공원을 "
+    "1.5시간 동안 적힌 순서대로 둘러본 뒤 가예로 돌아옵니다. 총 3시간이 있고 자동차 총 "
+    "주행거리가 가장 짧은 방문 순서는?"
+)
+
+
+def test_a_trips_temporal_constraints_are_read_once_into_the_facts() -> None:
+    facts = extract_facts({}, _TRIP)
+
+    assert facts.stays == (("가산로데오거리", 3600.0), ("용양봉저정공원", 5400.0))
+    assert facts.time_budget_s == 10800.0
+    assert facts.trip_origin == "가예"
+    assert facts.route_objective == "distance"
+    assert facts.returns_to_start is True
+    assert facts.stated_order is True
+
+
+def test_a_stay_is_looked_up_by_name_not_reparsed() -> None:
+    facts = extract_facts({}, _TRIP)
+
+    assert facts.stated_stay("가산로데오거리") == 3600.0
+    assert facts.stay_for("가산로데오거리 앞") == 3600.0
+    assert facts.stated_stay("가예") == 0.0
+    assert facts.stated_stay("어디에도 없는 곳") == 0.0
+
+
+def test_a_question_with_no_schedule_carries_no_schedule() -> None:
+    facts = extract_facts({}, "서울역에서 가장 가까운 약국은 어디인가요?")
+
+    assert facts.stays == ()
+    assert facts.time_budget_s is None
+    assert facts.trip_origin is None
+    assert facts.route_objective is None
+
+
+def test_the_analysis_supplies_a_schedule_only_when_the_scan_found_none() -> None:
+    """Same standing as the radius recovery: the sentence leads, the concept graph fills in."""
+
+    analysis = {
+        "concepts": [
+            {"id": "c1", "text": "한옥마을", "attributes": {"visit_duration_s": 5400}},
+            {"id": "c2", "text": "budget", "attributes": {"time_budget_s": "3시간"}},
+        ]
+    }
+    unparsed = extract_facts(analysis, "한옥마을과 두 곳을 둘러보려 합니다. 몇 곳을 갈 수 있나요?")
+    assert unparsed.stays == (("한옥마을", 5400.0),)
+    assert unparsed.time_budget_s == 10800.0
+
+    # The question states its own schedule, so the concept attributes are not consulted.
+    assert extract_facts(analysis, _TRIP).stays[0] == ("가산로데오거리", 3600.0)
+
+
+def test_the_reasoning_core_names_no_provider_category() -> None:
+    """A category code is Kakao's vocabulary. The core asks its tool surface for one.
+
+    `_nearby_retrieval_specs` used to live in `src/agent/spatial.py` with Kakao's `MT1`/`CS2`
+    table inside it, which made the operator graph unable to be built for any other provider.
+    """
+
+    from src.tools.kakao import retrieval_specs as kakao
+    from src.tools.map import canonical_retrieval_specs
+
+    assert canonical_retrieval_specs("약국") == [{"query": "약국"}]
+    assert kakao("약국") == [{"category_code": "PM9"}]
+    assert kakao("빵집") == [{"query": "빵집"}, {"query": "베이커리"}]
+
+    source = Path(__file__).resolve().parents[1] / "src" / "agent" / "spatial.py"
+    code = [
+        line
+        for line in source.read_text(encoding="utf-8").splitlines()
+        if not line.lstrip().startswith("#")
+    ]
+    # The three that remain are inside GRAPH_PROMPT, which still names them to the planner.
+    assert sum("PM9" in line or "CS2" in line for line in code) <= 3
+
+
+def test_the_provider_decides_the_retrieval_vocabulary() -> None:
+    from src.tools.kakao import retrieval_specs as kakao
+
+    steps = [
+        {
+            "id": "anchor",
+            "operator": "batch_geocode",
+            "arguments": {"place_names": ["기준점"]},
+            "role": "extent",
+        },
+        {
+            "id": "near",
+            "operator": "nearby_places",
+            "arguments": {"center": "$anchor.0.place"},
+            "depends_on": ["anchor"],
+            "role": "support",
+        },
+    ]
+    question = "기준점에서 가장 가까운 약국은 어디인가요?"
+    facts = extract_facts({}, question)
+
+    canonical = _ground_graph_literals(steps, question, ["A", "B"], facts)
+    with_kakao = _ground_graph_literals(
+        steps, question, ["A", "B"], facts, retrieval_specs=kakao
+    )
+
+    assert canonical[1]["arguments"]["query"] == "약국"
+    assert "category_code" not in canonical[1]["arguments"]
+    assert with_kakao[1]["arguments"]["category_code"] == "PM9"

@@ -349,6 +349,9 @@ class KakaoMapProvider(MapProvider):
         self._cache.set_places("nearby_search", cache_args, places)
         return places
 
+    def retrieval_specs(self, place_type: str) -> list[dict[str, Any]]:
+        return retrieval_specs(place_type)
+
     def place_details(self, place_id: str) -> Place:
         place = self._cache.get_place(str(place_id))
         if place is not None:
@@ -587,3 +590,71 @@ def _verify_waypoint_summary(
             raise RouteNotFoundError(f"Waypoint coordinates do not match {requested.name}")
 
 
+# ---------------------------------------------------------------------------------------------
+# Category ontology
+#
+# Which Kakao searches actually cover a canonical Korean place type. This is provider knowledge,
+# not spatial reasoning: `MT1` and `CS2` are Kakao's codes, and 빵집 needing a 베이커리 query too
+# is a fact about Kakao's POI names. It lived in `src/agent/spatial.py` and made the reasoning
+# core import a category table it could not have written for any other provider. The agent asks
+# its tool surface for these now, so a second provider supplies its own and the operator graph is
+# unchanged.
+# ---------------------------------------------------------------------------------------------
+
+def retrieval_specs(place_type: str) -> list[dict[str, Any]]:
+    """Map a canonical Korean place type onto the Kakao searches that actually cover it."""
+
+    target = place_type
+    compact = "".join(target.split())
+    official = {
+        "대형마트": "MT1",
+        "편의점": "CS2",
+        "어린이집": "PS3",
+        "유치원": "PS3",
+        "학교": "SC4",
+        "학원": "AC5",
+        "주차장": "PK6",
+        "주유소": "OL7",
+        "충전소": "OL7",
+        "역": "SW8",
+        "지하철역": "SW8",
+        "은행": "BK9",
+        "문화시설": "CT1",
+        "부동산": "AG2",
+        "공공기관": "PO3",
+        "관광명소": "AT4",
+        "숙박": "AD5",
+        "음식점": "FD6",
+        "카페": "CE7",
+        "병원": "HP8",
+        "약국": "PM9",
+    }
+    if compact in official:
+        return [{"category_code": official[compact]}]
+    # Korean place types whose Kakao POI names diverge from the requested word. Each family
+    # is generic over the type, never over a question or an option string.
+    expansions = {
+        "패스트푸드점": [{"query": "패스트푸드"}, {"category_code": "FD6"}],
+        "빵집": [{"query": "빵집"}, {"query": "베이커리"}],
+        "슈퍼마켓": [{"query": "슈퍼마켓"}, {"query": "마트"}],
+        "박물관": [{"query": "박물관"}, {"category_code": "CT1"}],
+        "갤러리": [{"query": "갤러리"}, {"category_code": "CT1"}],
+        "경찰서": [
+            {"query": "경찰서"},
+            {"query": "파출소"},
+            {"query": "지구대"},
+            {"query": "치안센터"},
+        ],
+        "도서관": [{"query": "도서관"}, {"query": "문고"}, {"query": "도서실"}],
+        "우체국": [{"query": "우체국"}, {"query": "우편취급국"}],
+        "서점": [{"query": "서점"}, {"query": "책방"}],
+        "화장품매장": [{"query": "화장품"}],
+        "전자제품매장": [{"query": "전자제품"}, {"query": "가전"}],
+        "꽃집": [{"query": "꽃집"}, {"query": "플라워"}],
+        "세탁소": [{"query": "세탁소"}, {"query": "빨래방"}],
+        "정육점": [{"query": "정육점"}, {"query": "축산"}],
+        "문구점": [{"query": "문구"}],
+        "안경점": [{"query": "안경"}],
+        "관광안내소": [{"query": "관광안내소"}, {"query": "관광안내"}],
+    }
+    return expansions.get(compact, [{"query": target}])

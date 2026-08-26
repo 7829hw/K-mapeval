@@ -28,6 +28,7 @@ from src.agent.spatial import (
 from src.llm import LLMResponse, LLMToolCall
 from src.models import Place, Route
 from src.tools import MapProvider, SpatialOperatorRegistry, ToolRegistry
+from src.tools.kakao import retrieval_specs as kakao_retrieval_specs
 
 
 class FakeProvider(MapProvider):
@@ -1564,6 +1565,7 @@ def test_radius_literals_are_factors_not_synthetic_output_references() -> None:
         "기준점 반경 500m 안에 있는 카페 목록은 무엇인가요?",
         ["A | B", "A | B | C"],
         extract_facts({}, "기준점 반경 500m 안에 있는 카페 목록은 무엇인가요?"),
+        retrieval_specs=kakao_retrieval_specs,
     )
 
     assert grounded[0]["arguments"]["place_names"] == ["기준점"]
@@ -1603,6 +1605,7 @@ def test_retrieval_grounding_fans_out_over_kakao_place_type_synonyms() -> None:
         "기준점에서 가장 가까운 경찰서 중 어디인가요?",
         ["동묘파출소", "안임지구대"],
         extract_facts({}, "기준점에서 가장 가까운 경찰서 중 어디인가요?"),
+        retrieval_specs=kakao_retrieval_specs,
     )
 
     retrievals = [step for step in grounded if step["operator"] == "nearby_places"]
@@ -2144,6 +2147,7 @@ def test_grounding_gives_option_recovery_the_questions_radius_and_category() -> 
         "교보문고 목동점 반경 500m 안에 있는 역 목록은 무엇인가요?",
         ["오목교", "목동", "까치산", "오목교 | 목동"],
         extract_facts({}, "교보문고 목동점 반경 500m 안에 있는 역 목록은 무엇인가요?"),
+        retrieval_specs=kakao_retrieval_specs,
     )
 
     arguments = grounded[0]["arguments"]

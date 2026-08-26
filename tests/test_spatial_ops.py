@@ -419,6 +419,7 @@ def test_an_inferred_place_type_grounds_the_retrieval() -> None:
     """
 
     from src.agent.spatial import _ground_graph_literals, extract_facts
+    from src.tools.kakao import retrieval_specs as kakao_retrieval_specs
 
     question = (
         "지금 단막극장에 있습니다. 갑자기 비가 쏟아져서 우산을 사야 합니다. 가장 가까운 곳은?"
@@ -454,7 +455,11 @@ def test_an_inferred_place_type_grounds_the_retrieval() -> None:
     )
 
     grounded = _ground_graph_literals(
-        plan, question, ["A", "B"], extract_facts({"target_type": "편의점"}, question)
+        plan,
+        question,
+        ["A", "B"],
+        extract_facts({"target_type": "편의점"}, question),
+        retrieval_specs=kakao_retrieval_specs,
     )
     codes = {
         step["arguments"].get("category_code")

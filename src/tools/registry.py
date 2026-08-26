@@ -11,7 +11,12 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from src.models import Place, Route
-from src.tools.map import MapProvider, PlaceNotFoundError, ProviderError
+from src.tools.map import (
+    MapProvider,
+    PlaceNotFoundError,
+    ProviderError,
+    canonical_retrieval_specs,
+)
 from src.tools.spatial import (
     SpatialOperatorRegistry,
     _cardinal_direction,
@@ -660,6 +665,12 @@ class ToolRegistry:
             raise ValueError(f"contract must be one of {self.REACT_CONTRACTS}, got {contract!r}")
         self.provider = provider
         self.contract = contract
+        #: Retrieval vocabulary for a canonical place type, answered by whichever provider is
+        #: injected. Grounding takes this as a callable so the reasoning core never imports a
+        #: provider module and never names a category code.
+        self.retrieval_specs = getattr(
+            provider, "retrieval_specs", canonical_retrieval_specs
+        )
         self.calls: list[ToolExecution] = []
         self._tools = {
             tool.name: tool

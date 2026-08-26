@@ -125,9 +125,15 @@ Return JSON only:
 {"graph":[{"id":"anchor","transform":"RESOLVE_PLACES","inputs":[],"concept_ids":["anchor"],"role":"extent"},{"id":"found","transform":"PLACE_SEARCH","inputs":["anchor"],"concept_ids":["target"],"role":"support"},{"id":"ranked","transform":"SORT","inputs":["anchor","found"],"role":"support"},{"id":"kth","transform":"ORDINAL_SELECT","inputs":["ranked"],"factors":{"ordinal":2},"role":"support"},{"id":"answer","transform":"MATCH_OPTIONS","inputs":["kth"],"role":"measure"}]}
 
 What the question is about, not what the tools are:
-- The candidate options are answer texts, not a candidate set. Retrieve the kind of place the
-  question asks about and match the options against what you found. Resolving the four options and
-  taking the nearest answers "which of these is closest" instead of the question asked.
+- The candidate options are answer texts, not a candidate set, and the analysis lists them as
+  concepts only so you can see them. Whenever the question asks for a *kind* of place -- a bank,
+  a pharmacy, a cafe, the nearest or k-th nearest of something -- the graph is
+  RESOLVE_PLACES (the anchor only) -> PLACE_SEARCH -> SORT -> ORDINAL_SELECT -> MATCH_OPTIONS.
+  Do not resolve the option texts as the candidates. The gold answer is the k-th of the whole
+  neighbourhood, and the options are a handful of places drawn from various ranks, so a graph
+  that resolves the four options and ranks them answers "which of these four is closest" -- a
+  different question, with a different answer. Resolve the options only when the question names
+  them as the things to compare against each other.
 - When the question describes a *need* rather than naming a kind of place, the analysis has
   already worked out which kind satisfies it. PLACE_SEARCH will use it.
 - A question that ranks by 주행거리/이동거리 is decided in metres and one that ranks by time in

@@ -236,6 +236,14 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   numbers belong to `ba92d9c`. Two draws at this size say overall
   accuracy is stable to ~3 points and *family* accuracy is not — `trip_total_distance` moved
   ReAct 58.7 points between them — so quote family and class numbers only across draws.
+- `dataset/seoul_kmapeval_v7_mcq_300.jsonl` also carries the intent-removal measurement. Three
+  Spatial-Agent passes at `c07b998` read 82.3/84.5/86.6 (mean 84.5) against three at `643fe24`
+  reading 82.0/84.5/85.5 (mean 84.0), same rows, concurrency 32. The +0.5 is inside the spread and
+  is not the claim; the claim is that 293 of those 849 planner graphs ground differently and the
+  score did not move. The check that makes it readable is in the same table: the `trip` class had
+  **zero** changed graphs and moved +4.0, `trip_optimal_order` zero and +9.7. No family whose
+  graphs changed moved further than one whose graphs did not, which is what a family delta is
+  worth on this endpoint. See `docs/REFERENCE_MAPPING.md`.
 - `dataset/seoul_kmapeval_v7_mcq_300.jsonl`: the standard builder asked for 300; it drew 283. The
   largest set here and the one whose numbers carry the least sampling noise — three passes a side
   at `6bae55c` spanned 2.1 points for ReAct and 1.8 for Spatial-Agent, against the ±8 a hundred

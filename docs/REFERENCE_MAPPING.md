@@ -3171,12 +3171,58 @@ largest `poi` family, would have measured one of the two distances it was asked 
 was *already* happening to the 15 of 99 rows the stage happened to label `distance`; a pair is
 refused outright now when the question states more than one separation.
 
-### What is measured and what is not
+### What it scored, and the check the zero-footprint families provide
 
-The A-class step is settled offline. The B/C-class step has a measured *footprint* and no
-measured *accuracy*: 821 graphs execute differently, and whether that is better is a benchmark
-question. Read it beside the fact that every changed slot moved from "nothing bound" toward "the
-literal the question states", and that no anchor was lost.
+Three passes of Spatial-Agent over v7-283 at concurrency 32, against the three that preceded them
+on the same rows at `643fe24`. ReAct is not run: nothing here touches it.
+
+| | A0 `643fe24` | A2 `c07b998` |
+|---|---|---|
+| passes | 82.0 / 84.5 / 85.5 | 82.3 / 84.5 / 86.6 |
+| overall | **84.0** | **84.5** |
+| terminal failures, 3 passes | 3 | 3 |
+| LLM calls | 2,658 | 2,669 |
+| total tokens | 15.29 M | 15.75 M |
+| intermediate execution errors | 240 | 228 |
+
++0.5 overall, inside the per-pass spread. On its own that number says nothing, and the
+interesting part is what happens when the family deltas are put beside the *footprint on those
+same rows* — 293 of the 849 graphs changed, and which ones is known exactly:
+
+| family | graphs changed | accuracy Δ |
+|---|---|---|
+| `trip_optimal_order` | **0 / 72** | **+9.7** |
+| `unanswerable_rating` | 8 / 9 | +22.2 |
+| `unanswerable_price_level` | 3 / 6 | −33.3 |
+| `nearby_kth_nearest` | 71 / 72 | +4.2 |
+| `routing_detour_cost` | 57 / 72 | −4.2 |
+| `nearby_within_radius_count` | **0 / 36** | −2.8 |
+| `routing_nth_turn` | **0 / 63** | +1.6 |
+| `trip_total_distance` | **0 / 63** | +1.6 |
+| `trip_feasible_count_five` | **0 / 63** | 0.0 |
+| `poi_distance_difference` | 56 / 99 | −1.0 |
+| `routing_turn_count_via` | 42 / 63 | −1.6 |
+
+The whole `trip` class is 0 of 198 graphs changed and moved **+4.0 points**, and
+`trip_optimal_order` inside it moved +9.7 on graphs that are byte-identical between the two
+revisions. That is not an effect of this change; it cannot be. It is this endpoint's pass-to-pass
+noise, measured on the same rows in the same run condition — and it sets the scale against which
+every other row of that table has to be read. No family whose graphs *did* change moved further
+than one whose graphs did not.
+
+So the result is a negative one, and it is the one worth having: **grounding stopped consulting
+the intent label on a third of the questions and the score did not move.** The concept-and-role
+decomposition carries what the router was carrying. That is the paper's chapter-3 claim, checked
+rather than assumed — and it is a stronger check than "accuracy held", because the footprint says
+exactly which 293 questions were being asked to hold it.
+
+Two caveats belong with it. The `unanswerable_*` swings are 6- and 9-row families where one
+question is 11 to 17 points, so neither the +22.2 nor the −33.3 is worth a sentence. And these
+three passes carry the `ANALYSIS_PROMPT` change as well as the grounding change; they are
+separate commits and could be separated by another three passes, but nothing in this result
+depends on which of the two moved the 0.5.
+
+### What is measured and what is not
 
 Two things remain unmeasured and are deliberately separate commits. The `ANALYSIS_PROMPT` now
 names `radius_m` and `direction` as typed attributes, because the recovery path had nothing to

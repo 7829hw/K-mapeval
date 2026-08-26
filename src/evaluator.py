@@ -29,6 +29,11 @@ CONTEXT_OVERFLOW_FAILURE = "llm_context_overflow"
 # The loop used its whole step budget without reaching an answer. A miss, the way upstream counts
 # it, but not an unreadable answer and not the map's fault.
 ITERATION_LIMIT_FAILURE = "iteration_limit"
+# Spatial-Agent drafted, repaired and re-validated, and no graph passed the paper's constraints.
+# Nothing executed. Kept apart from `agent_reasoning_failure`, which is this port raising while
+# running one: the first is a result about the architecture, the second is a defect, and pooling
+# them made the pooled count read as the first.
+GRAPH_VALIDATION_FAILURE = "graph_validation_failure"
 # Provider errors that say the API could not answer right now, as opposed to answering that the
 # place does not exist. Only these are worth asking again for; a PlaceNotFoundError is evidence.
 TRANSIENT_PROVIDER_ERRORS = ("ProviderTimeoutError", "ProviderRateLimitError")
@@ -496,6 +501,8 @@ def calculate_statistics(results: list[dict[str, Any]]) -> dict[str, Any]:
             # metadata: a family whose questions need more tool calls than the budget allows is
             # measuring the budget, not the architecture.
             "iteration_limit_count": failure_types[ITERATION_LIMIT_FAILURE],
+            # Questions no valid GeoFlow graph was produced for, after the draft and the repair.
+            "graph_validation_failure_count": failure_types[GRAPH_VALIDATION_FAILURE],
             # A question can still answer after one branch failed.  Keep this beside accuracy so
             # those failures do not disappear merely because the final option happened to match.
             "execution_error_question_count": len(execution_error_rows),
@@ -610,6 +617,13 @@ def print_summary(statistics: dict[str, Any]) -> None:
         print(
             f"Ran out of steps on {stopped} question(s) without answering. Upstream counts these "
             "as misses; check whether the family can be answered within the step budget at all."
+        )
+    unbuildable = performance.get("graph_validation_failure_count") or 0
+    if unbuildable:
+        print(
+            f"No valid GeoFlow graph on {unbuildable} question(s), after the draft and the "
+            "repair. Nothing executed on those: read them as the planner's ceiling, not as a "
+            "wrong answer."
         )
     execution_error_steps = performance.get("execution_error_step_count") or 0
     if execution_error_steps:

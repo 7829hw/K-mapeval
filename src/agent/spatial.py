@@ -492,7 +492,9 @@ class SpatialAgent(BenchmarkAgent):
                                     "error": str(original_lenient_error),
                                 }
                             )
-                            raise
+                            raise GraphValidationError(
+                                str(original_lenient_error)
+                            ) from original_lenient_error
                         trace.append(
                             {
                                 "stage": "validate",
@@ -654,6 +656,11 @@ class SpatialAgent(BenchmarkAgent):
         except LLMContextOverflowError as exc:
             failure_type = "llm_context_overflow"
             failure_message = f"{type(exc).__name__}: {exc}"
+        except GraphValidationError as exc:
+            # Neither the draft nor the repair produced a graph that passes the paper's
+            # constraints. Nothing was executed; say so, rather than filing it beside a crash.
+            failure_type = "graph_validation_failure"
+            failure_message = str(exc)
         except Exception as exc:
             failure_type = "agent_reasoning_failure"
             failure_message = f"{type(exc).__name__}: {exc}"
@@ -687,6 +694,17 @@ class SpatialAgent(BenchmarkAgent):
             failure_message=failure_message,
             trace=trace,
         )
+
+
+class GraphValidationError(RuntimeError):
+    """Every validation attempt was spent and no graph passed.
+
+    Reported as its own failure type rather than as `agent_reasoning_failure`. The distinction is
+    what a report needs to separate "the planner could not draft a valid graph for this question"
+    from "something in this port raised while running one" -- the first is a result about the
+    architecture, the second is a defect. They were pooled, and the pooled count was read as the
+    first.
+    """
 
 
 #: How a canonical place type is searched for. The provider answers it -- a category code is

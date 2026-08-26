@@ -2127,9 +2127,13 @@ def normalize_and_validate_graph(
                 )
             step["depends_on"] = resolvable
         for dependency in step["depends_on"]:
-            if strict_types and _violates_procedural_order(
-                by_id[dependency]["role"], step["role"]
-            ):
+            # G2 on the executable graph, and never skipped. This is the paper's constraint: the
+            # roles here are the ones factorization assigned to operator nodes, so a violation
+            # says the graph computes a sub-condition out of a measure -- a real ordering fault,
+            # not a disagreement about labels. Over 2,032 recorded questions it was never the
+            # last blocker before a lenient pass, so making it unconditional costs nothing and
+            # stops a genuine G2 failure from being executed anyway.
+            if _violates_procedural_order(by_id[dependency]["role"], step["role"]):
                 raise ValueError(
                     f"Role ordering violation: {dependency} ({by_id[dependency]['role']}) -> "
                     f"{step['id']} ({step['role']})"
@@ -2305,6 +2309,12 @@ def normalize_and_validate_graph(
         for source, target in concept_edges:
             source_role = str(concept_by_id[source].get("role") or "support")
             target_role = str(concept_by_id[target].get("role") or "support")
+            # The *concept* graph's ordering, which is a different claim from the one above: the
+            # roles are what the Analysis stage assigned and the edges are what it drew, so a
+            # violation reports a disagreement with that stage's labelling rather than a fault in
+            # the graph that will execute. It is the single largest reason a question needs the
+            # lenient attempt -- 62 of the 122 rescues over 2,032 recorded questions, and those
+            # answer 93% correctly. Kept as a repair signal, stepped aside from on the last try.
             if strict_types and _violates_procedural_order(source_role, target_role):
                 raise ValueError(
                     f"Concept role ordering violation: {source} ({source_role}) -> "

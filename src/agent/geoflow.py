@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import math
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -1017,10 +1019,96 @@ def retrieve_templates(
         blocked |= set(template.get("supersedes", ()))
         if len(chosen) >= limit:
             break
+    return [{"name": template["name"], "pattern": template["pattern"]} for template in chosen]
+
+
+#: Turn texts into vectors. Supplied by the caller so the retrieval policy is a configuration
+#: choice rather than a hard dependency: the deployment these runs use serves one chat model and
+#: answers `/v1/embeddings` with 404, so `None` -- the deterministic scorer below -- is what
+#: actually runs here.
+ExampleEmbedder = Callable[[list[str]], list[list[float]]]
+
+
+def retrieve_examples(
+    analysis: dict[str, Any],
+    question: str,
+    *,
+    limit: int = 2,
+    embed: ExampleEmbedder | None = None,
+) -> list[dict[str, Any]]:
+    """Top-k few-shot example graphs, retrieved separately from the macro-templates.
+
+    The two retrievals answer different questions and had been answering them with one score.
+    *Which macro-template* a question needs is a structural fact -- the concept graph names a
+    measure over a network, or a field restricted by a sub-condition -- and `retrieve_templates`
+    reads it off the concepts and roles. *Which worked example* helps most is a similarity
+    question, and similarity over prose is what an embedding is for.
+
+    `embed` is the seam. With one, examples are ranked by cosine similarity between the question
+    and each example's description. Without one, they are ranked by the same deterministic
+    concept overlap as before, so behaviour is unchanged where no embedding service exists.
+    """
+
+    bank = _example_bank()
+    if embed is not None:
+        ranked = _embedding_ranking(bank, question, embed)
+    else:
+        hints = _analysis_retrieval_hints(analysis)
+        lowered = question.casefold()
+        ranked = sorted(
+            bank,
+            key=lambda entry: (
+                -(
+                    4 * sum(1 for hint in entry["affinity"] if hint.casefold() in hints)
+                    + sum(1 for word in entry["keywords"] if word.casefold() in lowered)
+                ),
+                entry["name"],
+            ),
+        )
+    return [{"name": entry["name"], "example": entry["example"]} for entry in ranked[:limit]]
+
+
+def _example_bank() -> list[dict[str, Any]]:
+    """The examples available for few-shot retrieval.
+
+    Today this is one worked graph per macro-template, which is where they already lived. Keeping
+    the bank behind a function is what lets it grow into recorded successful graphs without the
+    retrieval policy or its callers changing.
+    """
+
     return [
-        {"name": template["name"], "pattern": template["pattern"], "example": template["example"]}
-        for template in chosen
+        {
+            "name": template["name"],
+            "example": template["example"],
+            "pattern": template["pattern"],
+            "affinity": tuple(template.get("affinity", ())),
+            "keywords": tuple(template.get("keywords", ())),
+        }
+        for template in TEMPLATES.values()
     ]
+
+
+def _embedding_ranking(
+    bank: list[dict[str, Any]], question: str, embed: ExampleEmbedder
+) -> list[dict[str, Any]]:
+    """Cosine similarity between the question and each example's own description."""
+
+    descriptions = [f"{entry['name']}: {entry['pattern']}" for entry in bank]
+    vectors = embed([question, *descriptions])
+    if len(vectors) != len(descriptions) + 1:
+        raise ValueError("embedder returned one vector per input, and did not")
+    asked, rest = vectors[0], vectors[1:]
+    scored = sorted(
+        zip(rest, bank, strict=True),
+        key=lambda pair: (-_cosine(asked, pair[0]), pair[1]["name"]),
+    )
+    return [entry for _, entry in scored]
+
+
+def _cosine(left: list[float], right: list[float]) -> float:
+    dot = sum(a * b for a, b in zip(left, right, strict=True))
+    scale = math.sqrt(sum(a * a for a in left)) * math.sqrt(sum(b * b for b in right))
+    return dot / scale if scale else 0.0
 
 
 def _analysis_retrieval_hints(analysis: dict[str, Any]) -> str:

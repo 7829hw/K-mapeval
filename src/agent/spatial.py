@@ -16,12 +16,14 @@ from src.agent.base import (
 )
 from src.agent.geoflow import (
     OPERATOR_CONTRACTS,
+    ExampleEmbedder,
     OperatorContract,
     canonical_reference,
     factorize_geoflow,
     normalize_analysis,
     normalize_and_validate_graph,
     reference_expression,
+    retrieve_examples,
     retrieve_templates,
     split_reference_arithmetic,
 )
@@ -268,26 +270,16 @@ Respect candidate-index to candidate-text mapping. Numbering is 0-based. Return 
 "reason":"brief evidence-based reason"}
 predicted_answer must be copied verbatim from the candidate list, and predicted_option must be the
 0-based index of that same candidate.
-For radius/list questions, compare the resolved in-radius POI names with each option as a set;
-never choose an option merely because it contains more items or looks like a list.
-Treat deterministic best_option fields as evidence, but make the final selection in this generation
-step after checking them against the complete final state and trace.
+Treat deterministic operator output as the primary evidence: the graph was built to compute this
+answer, and its Measure node is where the answer is read from. Fields such as best_option, ranked,
+option_totals and present_option_members are computed, not guessed, so prefer them over anything
+you would otherwise infer -- but make the selection here, after checking them against the complete
+final state and the trace.
 An operator that reports an error contributed no evidence; fall back to the surviving steps rather
 than to the failed step's intended purpose.
-Apply the rule whose question and executed evidence have that shape:
-- For nearest questions, use match_options ranks and distances; exact or fuzzy option-to-POI
-  matches outrank unsupported guesses.
-- When a compass sector is stated, use only direction-filtered candidates, then choose the nearest
-  supported option from match_options.
-- When options are sets separated by '|', compare them with present_option_members and prefer an
-  exact set match.
-- For a stated straight-line distance, use computed Haversine evidence and
-  match_distance_options, never route distance.
-- For a place attribute, use the normalized POI category or other returned attribute directly.
-- For pairwise comparisons, compare the requested metric for every option pair.
-- For road routes, read distance_m and duration_s from executed routes: shortest uses distance_m,
-  fastest uses duration_s, and a named via-route must be isolated first.
-- When options are ordered itineraries, compare option_totals without reordering their stops.
+Read every quantity in the unit the question asks for and the operator reports it in. Do not
+substitute one measure for another -- a road distance is not a straight-line distance, seconds are
+not metres, and an option that lists more items is not thereby a larger set.
 Never return an option outside the supplied candidates."""
 
 # Execution traces are retained in full for auditability, but copying every resolved Place through
@@ -306,9 +298,20 @@ class SpatialAgent(BenchmarkAgent):
 
     agent_type = "spatial_agent"
 
-    def __init__(self, llm: ChatClient, tools: ToolRegistry, *, max_steps: int = 15) -> None:
+    def __init__(
+        self,
+        llm: ChatClient,
+        tools: ToolRegistry,
+        *,
+        max_steps: int = 15,
+        example_embedder: ExampleEmbedder | None = None,
+    ) -> None:
         self.llm = llm
         self.tools = tools
+        #: Optional embedding backend for few-shot example retrieval. `None` uses the
+        #: deterministic concept-overlap scorer, which is what runs here: the deployment these
+        #: benchmarks use serves one chat model and answers `/v1/embeddings` with 404.
+        self.example_embedder = example_embedder
         self.operators = SpatialOperatorRegistry()
         self.max_steps = max_steps
         available = {
@@ -356,11 +359,19 @@ class SpatialAgent(BenchmarkAgent):
             runtime_analysis = analysis
             facts = extract_facts(runtime_analysis, question)
 
+            # Two retrievals, two questions. Which macro-template the concept graph calls for is
+            # structural -- a measure over a network, a field narrowed by a sub-condition -- and
+            # is read off the concepts and roles. Which worked example resembles this question is
+            # a similarity judgement, and that is what an embedding is for.
             templates = retrieve_templates(runtime_analysis, question)
+            examples = retrieve_examples(
+                runtime_analysis, question, embed=self.example_embedder
+            )
             trace.append(
                 {
                     "stage": "retrieve_templates",
                     "templates": [template["name"] for template in templates],
+                    "examples": [example["name"] for example in examples],
                 }
             )
 

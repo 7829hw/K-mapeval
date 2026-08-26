@@ -1099,13 +1099,6 @@ def _name_key_for_match(value: str) -> str:
     return "".join(character for character in value.casefold() if character.isalnum())
 
 
-# "…를 차례로 둘러본 뒤 가예로 돌아옵니다" — the return is a leg the question states, not an
-# optional flourish, and a plan that stops at the last sight computes an arrival one drive short.
-_RETURN_PATTERNS = (
-    r"(?:으로|로)\s*돌아\s*(?:옵니다|온다|와야|가|옵)",
-    r"다시\s*\S+(?:으로|로)\s*(?:돌아|와)",
-)
-
 
 def _closed_itinerary(
     itinerary: list[Any], question: str, trip_node_names: list[str]
@@ -1152,10 +1145,6 @@ def _named_stop(value: Any, trip_node_names: list[str]) -> Any:
     if index is not None and 0 <= index < len(trip_node_names):
         return trip_node_names[index]
     return value
-
-
-def _returns_to_start(question: str) -> bool:
-    return any(re.search(pattern, question) for pattern in _RETURN_PATTERNS)
 
 
 _TOUR_TOTAL_FIELDS = frozenset({"total_cost", ""})
@@ -1783,6 +1772,13 @@ def _asks_for_distance(question: str) -> bool:
 
 # "…둘러본 뒤 다시 제일모텔로 돌아옵니다" closes the tour. The cheapest open path is not the
 # cheapest loop, so whether the drive home counts is a question literal like the stays are.
+# "…를 차례로 둘러본 뒤 가예로 돌아옵니다" — the return is a leg the question states, not an
+# optional flourish, and a plan that stops at the last sight computes an arrival one drive short.
+# There were two definitions of this predicate for a while, this one shadowing a `_RETURN_PATTERNS`
+# tuple defined 600 lines earlier that nothing could reach. They agreed on every question in
+# `dataset/`, so deleting the unreachable one changed no answer — but nothing in the suite said so,
+# which is why the round-trip cases below now pin it. `ruff`'s F811 is on so a second definition is
+# a lint error rather than a silent shadow.
 _RETURNS_TO_START = re.compile(r"(다시\s*\S+(?:으)?로\s*돌아|돌아옵니다|돌아온다|돌아와|출발지로"
                                r"|return(?:ing)?\s+to\s+(?:the\s+)?start)")
 

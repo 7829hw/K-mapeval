@@ -36,3 +36,10 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+# F811 (redefinition of an unused name) is already in "F", and it still did not report
+# `_returns_to_start` being defined twice in `src/agent/spatial.py` -- 600 lines apart, the later
+# one silently winning. The reason is this regex: ruff treats any leading-underscore binding as a
+# dummy and skips F811 for it, and every helper in this codebase is private. Narrowing it to the
+# bare underscore is what actually makes a second definition a lint error. It also governs F841,
+# so an intentionally discarded value has to be named `_` rather than `_something`.
+dummy-variable-rgx = "^_$"

@@ -559,7 +559,7 @@ TEMPLATES = {
         # A share or a count over a neighbourhood is this family too, and a neighbourhood question
         # routes on its radius. Without these the pattern was unreachable for the very questions
         # that need it: "반경 600m 안의 편의점 중 이 브랜드가 몇 퍼센트인가".
-        "intents": {"poi", "type", "radius", "nearby"},
+        "affinity": {"proportion", "percentage", "distribution"},
         "keywords": ("속성", "분포", "비율", "field", "proportion"),
         "pattern": "objects -> event/field restriction -> amount or proportion Measure",
         "example": {
@@ -589,7 +589,7 @@ TEMPLATES = {
     },
     "place_attribute": {
         "name": "Place-Attribute-Query",
-        "intents": {"poi", "type"},
+        "affinity": {"type", "category", "address", "attribute", "information"},
         "keywords": ("유형", "종류", "카테고리", "주소", "정보"),
         "pattern": "place_search(name) -> inspect normalized place attribute -> Measure",
         "example": {
@@ -621,7 +621,7 @@ TEMPLATES = {
     },
     "bearing": {
         "name": "Location-Bearing-Classify",
-        "intents": {"poi", "direction"},
+        "affinity": {"direction", "bearing", "sector"},
         "keywords": ("방향", "동쪽", "서쪽", "남쪽", "북쪽"),
         "pattern": "batch_geocode(locations) -> bearing/filter direction -> Measure",
         "example": {
@@ -654,7 +654,7 @@ TEMPLATES = {
     },
     "geocode_compare": {
         "name": "Geocode-Batch-Compare",
-        "intents": {"nearby", "poi", "distance", "direction"},
+        "affinity": {"nearest", "closest", "distance", "proximity", "comparison"},
         "keywords": ("가까운", "거리", "짧은", "nearest", "distance"),
         "pattern": "batch_geocode(anchor and candidates) -> deterministic distance comparison",
         "example": {
@@ -697,7 +697,7 @@ TEMPLATES = {
         # the rest of the time, and the fourteen it called `poi` were offered
         # `Geocode-Batch-Compare` instead -- which spans four intents and shows the option-ranking
         # shape. A template gated on one intent label is gated on that stage guessing right.
-        "intents": {"nearby", "poi"},
+        "affinity": {"ordinal", "rank", "second", "third", "nearest", "closest"},
         "keywords": ("번째", "가까운", "nearest", "second", "third"),
         # An example that answers a different question is worse than no second example: the
         # planner copies whichever shape it recognises, and 27 of the 40 plans that were offered
@@ -769,7 +769,7 @@ TEMPLATES = {
     },
     "radius": {
         "name": "Filter-Aggregate-Measure",
-        "intents": {"nearby", "radius"},
+        "affinity": {"radius", "within", "count"},
         "keywords": ("반경", "이내", "within", "radius"),
         "pattern": "nearby_places(center, exact radius and category/keyword) -> Measure",
         "example": {
@@ -798,7 +798,8 @@ TEMPLATES = {
     },
     "routes": {
         "name": "Multi-Route-Compare",
-        "intents": {"routing"},
+        "affinity": {"route", "routing", "travel", "duration", "driving"},
+        "network_literal": True,
         "keywords": ("경로", "자동차", "주행", "route", "driving"),
         "pattern": "distance_matrix(one origin, all option destinations) -> Measure",
         "example": {
@@ -827,7 +828,8 @@ TEMPLATES = {
     },
     "trip": {
         "name": "Multi-Segment-Aggregate",
-        "intents": {"trip"},
+        "affinity": {"trip", "itinerary", "total_distance", "total_duration"},
+        "trip_literal": True,
         "keywords": ("일정", "차례", "경유", "여행", "trip", "itinerary"),
         "pattern": (
             "distance_matrix(explicit ordered segment pairs) -> aggregate_route_groups -> Measure"
@@ -863,8 +865,16 @@ TEMPLATES = {
     },
     "route_optimize": {
         "name": "Route-Optimize",
-        "intents": {"trip"},
-        "keywords": ("최적 순서", "시간창", "방문 순서", "tsp"),
+        "affinity": {
+            "trip",
+            "order",
+            "sequence",
+            "feasibility",
+            "visited_count",
+            "time_budget",
+        },
+        "trip_literal": True,
+        "keywords": ("최적 순서", "시간창", "방문 순서", "몇 곳", "tsp"),
         "pattern": (
             "locations -> distance_matrix(all ordered pairs) -> tsp_tw(service times, budget)"
             " -> Measure"
@@ -907,7 +917,8 @@ TEMPLATES = {
     },
     "route_step_extract": {
         "name": "Route-Step-Extract",
-        "intents": {"routing"},
+        "affinity": {"turn", "step", "instruction", "guidance"},
+        "network_literal": True,
         "keywords": ("경로 단계", "도로", "회전", "step"),
         "pattern": "directions -> route-step field extraction -> Measure",
         "example": {
@@ -941,7 +952,7 @@ TEMPLATES = {
     },
     "time_window_reverse": {
         "name": "Time-Window-Reverse",
-        "intents": {"trip", "routing"},
+        "affinity": {"departure", "arrival", "finish_time", "start_time", "time_window"},
         "keywords": ("도착 시간", "출발 시간", "영업시간", "time window"),
         "pattern": "TEXTENT -> route duration -> reverse/finish-time calculation -> Measure",
         "example": {
@@ -973,13 +984,25 @@ TEMPLATES = {
 }
 
 
-def retrieve_templates(intent: str, question: str, *, limit: int = 2) -> list[dict[str, Any]]:
-    """Retrieve pre-validated macro templates with deterministic semantic hints."""
+def retrieve_templates(
+    analysis: dict[str, Any], question: str, *, limit: int = 2
+) -> list[dict[str, Any]]:
+    """Retrieve templates from concept/role content and the question's literal wording.
+
+    The Analysis stage still predicts an ``intent`` for reporting, but that label is deliberately
+    excluded here. A template is relevant because the concept graph names its measure,
+    constraints, attributes, or target object, not because a classifier put the question in one
+    bucket. Question keywords remain the exact-literal fallback for a graph that omitted a hint.
+    """
 
     lowered = question.casefold()
+    concept_hints = _analysis_retrieval_hints(analysis)
     ranked: list[tuple[int, str, dict[str, Any]]] = []
     for key, template in TEMPLATES.items():
-        score = 4 if intent in template["intents"] else 0
+        score = 4 * sum(
+            1 for hint in template.get("affinity", ()) if hint.casefold() in concept_hints
+        )
+        score += _template_shape_score(template, analysis, lowered)
         score += sum(1 for keyword in template["keywords"] if keyword.casefold() in lowered)
         if score:
             ranked.append((score, key, template))
@@ -1000,10 +1023,68 @@ def retrieve_templates(intent: str, question: str, *, limit: int = 2) -> list[di
     ]
 
 
+def _analysis_retrieval_hints(analysis: dict[str, Any]) -> str:
+    """Flatten only concept-graph evidence used for deterministic template affinity.
+
+    Top-level ``intent`` is intentionally not traversed. Keeping this projection explicit makes
+    it impossible for arbitrary analysis metadata to become another hidden router.
+    """
+
+    values: list[str] = []
+    for key in ("measure", "target_type"):
+        value = analysis.get(key)
+        if value not in (None, ""):
+            values.append(str(value))
+    for concept in analysis.get("concepts") or []:
+        if not isinstance(concept, dict):
+            continue
+        # Location names and generic types such as ``object``/``amount`` say nothing about which
+        # macro should run. Restrict free text to the roles that state a requested measure or a
+        # narrowing condition; extent names remain available through the question fallback.
+        if concept.get("role") in {"measure", "condition", "sub_condition"}:
+            values.append(str(concept.get("text") or ""))
+        attributes = concept.get("attributes")
+        if isinstance(attributes, dict):
+            for key, value in attributes.items():
+                values.extend((str(key), str(value)))
+    return " ".join(values).casefold()
+
+
+def _template_shape_score(
+    template: dict[str, Any], analysis: dict[str, Any], lowered_question: str
+) -> int:
+    """Score declared graph shapes before falling back to literal keyword overlap."""
+
+    concepts = [value for value in (analysis.get("concepts") or []) if isinstance(value, dict)]
+    spatial_count = sum(
+        concept.get("concept_type") in {"location", "object"}
+        and concept.get("role") != "measure"
+        for concept in concepts
+    )
+    score = 0
+    if (
+        template.get("trip_literal")
+        and spatial_count >= 3
+        and re.search(
+            r"(→.*→|(?:\d+(?:\.\d+)?\s*(?:시간|분)).*(?:\d+(?:\.\d+)?\s*(?:시간|분))"
+            r"|방문\s*순서|몇\s*곳|일정|차례|순서로|itinerary|trip)",
+            lowered_question,
+        )
+    ):
+        score += 16
+    if template.get("network_literal") and re.search(
+        r"(자동차|차량|운전|주행|도로|경로|route|driv)", lowered_question
+    ):
+        score += 8
+    return score
+
+
 def normalize_analysis(
     payload: dict[str, Any], question: str, fallback_intent: str
 ) -> dict[str, Any]:
     intent = str(payload.get("intent", "")).strip().lower() or fallback_intent
+    raw_measure = payload.get("measure")
+    measure = str(raw_measure).strip() if raw_measure not in (None, "") else None
     raw_concepts = payload.get("concepts") or payload.get("concept_entities") or []
     concepts: list[dict[str, Any]] = []
     if isinstance(raw_concepts, list):
@@ -1036,14 +1117,23 @@ def normalize_analysis(
             },
             {
                 "id": "requested_answer",
-                "text": str(payload.get("measure") or "answer choice"),
+                "text": measure or "answer choice",
                 "concept_type": "amount",
                 "role": "measure",
                 "attributes": {},
                 "depends_on": ["question_context"],
             },
         ]
-    concepts = _complete_analysis_roles(concepts, question, str(payload.get("measure") or intent))
+    if measure is None:
+        measure = next(
+            (
+                str(concept.get("text") or "").strip()
+                for concept in concepts
+                if concept.get("role") == "measure" and str(concept.get("text") or "").strip()
+            ),
+            "answer choice",
+        )
+    concepts = _complete_analysis_roles(concepts, question, measure)
     # The kind of place the question is asking for, which the Analysis stage may have had to
     # infer ("우산을 사야 합니다" -> 편의점). Grounding binds it when the question text does not
     # name a type outright; dropping it here is what made a need-shaped question unanswerable.
@@ -1052,7 +1142,7 @@ def normalize_analysis(
     return {
         "intent": intent,
         "concepts": concepts,
-        "measure": payload.get("measure", intent),
+        "measure": measure,
         "target_type": target_type,
     }
 

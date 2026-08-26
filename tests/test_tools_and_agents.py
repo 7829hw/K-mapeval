@@ -377,6 +377,18 @@ def test_spatial_agent_runs_paper_aligned_pipeline() -> None:
     ]
     assert result.tool_calls == 1
     assert result.api_calls == 1
+    assert result.predicted_intent == "poi"
+    # The first call predicts the reporting label. Planner and evaluator calls never receive it.
+    assert '"intent"' not in llm.messages[1][1]["content"]
+    assert "Intent:" not in llm.messages[-1][1]["content"]
+
+
+def test_normalized_measure_does_not_fall_back_to_predicted_intent() -> None:
+    analysis = normalize_analysis({"intent": "trip"}, "질문", "poi")
+
+    assert analysis["intent"] == "trip"
+    assert analysis["measure"] == "answer choice"
+    assert analysis["concepts"][-1]["text"] == "answer choice"
 
 
 def test_spatial_evaluation_prompt_compacts_repeated_large_operator_state() -> None:

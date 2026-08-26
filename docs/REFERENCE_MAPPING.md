@@ -5,7 +5,7 @@
 | MapEval `Evaluator2.py` structured ReAct loop | `src/agent/react.py` | Removes the localhost backend, sleeps, and remote writes. Uses user-requested 0-based `^^N^^` answers. |
 | MapEval tools/backend | `src/tools/registry.py`, `src/tools/map.py`, `src/tools/kakao.py` | Provider injection replaces the separate HTTP backend; tools expose normalized JSON. |
 | Spatial information theory analysis | `normalize_analysis`, `ConceptGraph` | Preserves all seven core-concept labels and six roles. Missing EXTENT/MEASURE concepts are made explicit and marked synthetic. Dataset classification metadata is not passed in. |
-| Concept transformation drafting | `retrieve_templates`, Spatial-Agent `compose` | All ten Appendix E examples are G1–G5-valid and executable. Retrieval remains deterministic intent/keyword scoring rather than embedding cosine similarity. |
+| Concept transformation drafting | `retrieve_templates`, Spatial-Agent `compose` | All eleven Appendix E examples are G1–G5-valid and executable. Retrieval uses deterministic concept/role/attribute/measure affinity plus question-literal fallback rather than intent labels or embedding cosine similarity. |
 | Concept graph `G` | `ConceptGraph`, `ConceptNode` | Stores IDs, types, roles, attributes, and explicit Analysis dependencies. Role adjacency never fabricates edges; executable G' edges come from actual operator references. |
 | Operator-concept hypergraph `G'` | `factorize_geoflow`, `OperatorHyperedge` | Factorization is deterministic rather than learned. Each hyperedge records input concepts, supplementary literal factor parameters, and one or more output-path bindings. Radius, direction, category, and similar constants remain factors instead of being fabricated as operator outputs. Derived intermediate concepts are explicitly marked. |
 | Five GeoFlow constraints | `normalize_and_validate_graph` | Enforces G1, G3, G4, and both halves of G5 on operator and concept graphs. G2 applies only to SUBCOND→COND→SUPPORT→MEASURE; contextual roles are excluded as required by Appendix B. |
@@ -3234,3 +3234,30 @@ predict the graph it then writes, and dropping it outright leaves keyword matchi
 principled replacement scores a template against the concept graph rather than against a label,
 which means re-authoring every template's affinity. That is the remaining work, and it should be
 done with a benchmark run beside it rather than on the argument alone.
+
+### A3: remove the remaining planner and evaluator label paths
+
+The remaining path is now removed in a separate change. `retrieve_templates` takes the normalized
+concept analysis rather than an intent string. Each template declares semantic affinity terms and,
+where needed, a graph/question shape such as a multi-place itinerary or road-network wording. The
+retriever projects only the requested measure, target type, CONDITION/SUBCOND/MEASURE text and
+concept attributes; it deliberately never traverses the top-level `intent`. Exact question
+keywords remain the fallback when Analysis omitted the relevant concept hint.
+
+The final evaluator no longer receives `Intent: ...` or an intent-specific suffix. The eight
+selection rules are one shape-conditional prompt: a rule applies because the evidence contains a
+route, bearing-filtered candidates, a set, pairwise metrics or itinerary totals. Analysis still
+predicts the label, but `SpatialAgent.answer` pops it before template retrieval and passes the
+intent-free dictionary to composition, factorization, repair and evaluation. `normalize_analysis`
+also stopped using a missing intent as a missing measure; it now uses the MEASURE concept text or
+the neutral `answer choice` fallback.
+
+This stage cannot be evaluated by grounding replay: it changes the templates shown to the planner
+and therefore the graph the LLM writes. A read-only replay of the three A2 passes does establish
+the intended footprint before a live run: the first retrieved template changes on 229 of 849
+recorded analyses. The largest changes are the mislabeled shapes this stage is meant to expose:
+`routing_detour_cost` (61), `routing_turn_count_via` (40), and fixed-order
+`trip_total_distance` (26). In those rows the label-selected example and the question structure
+disagree; the live A3 result must decide whether the new planner context helps. Unit coverage is
+546 passing tests, and both `spatial.py` and `geoflow.py` contain zero `intent ==`/`intent in`
+branches. Benchmark results belong immediately below once the A3 run completes.

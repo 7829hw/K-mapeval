@@ -3271,17 +3271,17 @@ def test_an_ordinal_nearby_question_retrieves_before_it_ranks() -> None:
 
     from src.agent.geoflow import retrieve_templates
 
-    ordinal = retrieve_templates("nearby", "삼성출판박물관에서 두 번째로 가까운 편의점은?")
+    ordinal = retrieve_templates({}, "삼성출판박물관에서 두 번째로 가까운 편의점은?")
     assert ordinal[0]["name"] == "Retrieve-Rank-Ordinal"
     assert "nearby_places" in ordinal[0]["pattern"]
 
     # A superlative is not an ordinal: there the options *are* the candidates, and the template
     # that ranks them stays in front.
-    superlative = retrieve_templates("nearby", "서울역에서 가장 가까운 편의점은 어디인가요?")
+    superlative = retrieve_templates({}, "서울역에서 가장 가까운 편의점은 어디인가요?")
     assert superlative[0]["name"] == "Geocode-Batch-Compare"
 
     # And a radius question is neither.
-    radius = retrieve_templates("nearby", "서울역 반경 500m 이내에 있는 약국은 몇 곳인가요?")
+    radius = retrieve_templates({}, "서울역 반경 500m 이내에 있는 약국은 몇 곳인가요?")
     assert radius[0]["name"] == "Filter-Aggregate-Measure"
 
 
@@ -3319,8 +3319,8 @@ def test_the_ordinal_nearby_chain_lands_on_the_option_the_ranking_names() -> Non
     assert matched["best_option"] == 3
 
 
-def test_the_ordinal_template_is_offered_whichever_intent_the_analysis_guessed() -> None:
-    """Gating a template on one intent label gates it on the Analysis stage guessing right.
+def test_template_retrieval_ignores_whichever_intent_the_analysis_guessed() -> None:
+    """Template affinity comes from concepts and question text, never the reported label.
 
     Of 54 ordinal questions the stage called 14 of them `poi` and the rest `nearby`, and the 14
     were handed `Geocode-Batch-Compare` instead -- which spans four intents and shows exactly the
@@ -3329,9 +3329,18 @@ def test_the_ordinal_template_is_offered_whichever_intent_the_analysis_guessed()
 
     from src.agent.geoflow import retrieve_templates
 
+    selections = []
     for intent in ("nearby", "poi"):
-        names = [t["name"] for t in retrieve_templates(intent, "여기서 세 번째로 가까운 내과는?")]
+        names = [
+            template["name"]
+            for template in retrieve_templates(
+                {"intent": intent, "measure": "third_nearest"},
+                "여기서 세 번째로 가까운 내과는?",
+            )
+        ]
+        selections.append(names)
         assert names[0] == "Retrieve-Rank-Ordinal", intent
+    assert selections[0] == selections[1]
 
 
 def test_a_superseded_template_is_not_offered_beside_the_one_that_beat_it() -> None:
@@ -3345,15 +3354,15 @@ def test_a_superseded_template_is_not_offered_beside_the_one_that_beat_it() -> N
 
     from src.agent.geoflow import retrieve_templates
 
-    ordinal = [t["name"] for t in retrieve_templates("nearby", "두 번째로 가까운 편의점은?")]
+    ordinal = [t["name"] for t in retrieve_templates({}, "두 번째로 가까운 편의점은?")]
     assert "Geocode-Batch-Compare" not in ordinal
 
-    superlative = [t["name"] for t in retrieve_templates("nearby", "가장 가까운 편의점은?")]
+    superlative = [t["name"] for t in retrieve_templates({}, "가장 가까운 편의점은?")]
     assert superlative[0] == "Geocode-Batch-Compare"
     assert "Retrieve-Rank-Ordinal" in superlative
 
     # A question neither template is about keeps whatever it had.
-    radius = [t["name"] for t in retrieve_templates("nearby", "반경 500m 이내에 약국은 몇 곳?")]
+    radius = [t["name"] for t in retrieve_templates({}, "반경 500m 이내에 약국은 몇 곳?")]
     assert radius[0] == "Filter-Aggregate-Measure"
 
 

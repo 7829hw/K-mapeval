@@ -46,6 +46,9 @@ Spatial-Agent는 `공간 개념/기능 역할 분석 → 매크로 검색 → Co
 operator-concept hypergraph factorization → 5개 제약 검증 → 위상순 실행 → 근거 기반 선택`
 순서로 동작합니다. 실행 결과 개념은 operator output에, 반경·방향·카테고리 같은 보조
 상수 개념은 논문의 factor node에 해당하는 hyperedge parameter/input에 바인딩됩니다.
+Analysis가 예측한 intent는 보고용 `predicted_intent`로만 남습니다. 매크로 검색은
+개념·역할·속성·measure affinity와 질문 리터럴을 사용하며, planner·repair·executor·최종
+평가 프롬프트에는 intent 라벨을 전달하지 않습니다.
 G5는 모든 노드에 대해 `EXTENT/TEXTENT → node → MEASURE` 양쪽 도달성을 검사합니다.
 LLM이 부여한 절차 역할은 실제 데이터 의존 순서를 위반하지 않도록 정규화합니다.
 그래프가 잘못되면 한 번 수리한 뒤 다시 factorization·검증합니다. Routing/Trip은

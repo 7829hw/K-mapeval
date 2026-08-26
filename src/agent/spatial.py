@@ -75,6 +75,8 @@ the granularity the need implies: a neighbouring kind will usually be closer, an
 answers a different question. Use null when the question is not asking for a kind of place at
 all.
 Include all named places and spatial/temporal constraints.
+The intent label is evaluation metadata only. Later stages use the concepts, roles, attributes,
+measure, and question text, so make those fields complete without relying on the label.
 When the question states a search radius or a compass sector, put the value on the concept that
 carries it, as "attributes": {"radius_m": 600} in metres and {"direction": "북동쪽"}. Grounding
 reads these only when it cannot find the literal in the question itself, so a phrasing you had to
@@ -269,7 +271,21 @@ never choose an option merely because it contains more items or looks like a lis
 Treat deterministic best_option fields as evidence, but make the final selection in this generation
 step after checking them against the complete final state and trace.
 An operator that reports an error contributed no evidence; fall back to the surviving steps rather
-than to the failed step's intent.
+than to the failed step's intended purpose.
+Apply the rule whose question and executed evidence have that shape:
+- For nearest questions, use match_options ranks and distances; exact or fuzzy option-to-POI
+  matches outrank unsupported guesses.
+- When a compass sector is stated, use only direction-filtered candidates, then choose the nearest
+  supported option from match_options.
+- When options are sets separated by '|', compare them with present_option_members and prefer an
+  exact set match.
+- For a stated straight-line distance, use computed Haversine evidence and
+  match_distance_options, never route distance.
+- For a place attribute, use the normalized POI category or other returned attribute directly.
+- For pairwise comparisons, compare the requested metric for every option pair.
+- For road routes, read distance_m and duration_s from executed routes: shortest uses distance_m,
+  fastest uses duration_s, and a named via-route must be isolated first.
+- When options are ordered itineraries, compare option_totals without reordering their stops.
 Never return an option outside the supplied candidates."""
 
 # Execution traces are retained in full for auditability, but copying every resolved Place through
@@ -282,39 +298,6 @@ EVALUATION_RESULT_LIST_LIMIT = 10
 EVALUATION_STATE_LIST_LIMIT = 6
 EVALUATION_MAX_DEPTH = 6
 EVALUATION_STRING_LIMIT = 512
-
-INTENT_EVALUATION_RULES = {
-    "nearby": (
-        "For nearest questions, use match_options ranks and distances. Exact or fuzzy "
-        "option-to-POI matches outrank unsupported guesses."
-    ),
-    "direction": (
-        "Use only direction-filtered candidates, then choose the nearest supported option from "
-        "match_options."
-    ),
-    "radius": (
-        "Treat each option as a set separated by '|'. Compare it with present_option_members and "
-        "prefer an exact set match."
-    ),
-    "distance": (
-        "Use the computed Haversine distance and match_distance_options; never substitute route "
-        "distance."
-    ),
-    "type": "Use the normalized POI category returned by place search.",
-    "poi": (
-        "Use the retrieved place attributes and computed coordinates directly. For pairwise "
-        "comparisons, compare the metric of every option pair before selecting."
-    ),
-    "routing": (
-        "Read route distance_m and duration_s from the executed routes. Shortest uses "
-        "distance_m, fastest uses duration_s, and a named via-route must be isolated first."
-    ),
-    "trip": (
-        "Evaluate each option as an ordered sequence and compare option_totals. Order matters, "
-        "so never reorder an option's stops when matching it to the aggregated totals."
-    ),
-}
-
 
 class SpatialAgent(BenchmarkAgent):
     """Concept-graph grounding, constrained factorization, execution, and generation."""
@@ -361,18 +344,17 @@ class SpatialAgent(BenchmarkAgent):
             raw_analysis = parse_json_object(analysis_response.content)
             fallback_intent = _heuristic_intent(question)
             analysis = normalize_analysis(raw_analysis, question, fallback_intent)
-            intent = str(analysis["intent"]).lower()
-            if intent not in SUPPORTED_INTENTS:
-                intent = fallback_intent
-            analysis["intent"] = intent
-            predicted_intent = intent
-            trace.append({"stage": "analyze", **analysis})
-            # Read once, from the question and the concept graph. Grounding asks this and never
-            # asks what the question was classified as; `intent` below reaches only the template
-            # retrieval, the evaluation prompt, and the `predicted_intent` the report records.
-            facts = extract_facts(analysis, question)
+            predicted_intent = str(analysis.pop("intent")).lower()
+            if predicted_intent not in SUPPORTED_INTENTS:
+                predicted_intent = fallback_intent
+            trace.append({"stage": "analyze", "intent": predicted_intent, **analysis})
+            # The label remains in the trace/report, but every executable stage receives a view
+            # that cannot inspect it. Popping it makes the label reporting metadata rather than a
+            # hidden template, grounding, validation, repair, or evaluation router.
+            runtime_analysis = analysis
+            facts = extract_facts(runtime_analysis, question)
 
-            templates = retrieve_templates(intent, question)
+            templates = retrieve_templates(runtime_analysis, question)
             trace.append(
                 {
                     "stage": "retrieve_templates",
@@ -391,7 +373,7 @@ class SpatialAgent(BenchmarkAgent):
                         "content": (
                             f"{format_question(question, options)}\n\n"
                             "Spatial concept analysis:\n"
-                            f"{json.dumps(analysis, ensure_ascii=False)}\n\n"
+                            f"{json.dumps(runtime_analysis, ensure_ascii=False)}\n\n"
                             "Retrieved pre-validated templates and examples:\n"
                             f"{json.dumps(templates, ensure_ascii=False)}"
                         ),
@@ -404,7 +386,7 @@ class SpatialAgent(BenchmarkAgent):
             trace.append({"stage": "compose", "graph": plan.get("graph") or plan.get("steps")})
             try:
                 factorized, steps, constraints = _factorize_validate_plan(
-                    analysis,
+                    runtime_analysis,
                     plan,
                     question,
                     options,
@@ -431,7 +413,7 @@ class SpatialAgent(BenchmarkAgent):
                                 f"Validation error: {graph_error}\n"
                                 "Question and options:\n"
                                 f"{format_question(question, options)}\n"
-                                f"Analysis: {json.dumps(analysis, ensure_ascii=False)}\n"
+                                f"Analysis: {json.dumps(runtime_analysis, ensure_ascii=False)}\n"
                                 f"Templates: {json.dumps(templates, ensure_ascii=False)}\n"
                                 f"Invalid graph: {json.dumps(plan, ensure_ascii=False)}"
                             ),
@@ -449,7 +431,7 @@ class SpatialAgent(BenchmarkAgent):
                 )
                 try:
                     factorized, steps, constraints = _factorize_validate_plan(
-                        analysis,
+                        runtime_analysis,
                         repaired_plan,
                         question,
                         options,
@@ -466,7 +448,7 @@ class SpatialAgent(BenchmarkAgent):
                     # intent and introduces no family-specific solver.
                     try:
                         factorized, steps, constraints = _factorize_validate_plan(
-                            analysis,
+                            runtime_analysis,
                             repaired_plan,
                             question,
                             options,
@@ -486,7 +468,7 @@ class SpatialAgent(BenchmarkAgent):
                         )
                         try:
                             factorized, steps, constraints = _factorize_validate_plan(
-                                analysis,
+                                runtime_analysis,
                                 plan,
                                 question,
                                 options,
@@ -624,18 +606,11 @@ class SpatialAgent(BenchmarkAgent):
             )
             evaluation = self.llm.chat(
                 [
-                    {
-                        "role": "system",
-                        "content": (
-                            EVALUATOR_PROMPT
-                            + "\n"
-                            + INTENT_EVALUATION_RULES.get(intent, "")
-                        ),
-                    },
+                    {"role": "system", "content": EVALUATOR_PROMPT},
                     {
                         "role": "user",
                         "content": (
-                            f"Intent: {intent}\n{format_question(question, options)}\n\n"
+                            f"{format_question(question, options)}\n\n"
                             "Compacted GeoFlow topological execution evidence:\n"
                             f"{json.dumps(evaluation_evidence, ensure_ascii=False)}"
                         ),
@@ -1303,7 +1278,7 @@ def _ground_graph_literals(
     # plan geocoded is known — it is the place order every downstream index refers to.
     route_priority = facts.route_priority
     # The itinerary is whichever `batch_geocode` node lists more than two places. That structural
-    # test is the real guard; the `intent == "trip"` conjunct that used to sit in front of it did
+    # test is the real guard; the old trip-label conjunct that sat in front of it did
     # nothing a trip plan can notice, and in a plan the Analysis stage labelled something else it
     # withheld the stays from an operator that still ran -- binding every stay to zero rather
     # than refusing.
@@ -1653,8 +1628,8 @@ _ITINERARY_OPERATORS = frozenset(
 def _ranks_the_options(steps: list[dict[str, Any]], node_id: str) -> bool:
     """Does everything downstream of this node treat its places as the candidate options?
 
-    This replaces `intent in {"nearby", "direction", "routing"}`, whose real content was "not a
-    trip": the excluded label that mattered was `trip`, because splicing the option texts into an
+    This replaces the old three-label allowlist, whose real content was "not a trip": the excluded
+    label that mattered was `trip`, because splicing the option texts into an
     itinerary rewrites the stops. Asking the graph is both narrower and safer -- a routing plan
     the Analysis stage happened to call `trip` used to lose the splice, and a trip plan it called
     `routing` used to get one.

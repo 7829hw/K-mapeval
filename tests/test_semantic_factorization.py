@@ -219,3 +219,163 @@ def test_a_semantic_graph_is_told_from_a_concrete_one() -> None:
     assert is_semantic_graph([{"id": "a", "transform": "MEASURE"}])
     assert not is_semantic_graph([{"id": "a", "operator": "identity_measure"}])
     assert not is_semantic_graph([])
+
+
+# ---------------------------------------------------------------------------------------------
+# What the first live run of this stage found.
+#
+# The vocabulary took immediately -- 200 planner nodes, none of them naming an operator -- and
+# accuracy fell to 40.3% anyway, with 47 questions producing no valid graph at all. Every cause
+# was in this module, and each is pinned below. The loop that found them replays the semantic
+# graphs that run recorded, so none of it needed another benchmark pass.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_a_geocode_always_gets_names_to_resolve() -> None:
+    """122 of 642 recorded RESOLVE_PLACES nodes named a concept the analysis did not have.
+
+    `Option 0`, `candidate_options`, a slug of the anchor -- usually meaning the candidate texts,
+    sometimes because the Analysis stage had returned nothing but `question_context`. An empty
+    `batch_geocode` geocodes nothing and the graph fails four nodes later, so the lookup falls
+    through an explicit chain instead.
+    """
+
+    concepts = [{"id": "anchor", "text": "서울역", "concept_type": "location", "role": "extent"}]
+
+    invented_options = _build(
+        [{"id": "a", "transform": "RESOLVE_PLACES", "inputs": [],
+          "concept_ids": ["Option 0", "Option 1"]}],
+        concepts=concepts, options=["가게 A", "가게 B"],
+    )
+    assert invented_options.graph[0]["arguments"]["place_names"] == ["가게 A", "가게 B"]
+
+    invented_anchor = _build(
+        [{"id": "a", "transform": "RESOLVE_PLACES", "inputs": [],
+          "concept_ids": ["seoul_station_slug"]}],
+        concepts=concepts, options=["가게 A"],
+    )
+    assert invented_anchor.graph[0]["arguments"]["place_names"] == ["서울역"]
+
+    nothing = _build(
+        [{"id": "a", "transform": "RESOLVE_PLACES", "inputs": [], "concept_ids": ["x"]}],
+        concepts=[], options=["가게 A", "가게 B"],
+    )
+    assert nothing.graph[0]["arguments"]["place_names"] == ["가게 A", "가게 B"]
+
+
+def test_one_place_against_many_is_a_ranking_not_a_pair() -> None:
+    """190 recorded graphs measured an anchor against a candidate *set*.
+
+    Wired as a pair it becomes `haversine_distance(place_a=anchor, place_b=$candidates.0.place)`
+    -- the first candidate, with the rest silently discarded, and every node downstream ranking
+    a scalar.
+    """
+
+    concepts = [
+        {"id": "anchor", "text": "서울역"},
+        {"id": "c1", "text": "A"},
+        {"id": "c2", "text": "B"},
+    ]
+    built = _build(
+        [
+            {"id": "anchor", "transform": "RESOLVE_PLACES", "inputs": [],
+             "concept_ids": ["anchor"]},
+            {"id": "cands", "transform": "RESOLVE_PLACES", "inputs": [],
+             "concept_ids": ["c1", "c2"]},
+            {"id": "d", "transform": "DISTANCE_MEASURE", "inputs": ["anchor", "cands"]},
+        ],
+        concepts=concepts,
+    )
+
+    assert built.graph[2]["operator"] == "nearest"
+    assert built.graph[2]["arguments"] == {
+        "anchor": "$anchor.0.place",
+        "candidates": "$cands",
+    }
+    # Two single places is still a pair.
+    pair = _build(
+        [
+            {"id": "a", "transform": "RESOLVE_PLACES", "inputs": [], "concept_ids": ["anchor"]},
+            {"id": "b", "transform": "RESOLVE_PLACES", "inputs": [], "concept_ids": ["c1"]},
+            {"id": "d", "transform": "DISTANCE_MEASURE", "inputs": ["a", "b"]},
+        ],
+        concepts=concepts,
+    )
+    assert pair.graph[2]["operator"] == "haversine_distance"
+
+
+def test_a_sort_over_an_existing_ordering_is_folded_away() -> None:
+    """`nearest` already ranks. A second node to re-sort it asks for a field it does not carry."""
+
+    built = _build(
+        [
+            {"id": "a", "transform": "RESOLVE_PLACES", "inputs": [], "concept_ids": ["x"]},
+            {"id": "c", "transform": "PLACE_SEARCH", "inputs": ["a"]},
+            {"id": "d", "transform": "DISTANCE_MEASURE", "inputs": ["a", "c"]},
+            {"id": "s", "transform": "SORT", "inputs": ["d"]},
+            {"id": "k", "transform": "ORDINAL_SELECT", "inputs": ["s"],
+             "factors": {"ordinal": 2}},
+        ],
+        concepts=[{"id": "x", "text": "서울역"}],
+    )
+
+    assert [step["id"] for step in built.graph] == ["a", "c", "d", "k"]
+    # The ordinal still reads the ordering the fused node produced.
+    assert built.graph[-1]["arguments"]["items"] == "$d.ranked"
+    assert any(row["rule"] == "fused_into_existing_ordering" for row in built.decisions)
+
+
+def test_a_tour_gets_the_cost_matrix_it_needs() -> None:
+    """9 recorded graphs asked to order an itinerary without asking for the costs first."""
+
+    built = _build(
+        [
+            {"id": "stops", "transform": "RESOLVE_PLACES", "inputs": [],
+             "concept_ids": ["a", "b"]},
+            {"id": "tour", "transform": "ROUTE_OPTIMIZE", "inputs": ["stops"], "role": "measure"},
+        ],
+        concepts=[{"id": "a", "text": "가"}, {"id": "b", "text": "나"}],
+    )
+
+    assert [step["operator"] for step in built.graph] == [
+        "batch_geocode",
+        "distance_matrix",
+        "tsp_tw",
+    ]
+    assert built.graph[2]["arguments"]["distance_matrix"] == "$tour_matrix"
+    assert any(row["rule"] == "composed_for_route_optimize" for row in built.decisions)
+
+
+def test_an_input_written_as_a_field_path_still_names_its_node() -> None:
+    """A planner wrote `inputs: ["R1.start", "R1.end"]`. The node is the dependency."""
+
+    built = _build(
+        [
+            {"id": "R1", "transform": "RESOLVE_PLACES", "inputs": [], "concept_ids": ["a", "b"]},
+            {"id": "M1", "transform": "ROUTE_MEASURE", "inputs": ["R1.start", "R1.end"]},
+        ],
+        concepts=[{"id": "a", "text": "가"}, {"id": "b", "text": "나"}],
+    )
+
+    assert built.graph[1]["depends_on"] == ["R1"]
+    assert built.graph[1]["arguments"] == {
+        "origin": "$R1.0.place",
+        "destination": "$R1.1.place",
+    }
+
+
+def test_a_total_over_a_matrix_is_not_an_extract_from_a_route() -> None:
+    """15 recorded graphs asked ROUTE_EXTRACT of a matrix, which returns a dict, not a route."""
+
+    built = _build(
+        [
+            {"id": "p", "transform": "RESOLVE_PLACES", "inputs": [], "concept_ids": ["a", "b"]},
+            {"id": "m", "transform": "ROUTE_MATRIX", "inputs": ["p"]},
+            {"id": "e", "transform": "ROUTE_EXTRACT", "inputs": ["m"],
+             "factors": {"measure": "distance"}},
+        ],
+        concepts=[{"id": "a", "text": "가"}, {"id": "b", "text": "나"}],
+    )
+
+    assert built.graph[2]["operator"] == "sum_route_metrics"
+    assert built.graph[2]["arguments"] == {"routes": "$m"}

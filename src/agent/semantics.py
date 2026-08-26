@@ -62,6 +62,18 @@ class Resolution:
     facts: Any
     #: Operator names the tool registry and the operator registry can actually run.
     available: frozenset[str]
+    #: Which upstream nodes emit a set of candidates rather than a single place.
+    input_is_collection: tuple[bool, ...] = ()
+    #: The operators those upstream nodes were factorized to.
+    input_operators: tuple[str, ...] = ()
+
+    @property
+    def fans_out(self) -> bool:
+        """One place measured against many, which is a ranking rather than a pair."""
+
+        return len(self.input_is_collection) >= 2 and (
+            not self.input_is_collection[0] and any(self.input_is_collection[1:])
+        )
 
     def factor(self, name: str, default: Any = None) -> Any:
         return self.factors.get(name, default)
@@ -73,6 +85,16 @@ class Resolution:
 
 def _always(_: Resolution) -> bool:
     return True
+
+
+def _one_place_against_many(resolution: Resolution) -> bool:
+    """"How far is each of these from that" is a ranking, and `nearest` is what computes it.
+
+    Wiring it as `haversine_distance(place_a=anchor, place_b=$candidates.0.place)` measures the
+    first candidate and throws the rest away -- which is what it did, on 190 recorded graphs.
+    """
+
+    return resolution.fans_out
 
 
 def _pairwise(resolution: Resolution) -> bool:
@@ -101,6 +123,12 @@ def _minimum(resolution: Resolution) -> bool:
 
 def _maximum(resolution: Resolution) -> bool:
     return str(resolution.factor("extreme", "min")).lower() == "max"
+
+
+def _over_a_matrix(resolution: Resolution) -> bool:
+    """A route matrix is not a route; asking it for `distance_m` gets a dict and an error."""
+
+    return "distance_matrix" in resolution.input_operators
 
 
 def _duration(resolution: Resolution) -> bool:
@@ -201,9 +229,13 @@ TRANSFORMS: dict[str, Transform] = {
     ),
     "DISTANCE_MEASURE": Transform(
         "DISTANCE_MEASURE",
-        "Straight-line separation between places.",
-        (("haversine_distance", _pairwise), ("pairwise_distances", _over_a_collection)),
-        "amount",
+        "Straight-line separation between places: a pair, or each of many from one.",
+        (
+            ("nearest", _one_place_against_many),
+            ("haversine_distance", _pairwise),
+            ("pairwise_distances", _over_a_collection),
+        ),
+        "object",
     ),
     "ROUTE_MEASURE": Transform(
         "ROUTE_MEASURE",
@@ -219,8 +251,12 @@ TRANSFORMS: dict[str, Transform] = {
     ),
     "ROUTE_EXTRACT": Transform(
         "ROUTE_EXTRACT",
-        "One number out of a computed route.",
-        (("extract_duration", _duration), ("extract_distance", _distance)),
+        "One number out of a computed route, or the total over a matrix of them.",
+        (
+            ("sum_route_metrics", _over_a_matrix),
+            ("extract_duration", _duration),
+            ("extract_distance", _distance),
+        ),
         "amount",
     ),
     "ROUTE_STEPS": Transform(
@@ -322,6 +358,8 @@ def resolve_operator(
     input_types: Sequence[str],
     facts: Any,
     available: frozenset[str],
+    input_is_collection: Sequence[bool] | None = None,
+    input_operators: Sequence[str] | None = None,
 ) -> tuple[str, str]:
     """Which operator performs this transformation here, and which rule chose it.
 
@@ -342,6 +380,8 @@ def resolve_operator(
         input_types=tuple(input_types),
         facts=facts,
         available=available,
+        input_is_collection=tuple(input_is_collection or ()),
+        input_operators=tuple(input_operators or ()),
     )
     chosen = transform.choose(resolution)
     if chosen is None or chosen[0] not in available:
@@ -373,6 +413,24 @@ def resolve_operator(
 
 #: Operators whose output is a per-name record list rather than a place.
 _RECORD_LIST_OPERATORS = frozenset({"batch_geocode"})
+#: Operators whose output is a set of candidates rather than one place. Measuring *from* a place
+#: *to* one of these is a fan-out, not a pair, and wiring it as a pair measures the first
+#: candidate and silently discards the rest.
+_COLLECTION_OPERATORS = frozenset(
+    {
+        "nearby_places",
+        "place_search",
+        "within_radius",
+        "filter_by_direction",
+        "filter_places",
+        "nearest",
+        "sort_by",
+        "merge_places",
+        "recover_option_places",
+    }
+)
+#: Operators that already return an ordering, so a SORT over one of them has nothing to do.
+_ORDERING_OPERATORS = frozenset({"nearest", "sort_by"})
 #: Operators that publish their ordering under a named field.
 _ORDERED_FIELD = {"nearest": "ranked"}
 
@@ -395,6 +453,9 @@ class _Wiring:
     inputs: tuple[str, ...]
     producers: tuple[str | None, ...]
     factors: dict[str, Any]
+    #: The node a route matrix was built at, if the graph built one. `tsp_tw` needs it and a
+    #: planner that lists only the places forgets to feed it.
+    matrix_source: str | None = None
 
     def place(self, position: int, index: int = 0) -> str:
         node = self.inputs[position]
@@ -409,6 +470,8 @@ class _Wiring:
     def two_places(self) -> tuple[str, str]:
         """The two places to relate: one node holding both, or one node each."""
 
+        if not self.inputs:
+            return "", ""
         if len(self.inputs) >= 2:
             return self.place(0), self.place(1)
         return self.place(0, 0), self.place(0, 1)
@@ -460,23 +523,25 @@ def wire_arguments(
         return {}
     if operator == "haversine_distance":
         first, second = wiring.two_places()
-        return {"place_a": first, "place_b": second}
+        return {"place_a": first, "place_b": second} if first else {}
     if operator == "pairwise_distances":
         return {"pairs": wiring.whole(0)} if arity else {}
     if operator == "pairwise_extremes":
         return {"locations": wiring.whole(0)} if arity else {}
     if operator in {"directions", "travel_time"}:
         origin, destination = wiring.two_places()
-        return {"origin": origin, "destination": destination}
+        return {"origin": origin, "destination": destination} if origin else {}
     if operator == "distance_matrix":
         return {"origins": wiring.whole(0), "destinations": wiring.whole(0)} if arity else {}
     if operator in {"extract_distance", "extract_duration", "steps_analysis"}:
         return {"route": wiring.whole(0)} if arity else {}
+    if operator == "sum_route_metrics":
+        return {"routes": wiring.whole(0)} if arity else {}
     if operator == "compare_routes":
         return {"routes": [wiring.whole(i) for i in range(arity)]}
     if operator == "tsp_tw":
         nodes = wiring.by_type("object", output_types) or (wiring.whole(0) if arity else None)
-        matrix = wiring.by_type("field", output_types)
+        matrix = wiring.by_type("field", output_types) or wiring.matrix_source
         arguments: dict[str, Any] = {}
         if nodes:
             arguments["nodes"] = nodes
@@ -488,11 +553,14 @@ def wire_arguments(
     if operator == "calculate_start_time":
         return {"duration_s": wiring.whole(0)} if arity else {}
     if operator == "within_radius":
-        return (
-            {"center": wiring.place(0), "candidates": wiring.whole(1)}
-            if arity >= 2
-            else {"candidates": wiring.whole(0)}
-        )
+        # The radius is a stated fact and grounding binds it; the centre is whichever input is a
+        # single place. A FILTER given only the candidate set has no centre to offer, and asking
+        # for one it does not have is a refusal rather than a graph.
+        if arity >= 2:
+            return {"center": wiring.place(0), "candidates": wiring.whole(1)}
+        if arity == 1:
+            return {"center": wiring.place(0), "candidates": wiring.whole(0)}
+        return {}
     if operator == "filter_by_direction":
         return (
             {"center": wiring.place(0), "places": wiring.whole(1)}
@@ -604,6 +672,25 @@ def factorize_semantic_graph(
     concrete: list[str] = []
     produced_by: dict[str, str] = {}
     output_types: dict[str, str] = {}
+    # A node the factorization folded into its input: the id still resolves, to the node that
+    # already did the work. `SORT` over a `nearest` is the case that matters -- the ordering
+    # exists, so emitting a second node to re-sort it is at best redundant and at worst asks an
+    # operator for a field its input does not carry.
+    fused: dict[str, str] = {}
+    # Whether a node emits a set of candidates. An operator can say so by itself, but a
+    # `batch_geocode` depends on how many names it was given: four option texts are a candidate
+    # set and one anchor is not, and measuring from an anchor *to* a set is a ranking.
+    emits_collection: dict[str, bool] = {}
+    # Which concept every earlier RESOLVE_PLACES already claimed, so a later one that names no
+    # resolvable concept does not take the same places again.
+    claimed: set[str] = set()
+
+    def follow(name: str) -> str:
+        seen: set[str] = set()
+        while name in fused and name not in seen:
+            seen.add(name)
+            name = fused[name]
+        return name
 
     for position, step in enumerate(steps):
         if not isinstance(step, dict):
@@ -614,7 +701,12 @@ def factorize_semantic_graph(
             for value in (step.get("inputs") or step.get("depends_on") or [])
             if str(value) in produced_by or str(value)
         ]
+        # A planner sometimes writes an input as a path -- "R1.start" -- meaning one part of a
+        # node's output. The node is what the graph depends on; the part is a wiring detail this
+        # module decides. Dropping the whole input instead left the node with no inputs at all.
+        inputs = [follow(str(value).split(".", 1)[0]) for value in inputs]
         inputs = [value for value in inputs if value in produced_by]
+        inputs = list(dict.fromkeys(inputs))
         factors = step.get("factors")
         factors = dict(factors) if isinstance(factors, dict) else {}
         transform_name = str(step.get("transform") or "").strip()
@@ -648,19 +740,93 @@ def factorize_semantic_graph(
                 input_types=[output_types.get(name, "object") for name in inputs],
                 facts=facts,
                 available=available,
+                input_is_collection=[emits_collection.get(name, False) for name in inputs],
+                input_operators=[produced_by.get(name) or "" for name in inputs],
             )
+            if (
+                transform_name.upper() == "SORT"
+                and len(inputs) == 1
+                and produced_by.get(inputs[0]) in _ORDERING_OPERATORS
+            ):
+                # The ordering already exists. Fold this node into the one that produced it and
+                # let every downstream reference resolve there.
+                fused[node_id] = inputs[0]
+                decisions.append(
+                    {
+                        "id": node_id,
+                        "transform": transform_name,
+                        "operator": produced_by[inputs[0]],
+                        "rule": "fused_into_existing_ordering",
+                    }
+                )
+                continue
             wiring = _Wiring(
                 inputs=tuple(inputs),
                 producers=tuple(produced_by.get(name) for name in inputs),
                 factors=factors,
+                matrix_source=next(
+                    (f"${name}" for name, op in produced_by.items() if op == "distance_matrix"),
+                    None,
+                ),
             )
             arguments = wire_arguments(operator, wiring, output_types=output_types)
             arguments = _bind_named_entities(
-                operator, arguments, step, factors, concept_text, options
+                operator, arguments, step, factors, concept_text, options, concepts, claimed
             )
+            for name in arguments.get("place_names") or []:
+                claimed.add(str(name))
             output_type = TRANSFORMS[transform_name.upper()].output_type
 
+        if (
+            operator == "tsp_tw"
+            and isinstance(arguments, dict)
+            and not arguments.get("distance_matrix")
+            and inputs
+        ):
+            # Ordering an itinerary needs the cost between its stops, and a planner that names
+            # ROUTE_OPTIMIZE over the places alone has not asked for one. The matrix is implied
+            # by the transformation rather than chosen by it, so it is composed in here -- this
+            # is the macro-template expansion the deterministic stage is for. Nine of 319
+            # recorded graphs needed it.
+            matrix_id = f"{node_id}_matrix"
+            places = f"${inputs[0]}"
+            graph.append(
+                {
+                    "id": matrix_id,
+                    "operator": "distance_matrix",
+                    "arguments": {"origins": places, "destinations": places},
+                    "depends_on": [inputs[0]],
+                    "output_type": "field",
+                    "role": "support",
+                    "concept_ids": [],
+                }
+            )
+            produced_by[matrix_id] = "distance_matrix"
+            emits_collection[matrix_id] = False
+            output_types[matrix_id] = "field"
+            decisions.append(
+                {
+                    "id": matrix_id,
+                    "transform": "ROUTE_MATRIX",
+                    "operator": "distance_matrix",
+                    "rule": "composed_for_route_optimize",
+                }
+            )
+            arguments["distance_matrix"] = f"${matrix_id}"
+            inputs = [*inputs, matrix_id]
         produced_by[node_id] = operator if isinstance(operator, str) else ""
+        # `operator` may not be a string here: a planner that writes
+        # `"operator": ["extract_distance", "extract_distance"]` is carried through so the graph
+        # validator can name that fault, and a set lookup on a list raises `unhashable type`
+        # instead -- a crash in this file, recorded against the agent as if it had reasoned its
+        # way there.
+        emits_collection[node_id] = isinstance(operator, str) and (
+            operator in _COLLECTION_OPERATORS
+            or (
+                operator == "batch_geocode"
+                and len((arguments or {}).get("place_names") or []) > 1
+            )
+        )
         output_types[node_id] = output_type
         decisions.append(
             {
@@ -691,6 +857,8 @@ def _bind_named_entities(
     factors: dict[str, Any],
     concept_text: dict[str, str],
     options: Sequence[str],
+    concepts: Sequence[dict[str, Any]],
+    claimed: set[str],
 ) -> dict[str, Any]:
     """Fill the place names a geocode needs from the concept graph, never from the planner.
 
@@ -698,22 +866,62 @@ def _bind_named_entities(
     them for -- so a `RESOLVE_PLACES` node names the concepts it resolves and the text comes from
     there. Letting the planner retype them is how `백련산꿈마을숲정이` became
     `백련산꿈마을숲정` and geocoded nothing, three nodes before the failure surfaced.
+
+    The planner does not always name a concept that exists. Measured over 642 recorded nodes it
+    named one 520 times and invented an id 122 times -- `Option 0`, `candidate_options`, a slug
+    of the anchor's name -- usually when it meant the candidate texts, or when the Analysis stage
+    had returned no usable concepts at all. So the lookup falls through an explicit chain rather
+    than leaving `place_names` empty, which is a `batch_geocode` that geocodes nothing and a
+    graph that fails four nodes later.
     """
 
     if operator != "batch_geocode":
         return arguments
+    requested = [str(value) for value in (step.get("concept_ids") or [])]
+
+    # 1. The node said outright that it resolves the candidate texts.
     if str(factors.get("scope") or "").lower() in {"options", "candidates"}:
         arguments["place_names"] = list(options)
         return arguments
+
+    # 2. Concepts the analysis actually has.
     named = [
-        concept_text[str(value)]
-        for value in (step.get("concept_ids") or [])
-        if str(value) in concept_text and concept_text[str(value)].strip()
+        concept_text[value]
+        for value in requested
+        if value in concept_text and concept_text[value].strip()
     ]
     if named:
         arguments["place_names"] = named
-    elif isinstance(step.get("place_names"), list):
-        arguments["place_names"] = [str(value) for value in step["place_names"]]
+        return arguments
+
+    # 3. Every id it named is invented. When they read as the options -- `Option 0`,
+    #    `candidate_options`, `option_places` -- that is what it meant.
+    if requested and all(
+        "option" in value.lower() or "candidate" in value.lower() for value in requested
+    ):
+        arguments["place_names"] = list(options)
+        return arguments
+
+    # 4. Otherwise take the located concepts no earlier node has claimed. This is the case where
+    #    the Analysis stage returned only `question_context` and the planner had nothing to name.
+    unclaimed = [
+        text
+        for text in (
+            str(concept.get("text") or "").strip()
+            for concept in concepts
+            if isinstance(concept, dict)
+            and concept.get("concept_type") in {"location", "object"}
+            and concept.get("role") != "measure"
+        )
+        if text and text not in claimed
+    ]
+    if unclaimed:
+        arguments["place_names"] = unclaimed
+        return arguments
+
+    # 5. Nothing in the concept graph to resolve. The options are the only places left that the
+    #    question certainly names, and an empty geocode is a certain failure.
+    arguments["place_names"] = list(options)
     return arguments
 
 

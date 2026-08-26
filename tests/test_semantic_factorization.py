@@ -469,3 +469,78 @@ def test_a_stated_radius_reaches_the_filter_that_applies_it() -> None:
 
     filtering = next(step for step in grounded if step["operator"] == "within_radius")
     assert filtering["arguments"]["radius_m"] == 600
+
+
+# ---------------------------------------------------------------------------------------------
+# Concept Analysis is load-bearing now, and it was not before.
+#
+# Measured over the same benchmark rows, the Analysis stage is exactly as weak at `af51e93` as
+# here: 24% vs 19% of questions get no usable concepts, 43% vs 44% name a kind of place and get
+# `target_type: null`. That is not a regression -- it is a long-standing weakness the old
+# architecture did not depend on, because the planner copied place names out of the question
+# itself. The semantic architecture routes place identity through the concept graph, so the same
+# analysis that supported 82.1% supports 50.5%.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_the_fallback_concept_graph_is_built_from_what_the_question_states() -> None:
+    """It used to be the whole question, as one concept, typed as a place."""
+
+    from src.agent.geoflow import normalize_analysis
+    from src.agent.spatial import extract_facts
+
+    question = (
+        "지금 세라존에 있습니다. 계단에서 발을 헛디뎌 발목이 심하게 부었습니다. "
+        "여기서 두 번째로 가까운 정형외과는 다음 중 어디인가요?"
+    )
+    empty = {"intent": "nearby", "concepts": [], "measure": "ranking"}
+    analysis = normalize_analysis(empty, question, "nearby", facts=extract_facts(empty, question))
+
+    texts = [concept["text"] for concept in analysis["concepts"]]
+    assert "세라존" in texts
+    assert "정형외과" in texts
+    assert question not in texts
+    # And the kind reaches the field template retrieval reads.
+    assert analysis["target_type"] == "정형외과"
+
+
+def test_a_synthetic_placeholder_is_never_geocoded() -> None:
+    """The role completion inserts one so the graph has an extent. It names no place.
+
+    Naming it in `concept_ids` sent `batch_geocode` after a sentence -- which is what happened on
+    every question whose analysis produced no extent at all.
+    """
+
+    concepts = [
+        {
+            "id": "question_context",
+            "text": "지금 어딘가에 있습니다. 무엇이 가장 가까운가요?",
+            "concept_type": "object",
+            "role": "extent",
+            "attributes": {"synthetic": True},
+        },
+        {"id": "real", "text": "서울역", "concept_type": "location", "role": "extent"},
+    ]
+    built = _build(
+        [{"id": "a", "transform": "RESOLVE_PLACES", "inputs": [],
+          "concept_ids": ["question_context", "real"]}],
+        concepts=concepts,
+        options=["가", "나"],
+    )
+
+    assert built.graph[0]["arguments"]["place_names"] == ["서울역"]
+
+
+def test_a_question_stating_nothing_resolvable_falls_back_to_a_measure_alone() -> None:
+    """Honest rather than invented: it says what is asked for and nothing about where."""
+
+    from src.agent.geoflow import normalize_analysis
+    from src.agent.spatial import GroundingFacts
+
+    analysis = normalize_analysis(
+        {"concepts": []}, "무엇이 가장 좋은가요?", "poi", facts=GroundingFacts()
+    )
+    places = [c for c in analysis["concepts"] if c["concept_type"] in {"location", "object"}]
+
+    assert all((c.get("attributes") or {}).get("synthetic") for c in places)
+    assert any(c["role"] == "measure" for c in analysis["concepts"])

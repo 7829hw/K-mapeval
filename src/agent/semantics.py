@@ -662,10 +662,14 @@ def factorize_semantic_graph(
     prompt that had to list Kakao's category codes to make the answer possible.
     """
 
+    # Synthetic concepts are excluded outright. The role completion inserts one, carrying the
+    # whole question as its text, whenever an analysis produced no extent -- it exists so the
+    # graph has a contextual root, and it names no place. A planner that lists it in
+    # `concept_ids` would otherwise have a `batch_geocode` sent after a sentence.
     concept_text = {
         str(concept.get("id")): str(concept.get("text") or "")
         for concept in concepts
-        if isinstance(concept, dict)
+        if isinstance(concept, dict) and not (concept.get("attributes") or {}).get("synthetic")
     }
     graph: list[dict[str, Any]] = []
     decisions: list[dict[str, str]] = []
@@ -912,6 +916,10 @@ def _bind_named_entities(
             if isinstance(concept, dict)
             and concept.get("concept_type") in {"location", "object"}
             and concept.get("role") != "measure"
+            # A synthetic concept is a structural placeholder the role completion inserted so
+            # the graph has an extent, and its text is the whole question. It is not an entity,
+            # and geocoding it geocodes a sentence.
+            and not (concept.get("attributes") or {}).get("synthetic")
         )
         if text and text not in claimed
     ]

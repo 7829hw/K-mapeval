@@ -1306,8 +1306,25 @@ def _template_shape_score(
 
 
 def normalize_analysis(
-    payload: dict[str, Any], question: str, fallback_intent: str
+    payload: dict[str, Any],
+    question: str,
+    fallback_intent: str,
+    facts: Any = None,
 ) -> dict[str, Any]:
+    """Normalize the Analysis stage's reply, completing it from `facts` where it came up short.
+
+    The stage returns nothing usable on about a fifth of questions -- measured at 24% on the
+    `af51e93` runs and 19% here, so this is long-standing and not a regression. What changed is
+    the cost. Under the old architecture the planner copied place names out of the question
+    itself, so a threadbare concept graph was decoration; under the semantic one, place identity
+    travels through the concepts, and a `RESOLVE_PLACES` node with nothing to name geocodes the
+    fallback -- which was the entire question text, as one "place".
+
+    `facts` is what the deterministic extractors already read off the same question: the anchor,
+    the kind of place, the stays. Building the fallback from those instead is not new evidence,
+    it is evidence this pipeline had already gathered and was throwing away.
+    """
+
     intent = str(payload.get("intent", "")).strip().lower() or fallback_intent
     raw_measure = payload.get("measure")
     measure = str(raw_measure).strip() if raw_measure not in (None, "") else None
@@ -1332,24 +1349,7 @@ def normalize_analysis(
                 }
             )
     if not concepts:
-        concepts = [
-            {
-                "id": "question_context",
-                "text": question,
-                "concept_type": "object",
-                "role": "extent",
-                "attributes": {},
-                "depends_on": [],
-            },
-            {
-                "id": "requested_answer",
-                "text": measure or "answer choice",
-                "concept_type": "amount",
-                "role": "measure",
-                "attributes": {},
-                "depends_on": ["question_context"],
-            },
-        ]
+        concepts = _concepts_from_facts(facts, measure)
     if measure is None:
         measure = next(
             (
@@ -1365,12 +1365,69 @@ def normalize_analysis(
     # name a type outright; dropping it here is what made a need-shaped question unanswerable.
     target = payload.get("target_type") or payload.get("place_type")
     target_type = str(target).strip() if isinstance(target, str) and target.strip() else None
+    if target_type is None and facts is not None:
+        # The stage leaves this null on 44% of the questions that plainly name a kind of place,
+        # in both revisions. The question scan already found it, and template retrieval reads
+        # this field to tell "the nearest bank" from "which of these two is nearer".
+        stated = getattr(facts, "target_type", None)
+        target_type = str(stated).strip() if isinstance(stated, str) and stated.strip() else None
     return {
         "intent": intent,
         "concepts": concepts,
         "measure": measure,
         "target_type": target_type,
     }
+
+
+def _concepts_from_facts(facts: Any, measure: str | None) -> list[dict[str, Any]]:
+    """A concept graph from what the question was already read to state.
+
+    Never the whole question as one concept. That is not a place, and a `RESOLVE_PLACES` node
+    handed it geocodes a sentence.
+    """
+
+    def concept(cid: str, text: str, kind: str, role: str, depends: list[str]) -> dict[str, Any]:
+        return {
+            "id": cid,
+            "text": text,
+            "concept_type": kind,
+            "role": role,
+            "attributes": {},
+            "depends_on": depends,
+        }
+
+    built: list[dict[str, Any]] = []
+    anchor = getattr(facts, "anchor", None) if facts is not None else None
+    if isinstance(anchor, str) and anchor.strip():
+        built.append(concept("anchor", anchor.strip(), "location", "extent", []))
+    target = getattr(facts, "target_type", None) if facts is not None else None
+    if isinstance(target, str) and target.strip():
+        built.append(
+            concept("target_type", target.strip(), "object", "support",
+                    ["anchor"] if built else [])
+        )
+    for index, stay in enumerate(getattr(facts, "stays", ()) or ()):
+        name = stay[0]
+        if str(name).strip():
+            built.append(concept(f"stop_{index}", str(name).strip(), "location", "extent", []))
+    pair = getattr(facts, "compared_pair", None) if facts is not None else None
+    for index, name in enumerate(pair or ()):
+        if str(name).strip():
+            built.append(concept(f"compared_{index}", str(name).strip(), "location", "extent", []))
+    if not built:
+        # Nothing stated that any extractor could find. A measure alone is still a valid graph:
+        # it says what is being asked for and nothing about where, which is honest.
+        return [concept("requested_answer", measure or "answer choice", "amount", "measure", [])]
+    built.append(
+        concept(
+            "requested_answer",
+            measure or "answer choice",
+            "amount",
+            "measure",
+            [built[0]["id"]],
+        )
+    )
+    return built
 
 
 def build_concept_graph(analysis: dict[str, Any]) -> ConceptGraph:

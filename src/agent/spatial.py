@@ -261,7 +261,12 @@ class SpatialAgent(BenchmarkAgent):
             usage += analysis_response.usage
             raw_analysis = parse_json_object(analysis_response.content)
             fallback_intent = _heuristic_intent(question)
-            analysis = normalize_analysis(raw_analysis, question, fallback_intent)
+            # Read the question's stated factors from the raw reply first, so Concept Analysis
+            # can be completed from them when the stage came up short. Nothing here is new
+            # evidence -- it is what the deterministic extractors already found in the same
+            # question, which the fallback used to discard in favour of the question text.
+            stated = extract_facts(raw_analysis, question)
+            analysis = normalize_analysis(raw_analysis, question, fallback_intent, facts=stated)
             predicted_intent = str(analysis.pop("intent")).lower()
             if predicted_intent not in SUPPORTED_INTENTS:
                 predicted_intent = fallback_intent

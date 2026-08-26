@@ -75,8 +75,13 @@ the granularity the need implies: a neighbouring kind will usually be closer, an
 answers a different question. Use null when the question is not asking for a kind of place at
 all.
 Include all named places and spatial/temporal constraints.
+When the question states a search radius or a compass sector, put the value on the concept that
+carries it, as "attributes": {"radius_m": 600} in metres and {"direction": "북동쪽"}. Grounding
+reads these only when it cannot find the literal in the question itself, so a phrasing you had to
+interpret is exactly the case worth recording; do not restate one the sentence spells out and do
+not invent one the question does not give.
 Return JSON only:
-{"intent":"direction","concepts":[{"id":"anchor","text":"서울역","concept_type":"location","role":"extent","attributes":{},"depends_on":[]},{"id":"answer","text":"direction","concept_type":"field","role":"measure","attributes":{},"depends_on":["anchor"]}],"measure":"direction"}
+{"intent":"direction","concepts":[{"id":"anchor","text":"서울역","concept_type":"location","role":"extent","attributes":{},"depends_on":[]},{"id":"sector","text":"북동쪽","concept_type":"field","role":"sub_condition","attributes":{"direction":"북동쪽"},"depends_on":["anchor"]},{"id":"answer","text":"direction","concept_type":"field","role":"measure","attributes":{},"depends_on":["anchor"]}],"measure":"direction"}
 Do not answer the multiple-choice question and do not invent coordinates."""
 
 GRAPH_PROMPT = """You are Spatial-Agent's Concept Transformation Drafting, GeoFlow Graph

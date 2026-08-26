@@ -3043,3 +3043,82 @@ def test_geocode_falls_back_to_the_place_name_index() -> None:
     missing = ToolRegistry(_EmptyProvider()).invoke("geocode", {"address": "없는주소"})
     assert missing.status == "error"
     assert "PlaceNotFoundError" in missing.error
+
+
+def test_a_trip_stop_the_planner_cut_short_is_restored_from_the_stays() -> None:
+    """`kmapeval_211` lost this way in every run of five revisions, and it is one character.
+
+    `백련산꿈마을숲정이를` is a name plus a particle, and the planner segmented it as
+    `백련산꿈마을숲정` plus `이를`. The short form is still a substring of the question, so the
+    fallback that repairs a *mis-typed* name leaves it alone; only a list of the names the
+    question states can tell the two apart. A trip's stops are stated exactly like its anchor —
+    `_extract_trip_schedule` already reads each one to bind its stay — so they belong in that
+    list. Without it Kakao found nothing and the refusal surfaced three nodes later as
+    `tsp_tw distance_matrix must be square`, naming neither the place nor the lookup.
+    """
+
+    from src.agent.spatial import _ground_graph_literals
+
+    question = (
+        "인게스트하우스에서 출발해 한남매봉공원산책길을 1시간, 백련산꿈마을숲정이를 1시간, "
+        "관악아트홀을 1.5시간 동안 둘러본 뒤 다시 인게스트하우스로 돌아옵니다. "
+        "자동차 총 주행거리가 가장 짧은 방문 순서는 다음 중 무엇인가요?"
+    )
+    options = [
+        "주어진 지도 정보로는 알 수 없음",
+        "백련산꿈마을숲정이 → 한남매봉공원산책길 → 관악아트홀",
+        "관악아트홀 → 한남매봉공원산책길 → 백련산꿈마을숲정이",
+        "한남매봉공원산책길 → 관악아트홀 → 백련산꿈마을숲정이",
+    ]
+    steps = [
+        {
+            "id": "all_locations",
+            "operator": "batch_geocode",
+            "arguments": {
+                "place_names": [
+                    "인게스트하우스",
+                    "한남매봉공원산책길",
+                    "백련산꿈마을숲정",
+                    "관악아트홀",
+                ]
+            },
+            "depends_on": [],
+            "output_type": "object",
+            "role": "extent",
+        }
+    ]
+    grounded = _ground_graph_literals(steps, question, options, "trip")
+    assert grounded[0]["arguments"]["place_names"] == [
+        "인게스트하우스",
+        "한남매봉공원산책길",
+        "백련산꿈마을숲정이",
+        "관악아트홀",
+    ]
+
+
+def test_a_stop_that_resembles_nothing_the_question_states_is_left_alone() -> None:
+    """The restoration only ever puts back a name the question wrote.
+
+    A trip's stays now feed the same list the anchor does, so the negative space is worth pinning:
+    a name that is not a short form of any stated stop stays exactly as the planner wrote it.
+    """
+
+    from src.agent.spatial import _ground_graph_literals
+
+    question = "A타워에서 출발해 B공원을 1시간 둘러본 뒤 다시 A타워로 돌아옵니다. 총 주행거리는?"
+    steps = [
+        {
+            "id": "geo",
+            "operator": "batch_geocode",
+            "arguments": {"place_names": ["A타워", "B공원", "전혀다른어떤장소이름"]},
+            "depends_on": [],
+            "output_type": "object",
+            "role": "extent",
+        }
+    ]
+    grounded = _ground_graph_literals(steps, question, ["약 1km", "약 2km"], "trip")
+    assert grounded[0]["arguments"]["place_names"] == [
+        "A타워",
+        "B공원",
+        "전혀다른어떤장소이름",
+    ]

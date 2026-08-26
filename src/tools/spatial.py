@@ -996,7 +996,7 @@ class SpatialOperatorRegistry:
             raise ValueError("tsp_tw nodes must contain at least one node")
         matrix = _matrix_argument(distance_matrix, len(nodes), metric)
         if matrix is None:
-            raise ValueError("tsp_tw distance_matrix must be square and match nodes")
+            raise ValueError(_matrix_refusal(distance_matrix, len(nodes), metric))
         if len(nodes) > 9:
             raise ValueError("Deterministic tsp_tw supports at most 9 nodes")
         if not 0 <= int(start_index) < len(nodes):
@@ -1397,6 +1397,46 @@ def build_duration_matrix(routes: Any, metric: str = "duration") -> dict[str, An
         "complete": not missing,
         "metric": field,
     }
+
+
+def _matrix_refusal(value: Any, node_count: int, metric: str) -> str:
+    """Say which leg is missing, not just that the square is not a square.
+
+    `kmapeval_211` failed this way in every run of five revisions: the planner copied
+    `백련산꿈마을숲정이를` as `백련산꿈마을숲정`, Kakao found nothing, and the one refusal the run
+    reported was "must be square and match nodes" — three nodes downstream of the place that was
+    never found, naming neither it nor the lookup. The legs are already built and already know
+    which pairs are absent, so the message says so.
+    """
+
+    built = None
+    if isinstance(value, dict) and "missing_legs" in value:
+        # An already-built matrix carries its own gaps; rebuilding it would drop them.
+        built = value
+    elif isinstance(value, dict) and "routes" in value:
+        built = build_duration_matrix(value, metric)
+    elif isinstance(value, list) and value and isinstance(value[0], dict):
+        built = build_duration_matrix(value, metric)
+    if built is None:
+        return (
+            f"tsp_tw distance_matrix must be a {node_count} by {node_count} matrix of "
+            f"{MATRIX_METRICS[metric]}, and what it was given is not one"
+        )
+    if built.get("missing_legs"):
+        absent = ", ".join(f"{origin} -> {destination}" for origin, destination in
+                           built["missing_legs"][:4])
+        more = len(built["missing_legs"]) - 4
+        if more > 0:
+            absent += f", and {more} more"
+        return (
+            f"tsp_tw has no {MATRIX_METRICS[metric]} for {absent}. An absent leg is missing "
+            "evidence, not a zero-cost hop, so the tour is not ranked without it"
+        )
+    return (
+        f"tsp_tw was given {len(built.get('nodes') or [])} routed endpoints for "
+        f"{node_count} nodes; "
+        "the matrix has to cover every node the tour visits"
+    )
 
 
 def _matrix_argument(

@@ -1233,12 +1233,21 @@ def _ground_graph_literals(
     # The place names the question states outright, for repairing one a plan copied short: a plan
     # that geocoded `문래` where the question says `빈칸 문래` routed from another place entirely
     # and counted another route's turns, with every stage reporting success.
+    # Any place the question gives a duration to is stated exactly as its anchor is, and
+    # `_extract_trip_schedule` already reads each one to bind its stay. Not gated on intent: this
+    # list is what the *question* says, so it is gathered the same way whatever the question is
+    # about, and the regex simply finds nothing in a question that states no stay. Without these a
+    # planner that mis-segments a Korean particle -- `백련산꿈마을숲정이를` copied as
+    # `백련산꿈마을숲정` -- geocoded nothing, and the loss surfaced three nodes later as
+    # `tsp_tw distance_matrix must be square`, which names neither the place nor the problem.
+    trip_stays = _extract_trip_schedule(question)[0]
     question_places = [
         name
         for name in (
             anchor,
             _extract_trip_destination(question),
             *(_extract_compared_places(question) or ()),
+            *trip_stays,
         )
         if name
     ]

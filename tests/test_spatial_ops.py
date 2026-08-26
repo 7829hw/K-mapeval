@@ -267,7 +267,10 @@ def test_a_matrix_missing_a_leg_is_reported_rather_than_filled() -> None:
     assert built["complete"] is False
     assert ["S", "B"] in built["missing_legs"]
     operators = SpatialOperatorRegistry()
-    with pytest.raises(ValueError, match="square"):
+    # And the refusal names the leg. "must be square and match nodes" was the only thing
+    # `kmapeval_211` reported in five revisions' runs, three nodes downstream of the place whose
+    # lookup actually failed.
+    with pytest.raises(ValueError, match=r"no duration_s for S -> B"):
         operators.invoke(
             "tsp_tw",
             {"nodes": [{"name": n} for n in built["nodes"]], "distance_matrix": built},

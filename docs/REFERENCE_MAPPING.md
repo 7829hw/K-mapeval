@@ -2851,3 +2851,168 @@ every case the single repair response remained invalid. Other partial errors are
 evidence, out-of-range selections, unsupported subjective fields, malformed planner expressions
 or downstream dependency failures. No question-specific fallback was added. These runs spend the
 datasets again and do not create a new holdout result.
+
+#### Three passes at `98fb7d0`, and what a single pass could not have told us
+
+The value contracts above were committed as `98fb7d0` and then measured properly: three passes a
+side on `dataset/seoul_kmapeval_v7_mcq_300.jsonl` (283 rows), all at concurrency 32, temperature
+0, `MAX_REASONING_STEPS=15`, ReAct on the reference surface with neither parallel tool calls nor a
+forced final answer. No truncation and no context overflow in any pass.
+
+| agent | pass 1 | pass 2 | pass 3 | mean | spread |
+|---|---:|---:|---:|---:|---:|
+| ReAct | 48.4 | 45.9 | 46.6 | 47.0 | 2.5 |
+| Spatial-Agent | 82.3 | 81.3 | 84.8 | 82.8 | 3.5 |
+
+Gap 35.8 against a floor of 28.8. A fourth pass a side at the same revision, run before these
+three, agrees: ReAct 47.0 and Spatial-Agent 83.8.
+
+**These numbers are a level, not a lift.** Every revision before `98fb7d0` in this stack has one
+pass, and those single passes read 80.6 (`b508631`), 84.1 (`6b2deaf`) and 80.2 (`a18719e` plus a
+dirty worktree) for Spatial-Agent. The pre-fix `6b2deaf` pass sits *above* the post-fix three-pass
+mean. Three passes pin where `98fb7d0` sits; they cannot attribute the distance from any of those
+points to the code, and the earlier sections' single-pass comparisons should be read the same way.
+Spatial-Agent's own three-pass spread here is 3.5 points, nearly double the 1.8 the same dataset
+showed at `6bae55c`, so even a three-pass mean carries about ±2.
+
+What the three passes *can* settle is whether the committed repairs held, because a failure class
+either appears in the traces or it does not. Counting execution errors across the three
+Spatial-Agent passes (849 questions, 176 error steps over 98 questions):
+
+| class the commit repaired | `6b2deaf` (1 pass) | `98fb7d0` (3 passes) |
+|---|---:|---:|
+| `float(list)` in amount arithmetic | 7 | **0** |
+| `distance_matrix` over the 15-endpoint limit | 1 | **0** |
+| distance objective combined with clock arguments | 4 | **0** |
+| `batch_place_details` list/row shape | 4 | **0** |
+| distance and duration amounts mixed | 0 | **0** |
+
+Two `float()` TypeErrors do remain, in `timezone` and `calculate_proportion` — the same
+unguarded-input shape in two operators the commit did not touch, not a return of the amount
+arithmetic it did. Three `batch_place_details` errors remain and all three are the contract
+working: an empty id list, a failed dependency, and a geocode row whose `place` is `{}`, which is
+refused rather than silently fetched as a shorter list. The new static checks fired on 4 of 383
+questions in the single-pass runs and never became a terminal failure there.
+
+##### Two defects the three passes exposed
+
+*The value checks were ending questions on the lenient pass.* Four of the eighteen terminal
+Spatial-Agent failures across the three passes were `98fb7d0`'s own new checks: `kmapeval_181`
+twice for a list where `steps_analysis` reads one route, `kmapeval_189` for the same, and
+`kmapeval_255` for five service times against six nodes. Each check is correct about the step —
+`steps_analysis` calls `route.get`, and a list raises `AttributeError` — but it was enforced on
+the lenient pass too, which is the last thing tried before a question is given up on. The executor
+already records a step that raises and carries on: an `open_at_time` `AttributeError` in the same
+set left its question answered correctly. So a one-argument miss was trading a partial answer for
+none. These checks are this port's own, exactly like declared output-type compatibility and
+functional-role ordering, and they now step aside on `strict_types=False` alongside them. The
+formal constraints do not: data availability still refuses leniently, and its message is pinned
+both ways.
+
+*A trip stop the planner cut short.* `kmapeval_211` failed in every run of five revisions with
+`tsp_tw distance_matrix must be square and match nodes`, which named neither the place nor the
+problem. The question writes `백련산꿈마을숲정이를`; the planner segmented the particle wrongly and
+geocoded `백련산꿈마을숲정`, Kakao found nothing, and the loss surfaced three nodes later as a
+matrix that would not square. The short form is still a substring of the question, so the fallback
+that repairs a mis-*typed* name left it alone — only a list of the names the question states can
+separate a truncation from a legitimate span. A trip's stops are stated exactly as its anchor is,
+and `_extract_trip_schedule` already reads each one to bind its stay, so its keys now feed the
+same list the anchor does. The negative space is pinned too: a name resembling no stated stop is
+left as the planner wrote it.
+
+The refusal message was wrong independently of the grounding, and is fixed separately.
+`build_duration_matrix` already reports `missing_legs`, and `tsp_tw` was discarding it; the
+refusal now names the absent legs, or the endpoint count it was given against the node count. An
+earlier reading of this row — that the repair round had produced an incomplete matrix — was
+mistaken: the repair round is not involved, the plan validated on the first attempt, and the
+matrix was incomplete because one endpoint never resolved.
+
+Both changes postdate the three passes, so 47.0/82.8 is what `98fb7d0` scored and every dataset in
+`dataset/` is spent again. Measured over three more passes with both of them in, Spatial-Agent
+scored 80.9 / 84.1 / 85.2, mean **83.4** against `98fb7d0`'s 82.8 — inside a spread of 4.2, so the
+level is unchanged and only the failure accounting moved: value-check terminal failures went 3 to
+0, and terminal failures overall 18 to 14 across three passes.
+
+#### The empty-evidence hole: a measured negative result
+
+On 17 of 849 questions the generation stage picked a candidate while its own reason said the
+evidence was empty — an `[]` retrieval answered as "한 곳" because zero was not among the
+candidates, or the largest number picked after every distance step failed. Fifteen of the
+seventeen were already wrong. The invariants forbid choosing the least-bad match, so the stage was
+given somewhere to say so: a `predicted_answer: null` plus an `insufficient_evidence` flag, its own
+failure type so the refusal would not read as an unparseable answer, and a prompt that spelled out
+the difference from a question the *map* cannot answer.
+
+Three passes killed it.
+
+| | baseline | with the decline |
+|---|---:|---:|
+| passes | 80.9 / 84.1 / 85.2 | 79.9 / 74.9 / 78.1 |
+| mean | **83.4** | **77.6** |
+
+Two independent reasons to revert, and the second matters more than the first.
+
+*It cost 5.8 points.* The flag fired 20–22 times a pass where about 6 deserved it, and 39 of the 63
+declines were on questions the baseline answered correctly. The reasons say why: `kmapeval_223`
+declined after computing "17.827 km" with all six steps green, `kmapeval_138` after computing the
+detour difference, `kmapeval_194` after counting three left turns. What the model calls
+insufficient evidence is *"my computed value is not among the candidates"* — the same reflex as
+"zero is not an option", generalized. No wording fixes that; the judgement was put in the wrong
+place.
+
+*It was family-skewed, and skewed against exactly the families it was written to protect.* Per
+family, over three passes a side:
+
+| family | baseline | with the decline | delta |
+|---|---:|---:|---:|
+| `unanswerable_opening_hours` | 66.7 | 16.7 | **−50.0** |
+| `unanswerable_review_count` | 66.7 | 16.7 | **−50.0** |
+| `unanswerable_price_level` | 66.7 | 33.3 | **−33.3** |
+| `nearby_within_radius_count` | 63.9 | 47.2 | −16.7 |
+| `routing_detour_cost` | 91.7 | 76.4 | −15.3 |
+| `trip_optimal_order` | 81.9 | 68.1 | −13.9 |
+
+The three families whose gold answer *is* "주어진 지도 정보로는 알 수 없음" lost half their rows to a
+mechanism whose prompt explicitly told the model those rows were not it.
+
+The obvious repair — honour the decline only when the execution log corroborates it, say when every
+`measure`-role step errored or came back empty — is disqualified on the same grounds. Those
+families' measure step is a `select_max` on an absent `rating`, which *always* errors, so the
+corroboration rule would license declines precisely where it must not. There is a third reason to
+leave it alone: an abstain path exists in Spatial-Agent's generation stage and has no counterpart
+in ReAct, so adding one changes the comparison rather than measuring either architecture.
+
+Reverted in full. The finding is worth more than the change: the guessing is real, it is small
+(about 2% of questions, three quarters of them already wrong), and it cannot be closed from inside
+the generation stage without either paying six points or biasing five families.
+
+#### Checking a change for family bias
+
+Prompted by the same review, both surviving changes were audited for whether they favour a
+question type rather than the architecture. The method is a replay: take the 846 planner graphs
+the three `98fb7d0` passes actually produced, run the changed code and the unchanged code over
+each, and count where the outputs differ, by family.
+
+*The lenient-pass gating* keys on `strict_types`, a validation mode, and names no family. Its
+measured footprint is the three value-check terminal failures it removes, which fell in
+`routing_turn_count_via` and two `trip_*` families — mixed, and the rule cannot see a family.
+
+*The stated-literal gathering* was caught by the audit. As first written it read the stays only
+`if intent == "trip"`, which is a family condition in the code, so the gate was removed: the
+grounding now gathers every literal the question states however the question is classified, the
+way the anchor and the compared places already were, and the regex simply finds nothing in a
+question that states no stay. Ungating is a byte-identical no-op on all 648 non-trip graphs in the
+replay. The mechanism's whole measured footprint is 6 of 846 graphs — `백련산꿈마을숲정` →
+`백련산꿈마을숲정이` and `서울아레나` → `서울아레나 (2027년 예정)`, two questions in 283 — and both
+happen to be trip questions because that is where this draw's planner truncated a name, not
+because the rule looks for one. Two rows over three passes bound what it can be worth:
+`trip_feasible_count_five` and `trip_optimal_order` each have at most three flips available, so
+this change can account for at most about half of the +7.9 and +5.6 those families moved, and the
+rest is the per-pass noise a 21-row family carries.
+
+One asymmetry the audit surfaced and did not fix: this pre-registry name repair belongs to GeoFlow
+grounding and has no counterpart in ReAct, whose planner writes names straight into tool arguments.
+The *shared* name resolution below the tools — query variants, the evidence floor, branch handling
+in `src/tools/registry.py` — is equivalent, which is what the invariant requires. But a repair
+layer that grows on one side only would widen the gap for a reason that is not the architecture, so
+its footprint belongs in any report that quotes a trip number.

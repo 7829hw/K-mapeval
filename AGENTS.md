@@ -73,6 +73,23 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
 - Use 0-based option indices in datasets, predictions, logs, and reports. The answer wire format is
   `^^N^^`.
 - Never special-case a question ID or option string, and never hardcode an answer.
+- Before shipping a change, measure which families it moves, not just whether the overall accuracy
+  went up. Naming no family in the code is not enough — a rule can still be a family patch by
+  effect, and the point is to measure the architecture, not to handle types. The cheap check is a
+  replay: run the changed and unchanged code over the planner graphs a recorded run already
+  produced and count the differences by family. Two things it has caught. A generation-stage
+  "insufficient evidence" escape hatch cost 5.8 points and took −50/−50/−33 out of the three
+  `unanswerable_*` families — the ones whose gold answer *is* "알 수 없음" — and the obvious
+  corroboration fix was worse, because their measure step always errors, so the rule would have
+  licensed declines exactly there. And a stated-literal repair written `if intent == "trip"` was a
+  family condition in the code; ungating it changed nothing on 648 non-trip graphs, which is the
+  proof that the concentration was in the draw and not in the rule. Record the footprint beside
+  any family number the change touches.
+- An ability added to one architecture is not a fix, it is a change to the comparison. Grounding
+  belongs to Spatial-Agent and the ReAct loop to ReAct, but anything that merely lets one side
+  answer more — an abstain path, a name repair, a retry — has to be justified as part of that
+  architecture and its footprint reported, because a widening gap is only a result if the map is
+  what widened it.
 - A loop that used its whole step budget without answering is `iteration_limit`, not
   `answer_parse_failure`: it is still a miss, exactly as upstream counts it, but the report has to
   say the budget ended it so a family that cannot be answered within the budget is visible.
@@ -132,7 +149,12 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   because the first anchors on Seoul's four densest chain categories where half of all consecutive
   rank gaps fall under `ORDINAL_MARGIN_M` and the second searches a sparse subtype where a fifth
   do. One audit failure is a draw; five in one family and none in its twin is a generator defect,
-  and the lever is the pool or the margin, not the scan.
+  and the lever is the pool or the margin, not the scan. Run today, `data/audit_dataset.py` exits
+  non-zero on 13 of the 16 sets in `dataset/` — every one of them for `nearby_kth_nearest` alone
+  — and only `v7a`, `v7b` and `v7h3` are clean. So do not read "passes the audit" off a benchmark
+  entry written before the k-balance rule existed; re-run it. Until the pool or the margin
+  changes, `nearby_kth_nearest` is not quotable on any of those 13, and nothing else in them is
+  affected.
 - A family's accuracy on one draw is worth less for ReAct than for Spatial-Agent. Over five draws
   at three passes a side, mean cross-draw range per family is 23.6 points for ReAct against 13.6
   for Spatial-Agent, and ten of twelve families swing further for ReAct. So a single-draw family
@@ -208,11 +230,21 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   `data/audit_dataset.py` failed it on `nearby_kth_nearest` — 19 of 24 rows at k=2, because a
   coverage scan limit that did not grow with the build stopped balancing — and `data/` changed to
   fix that, so 48.9/78.9 belongs to `6bae55c`. The 24 rows are not a second answer key and the
-  accuracies stand; see `docs/REFERENCE_MAPPING.md`.
+  accuracies stand; see `docs/REFERENCE_MAPPING.md`. Measured again at `98fb7d0`, three passes a
+  side at concurrency 32: ReAct 48.4/45.9/46.6 (mean 47.0), Spatial-Agent 82.3/81.3/84.8 (mean
+  82.8), gap 35.8. Read that as the *level* at `98fb7d0`, not as a lift over the revisions before
+  it — every earlier revision in that stack has one pass, and those single passes read 80.6,
+  84.1, 80.2 for Spatial-Agent, a swing wider than any effect being claimed. Also **spent again**:
+  the run exposed the value checks ending questions on the lenient pass and a trip stop the
+  planner cut short, and `src/` changed for both.
 - `dataset/seoul_kmapeval_v7_mcq_100.jsonl`: v6 with its two four-stop trip families walked back
   to three stops, because at four the reference baseline runs out of iterations before it can
-  finish one. Built by `data/build_mapeval_v7_benchmark.py`; passes `data/audit_dataset.py`. Shares
-  a generator with v6 but only 18 rows: the draws are live and the cache had expired.
+  finish one. Built by `data/build_mapeval_v7_benchmark.py`. Shares a generator with v6 but only
+  18 rows: the draws are live and the cache had expired. It **no longer passes
+  `data/audit_dataset.py`** — 7 of its 8 `nearby_kth_nearest` rows ask for k=2 — and neither does
+  the 283-row set, at 19 of 24. Nothing about either file changed: the audit gained the k-balance
+  rule after v7 failed it, and it applies at this size too. So `nearby_kth_nearest` is not
+  quotable on either v7 set; every other family and the overall accuracy stand.
 - `dataset/seoul_kmapeval_v7h3_holdout_100.jsonl`: the v7 builder under seed 750914, `v7h3` ids.
   **Held out** — built and run at `8797217`, the first draw for code carrying the arithmetic
   operators, the ordinal template and a drawn ordinal. Three passes against a floor of 23.5: ReAct
@@ -229,7 +261,8 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   scored.
 - `dataset/seoul_kmapeval_v6_mcq_100.jsonl`: v5's families each raised one step (composition or
   ordinality) and the radius family's word order fixed. Built by
-  `data/build_mapeval_v6_benchmark.py`; passes `data/audit_dataset.py`. Measured once (ReAct
+  `data/build_mapeval_v6_benchmark.py`. It no longer passes `data/audit_dataset.py` either, on
+  the same `nearby_kth_nearest` skew as the v7 sets (7 of 8 rows at k=2). Measured once (ReAct
   54/100, Spatial-Agent 60/100), but its two four-stop trip families spend most of the reference
   baseline's step budget — ReAct 14/60 over four passes, 24 rows stopped by it — so quote v7
   instead. No no-tool floor.
@@ -286,9 +319,14 @@ when the user explicitly asks for live execution.
   schema version.
 - The declared-type table in `OPERATOR_INPUT_TYPES` describes what an operator's implementation
   accepts; when the two disagree the implementation is right, and a plan the executor could have
-  run must never be refused for it. Output-type compatibility and role ordering are this port's
-  own rules — upstream has neither — so they inform the repair round and are skipped
-  (`strict_types=False`) on the last attempt before a question is given up on.
+  run must never be refused for it. Output-type compatibility, role ordering and the statically
+  knowable argument values are this port's own rules — upstream has none of them — so they inform
+  the repair round and are skipped (`strict_types=False`) on the last attempt before a question is
+  given up on. The value checks predict *one step's* refusal, and the executor records a step that
+  raises and carries on, so enforcing them leniently trades a partial answer for none: four of
+  eighteen terminal failures over three passes were exactly that. The formal constraints the
+  validator reports — data availability among them — are not in this set and still refuse
+  leniently.
 - When adding or renaming a Spatial-Agent operator, update its implementation,
   `OPERATOR_CONTRACTS`/input types, `GRAPH_PROMPT`, argument normalization, and composition tests.
 - Retrying is bounded by `LLM_RETRY_TIME_BUDGET_SECONDS`, not by the attempt count alone. A

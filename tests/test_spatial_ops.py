@@ -353,10 +353,13 @@ def test_an_unrecognized_priority_is_left_to_fail() -> None:
         ("서울역에서 직선거리 600m 이내에 있는 카페", 600),
         ("서울역에서 800m 안에 있는 은행", 800),
         ("서울역 반경 1.5km 이내", 1500),
-        ("서울역 근처 카페", 2000),
+        # A question that states no radius states none. This used to answer 2,000 m, which was
+        # harmless only while nothing called the extractor unless a classifier had already said
+        # "radius"; presence is the gate now, so a default would be a constraint nobody wrote.
+        ("서울역 근처 카페", None),
     ],
 )
-def test_radius_is_read_from_ordinary_korean(question: str, expected: int) -> None:
+def test_radius_is_read_from_ordinary_korean(question: str, expected: int | None) -> None:
     """A radius is phrased several ways; recognizing one keyword silently used the default.
 
     Every `직선거리 Nm 이내` row in the v2 benchmark was grounded at 2000 m instead of N.
@@ -415,7 +418,7 @@ def test_an_inferred_place_type_grounds_the_retrieval() -> None:
     and the ranking answers "nearest of anything" — which is a closer place of the wrong kind.
     """
 
-    from src.agent.spatial import _ground_graph_literals
+    from src.agent.spatial import _ground_graph_literals, extract_facts
 
     question = (
         "지금 단막극장에 있습니다. 갑자기 비가 쏟아져서 우산을 사야 합니다. 가장 가까운 곳은?"
@@ -443,7 +446,7 @@ def test_an_inferred_place_type_grounds_the_retrieval() -> None:
         },
     ]
 
-    bare = _ground_graph_literals(plan, question, ["A", "B"], "nearby")
+    bare = _ground_graph_literals(plan, question, ["A", "B"], extract_facts({}, question))
     assert all(
         step["arguments"].get("category_code") is None
         for step in bare
@@ -451,7 +454,7 @@ def test_an_inferred_place_type_grounds_the_retrieval() -> None:
     )
 
     grounded = _ground_graph_literals(
-        plan, question, ["A", "B"], "nearby", inferred_type="편의점"
+        plan, question, ["A", "B"], extract_facts({"target_type": "편의점"}, question)
     )
     codes = {
         step["arguments"].get("category_code")
@@ -462,7 +465,7 @@ def test_an_inferred_place_type_grounds_the_retrieval() -> None:
 
 
 @pytest.mark.parametrize(
-    ("question", "intent", "expected"),
+    ("question", "family", "expected"),
     [
         ("지금 단막극장에 있습니다. 우산을 사야 합니다.", "nearby", "단막극장"),
         ("현재 서울역에 있습니다.", "nearby", "서울역"),
@@ -472,14 +475,25 @@ def test_an_inferred_place_type_grounds_the_retrieval() -> None:
         ("서울역으로부터 500m 내에 위치한 카페는", "radius", "서울역"),
         ("서울역에서 북동쪽에 있는 가장 가까운 편의점은", "direction", "서울역"),
         ("서울역 기준 북쪽에서 가장 가까운 편의점은", "direction", "서울역"),
+        # A trip and a route state their origin too, and the same phrase splits carry them.
+        ("가예에서 출발해 세 곳을 둘러본 뒤 돌아옵니다", "trip", "가예"),
+        ("문래에서 홍대입구역까지 자동차로 가면 좌회전은 몇 번인가요?", "routing", "문래"),
     ],
 )
 def test_the_anchor_is_found_however_the_question_states_it(
-    question: str, intent: str, expected: str
+    question: str, family: str, expected: str
 ) -> None:
+    """`family` is provenance, not an argument.
+
+    The relational patterns and the phrase splits were three per-intent tables, and only the one
+    keyed by the Analysis stage's guess was tried -- so a mislabelled question lost its anchor,
+    which costs the geocoder its disambiguation and `recover_option_places` its centre. They are
+    one ordered list now, and the cases above cross every family that has an anchor at all.
+    """
+
     from src.agent.spatial import _extract_anchor
 
-    assert _extract_anchor(question, intent) == expected
+    assert _extract_anchor(question) == expected, family
 
 
 def test_steps_analysis_splits_its_counts_at_the_landmark() -> None:
@@ -566,7 +580,7 @@ def test_nearest_respects_the_kind_of_place_that_was_asked_for() -> None:
 
 
 def test_grounding_binds_the_required_type_onto_nearest() -> None:
-    from src.agent.spatial import _ground_graph_literals
+    from src.agent.spatial import _ground_graph_literals, extract_facts
 
     plan = [
         {
@@ -585,7 +599,7 @@ def test_grounding_binds_the_required_type_onto_nearest() -> None:
     ]
     question = "지금 단막극장에 있습니다. 우산을 사야 합니다. 가장 가까운 곳은?"
 
-    bare = _ground_graph_literals(plan, question, ["A", "B"], "nearby")
+    bare = _ground_graph_literals(plan, question, ["A", "B"], extract_facts({}, question))
     assert all(
         step["arguments"].get("required_type") is None
         for step in bare
@@ -593,7 +607,7 @@ def test_grounding_binds_the_required_type_onto_nearest() -> None:
     )
 
     grounded = _ground_graph_literals(
-        plan, question, ["A", "B"], "nearby", inferred_type="편의점"
+        plan, question, ["A", "B"], extract_facts({"target_type": "편의점"}, question)
     )
     assert [
         step["arguments"]["required_type"] for step in grounded if step["operator"] == "nearest"
@@ -786,7 +800,7 @@ def test_grounding_edits_survive_the_generic_branch() -> None:
     different route than the question named.
     """
 
-    from src.agent.spatial import _ground_graph_literals
+    from src.agent.spatial import _ground_graph_literals, extract_facts
 
     question = "A에서 B까지 자동차로, 거리가 가장 짧은 경로로 운전합니다. C 구간에 진입하기 전까지?"
     plan = [
@@ -808,7 +822,7 @@ def test_grounding_edits_survive_the_generic_branch() -> None:
             "role": "support",
         },
     ]
-    grounded = _ground_graph_literals(plan, question, ["1번", "2번"], "routing")
+    grounded = _ground_graph_literals(plan, question, ["1번", "2번"], extract_facts({}, question))
     priorities = {
         step["operator"]: step["arguments"].get("priority") for step in grounded
     }
@@ -840,7 +854,7 @@ def test_stays_are_bound_to_the_itinerary_the_plan_lists() -> None:
     sentence swallowed the clause in front of the first one and gave the starting point a visit.
     """
 
-    from src.agent.spatial import _ground_graph_literals
+    from src.agent.spatial import _ground_graph_literals, extract_facts
 
     question = (
         "오전 10시 00분에 구름성모텔에서 자동차로 출발해 닻올림을 1.5시간, "
@@ -866,7 +880,9 @@ def test_stays_are_bound_to_the_itinerary_the_plan_lists() -> None:
             "role": "measure",
         }
     ]
-    grounded = _ground_graph_literals(plan, question, ["오후 4시 17분"], "trip")
+    grounded = _ground_graph_literals(
+        plan, question, ["오후 4시 17분"], extract_facts({}, question)
+    )
     assert grounded[0]["arguments"]["stay_durations_s"] == [0.0, 5400.0, 3600.0, 5400.0, 0.0]
 
 
@@ -1024,7 +1040,7 @@ def test_compared_places_are_not_tied_to_one_sentence_template(
 def test_an_empty_measure_takes_the_node_it_depends_on() -> None:
     """A Measure with nothing to measure is a leftover; failing threw away gathered evidence."""
 
-    from src.agent.spatial import _ground_graph_literals
+    from src.agent.spatial import _ground_graph_literals, extract_facts
 
     plan = [
         {
@@ -1041,7 +1057,9 @@ def test_an_empty_measure_takes_the_node_it_depends_on() -> None:
             "role": "measure",
         },
     ]
-    grounded = _ground_graph_literals(plan, "A와 B 사이 거리는?", ["1km"], "distance")
+    grounded = _ground_graph_literals(
+        plan, "A와 B 사이 거리는?", ["1km"], extract_facts({}, "A와 B 사이 거리는?")
+    )
     assert grounded[-1]["arguments"]["value"] == "$span"
 
 
@@ -1601,7 +1619,7 @@ def test_a_route_carries_its_guidance_and_a_travel_time_does_not() -> None:
 def test_an_itinerary_is_the_whole_list_the_plan_geocoded() -> None:
     """A finish time has no legs to time when the plan indexes one stop out of the itinerary."""
 
-    from src.agent.spatial import _ground_graph_literals
+    from src.agent.spatial import _ground_graph_literals, extract_facts
 
     steps = [
         {
@@ -1618,7 +1636,9 @@ def test_an_itinerary_is_the_whole_list_the_plan_geocoded() -> None:
             "role": "measure",
         },
     ]
-    grounded = _ground_graph_literals(steps, "오전 10시에 출발합니다", [], "trip")
+    grounded = _ground_graph_literals(
+        steps, "오전 10시에 출발합니다", [], extract_facts({}, "오전 10시에 출발합니다")
+    )
     assert grounded[-1]["arguments"]["locations"] == "$places"
 
 
@@ -1735,7 +1755,7 @@ def test_a_ranking_answers_on_the_geometry_it_has() -> None:
 
 
 def test_a_tour_cost_is_not_topped_up_with_the_stays_it_already_counts() -> None:
-    from src.agent.spatial import _ground_graph_literals
+    from src.agent.spatial import _ground_graph_literals, extract_facts
 
     question = (
         "천장산 하늘길에서 오후 7시 00분에 약속이 있습니다. 가는 길에 킴스클럽 강남점에서 30분, "
@@ -1773,14 +1793,14 @@ def test_a_tour_cost_is_not_topped_up_with_the_stays_it_already_counts() -> None
             "role": "measure",
         },
     ]
-    grounded = _ground_graph_literals(steps, question, [], "trip")
+    grounded = _ground_graph_literals(steps, question, [], extract_facts({}, question))
     assert grounded[1]["arguments"]["end_index"] == 3
     assert grounded[2]["arguments"]["duration_s"] == "$tsp.total_cost"
     assert "stay_durations_s" not in grounded[2]["arguments"]
 
     # A duration that is genuinely travel-only still gets the stated stays bound beside it.
     steps[2]["arguments"]["duration_s"] = "$legs.total_duration_s"
-    grounded = _ground_graph_literals(steps, question, [], "trip")
+    grounded = _ground_graph_literals(steps, question, [], extract_facts({}, question))
     assert grounded[2]["arguments"]["stay_durations_s"] == [1800.0, 2700.0]
 
 
@@ -1791,7 +1811,7 @@ def test_the_itinerary_carries_its_stays_even_when_it_is_a_reference() -> None:
     rejected the call outright — the whole clock step lost to a length check.
     """
 
-    from src.agent.spatial import _ground_graph_literals
+    from src.agent.spatial import _ground_graph_literals, extract_facts
 
     question = (
         "오전 10시 00분에 가예에서 자동차로 출발해 가산로데오거리를 1시간, "
@@ -1824,14 +1844,14 @@ def test_the_itinerary_carries_its_stays_even_when_it_is_a_reference() -> None:
             "role": "measure",
         },
     ]
-    grounded = _ground_graph_literals(steps, question, [], "trip")
+    grounded = _ground_graph_literals(steps, question, [], extract_facts({}, question))
     assert grounded[-1]["arguments"]["stay_durations_s"] == [0.0, 3600.0, 5400.0, 3600.0, 0.0]
 
 
 def test_a_bare_tour_total_is_not_topped_up_with_stays_either() -> None:
     """`$tsp.total_cost` carries the stays whether or not the planner also wrote an addition."""
 
-    from src.agent.spatial import _ground_graph_literals
+    from src.agent.spatial import _ground_graph_literals, extract_facts
 
     question = (
         "중계동학원가에서 오후 5시 00분에 약속이 있습니다. 가는 길에 킴스클럽 강남점에서 45분, "
@@ -1869,7 +1889,7 @@ def test_a_bare_tour_total_is_not_topped_up_with_stays_either() -> None:
             "role": "measure",
         },
     ]
-    grounded = _ground_graph_literals(steps, question, [], "trip")
+    grounded = _ground_graph_literals(steps, question, [], extract_facts({}, question))
     assert grounded[1]["arguments"]["end_index"] == 3
     assert "stay_durations_s" not in grounded[2]["arguments"]
 
@@ -1877,7 +1897,7 @@ def test_a_bare_tour_total_is_not_topped_up_with_stays_either() -> None:
 def test_a_stated_return_leg_is_part_of_the_itinerary() -> None:
     """"…둘러본 뒤 X로 돌아옵니다" is a leg, and a plan that drops it arrives one drive early."""
 
-    from src.agent.spatial import _ground_graph_literals
+    from src.agent.spatial import _ground_graph_literals, extract_facts
 
     question = (
         "오전 9시 00분에 동산장모텔에서 자동차로 출발해 투모로우바이투게더숲을 1시간, "
@@ -1900,13 +1920,13 @@ def test_a_stated_return_leg_is_part_of_the_itinerary() -> None:
             "role": "measure",
         },
     ]
-    grounded = _ground_graph_literals(steps, question, [], "trip")
+    grounded = _ground_graph_literals(steps, question, [], extract_facts({}, question))
     assert grounded[-1]["arguments"]["locations"] == [*open_names, "동산장모텔"]
     assert grounded[-1]["arguments"]["stay_durations_s"] == [0.0, 3600.0, 5400.0, 3600.0, 0.0]
 
     # A plan that already closed the loop is left exactly as it is.
     steps[0]["arguments"]["place_names"] = [*open_names, "동산장모텔"]
-    grounded = _ground_graph_literals(steps, question, [], "trip")
+    grounded = _ground_graph_literals(steps, question, [], extract_facts({}, question))
     assert grounded[-1]["arguments"]["locations"] == "$p"
 
 
@@ -1940,7 +1960,7 @@ def test_a_round_trip_starts_and_ends_where_the_question_says() -> None:
     is not a name any stay can be looked up by.
     """
 
-    from src.agent.spatial import _ground_graph_literals
+    from src.agent.spatial import _ground_graph_literals, extract_facts
 
     question = (
         "오전 10시 00분에 키이토에서 자동차로 출발해 수락산나들길을 1.5시간, "
@@ -1968,7 +1988,7 @@ def test_a_round_trip_starts_and_ends_where_the_question_says() -> None:
             "role": "measure",
         },
     ]
-    grounded = _ground_graph_literals(steps, question, [], "trip")
+    grounded = _ground_graph_literals(steps, question, [], extract_facts({}, question))
     assert grounded[-1]["arguments"]["locations"] == [
         "키이토",
         "수락산나들길",
@@ -1980,7 +2000,7 @@ def test_a_round_trip_starts_and_ends_where_the_question_says() -> None:
 
     # An itinerary that already runs base-first and closes is left exactly as it is.
     steps[1]["arguments"]["locations"] = [*names, "키이토"]
-    grounded = _ground_graph_literals(steps, question, [], "trip")
+    grounded = _ground_graph_literals(steps, question, [], extract_facts({}, question))
     assert grounded[-1]["arguments"]["locations"] == [*names, "키이토"]
 
 
@@ -2228,9 +2248,9 @@ def test_two_anchors_are_not_an_anchor() -> None:
     from src.agent.spatial import _extract_anchor
 
     both = "가좌동 마을극장과 증산역 6호선 양쪽 모두에서 직선거리 1500m 이내에 있는 대형마트는?"
-    assert _extract_anchor(both, "radius") is None
+    assert _extract_anchor(both) is None
     one = "호스텔온기에서 직선거리 800m 이내에 있는 대형마트는 다음 중 어디인가요?"
-    assert _extract_anchor(one, "radius") == "호스텔온기"
+    assert _extract_anchor(one) == "호스텔온기"
 
 
 def test_a_ranking_key_is_found_through_the_wrapper_a_planner_pointed_at() -> None:
@@ -2645,7 +2665,7 @@ def test_the_concept_role_rule_is_skipped_leniently_like_the_node_one() -> None:
     ordering between them.
     """
 
-    from src.agent.spatial import _factorize_validate_plan
+    from src.agent.spatial import _factorize_validate_plan, extract_facts
 
     analysis = {
             "intent": "nearby",
@@ -2771,10 +2791,18 @@ def test_the_concept_role_rule_is_skipped_leniently_like_the_node_one() -> None:
     options = ["동작고려의원", "김영내과의원", "이용국내과의원", "기쁨준내과의원"]
 
     with pytest.raises(ValueError, match="Concept role ordering violation"):
-        _factorize_validate_plan(analysis, {"graph": graph}, question, options, "nearby", 15)
+        _factorize_validate_plan(
+            analysis, {"graph": graph}, question, options, extract_facts({}, question), 15
+        )
 
     _, steps, _ = _factorize_validate_plan(
-        analysis, {"graph": graph}, question, options, "nearby", 15, strict_types=False
+        analysis,
+        {"graph": graph},
+        question,
+        options,
+        extract_facts({}, question),
+        15,
+        strict_types=False,
     )
     assert [step["id"] for step in steps] == ["all_locations", "distances", "third_nearest"]
 
@@ -2787,7 +2815,7 @@ def test_a_node_that_names_no_operator_is_the_planners_failure_not_a_crash() -> 
     an `agent_reasoning_failure` it had to be read to understand.
     """
 
-    from src.agent.spatial import _factorize_validate_plan
+    from src.agent.spatial import _factorize_validate_plan, extract_facts
 
     analysis = {
         "intent": "distance",
@@ -2822,7 +2850,12 @@ def test_a_node_that_names_no_operator_is_the_planners_failure_not_a_crash() -> 
 
     with pytest.raises(ValueError, match="names no operator"):
         _factorize_validate_plan(
-            analysis, {"graph": graph}, "서울역에서 경복궁까지?", ["1km", "2km"], "distance", 15
+            analysis,
+            {"graph": graph},
+            "서울역에서 경복궁까지?",
+            ["1km", "2km"],
+            extract_facts({}, "서울역에서 경복궁까지?"),
+            15,
         )
 
 

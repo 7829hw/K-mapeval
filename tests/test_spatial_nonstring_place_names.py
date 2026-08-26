@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.agent.spatial import _ground_graph_literals, _is_shortened_name
+from src.agent.spatial import _ground_graph_literals, _is_shortened_name, extract_facts
 from src.tools.registry import ToolRegistry
 
 
@@ -61,11 +61,12 @@ def test_grounding_survives_object_valued_place_names() -> None:
             "role": "condition",
         }
     ]
+    question = "우방스테이에서 출발해 후암동전망대를 1.5시간 둘러본 뒤 돌아옵니다. 총 거리는?"
     grounded = _ground_graph_literals(
         graph,
-        question="우방스테이에서 출발해 후암동전망대를 1.5시간 둘러본 뒤 돌아옵니다. 총 거리는?",
+        question=question,
         options=["약 20.0km", "약 25.0km", "약 30.0km", "약 35.0km"],
-        intent="trip",
+        facts=extract_facts({}, question),
     )
     assert len(grounded) == 1
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -361,6 +362,10 @@ class SpatialAgent(BenchmarkAgent):
             analysis["intent"] = intent
             predicted_intent = intent
             trace.append({"stage": "analyze", **analysis})
+            # Read once, from the question and the concept graph. Grounding asks this and never
+            # asks what the question was classified as; `intent` below reaches only the template
+            # retrieval, the evaluation prompt, and the `predicted_intent` the report records.
+            facts = extract_facts(analysis, question)
 
             templates = retrieve_templates(intent, question)
             trace.append(
@@ -398,7 +403,7 @@ class SpatialAgent(BenchmarkAgent):
                     plan,
                     question,
                     options,
-                    intent,
+                    facts,
                     self.max_steps,
                 )
             except ValueError as graph_error:
@@ -443,7 +448,7 @@ class SpatialAgent(BenchmarkAgent):
                         repaired_plan,
                         question,
                         options,
-                        intent,
+                        facts,
                         self.max_steps,
                     )
                 except ValueError as repair_error:
@@ -460,7 +465,7 @@ class SpatialAgent(BenchmarkAgent):
                             repaired_plan,
                             question,
                             options,
-                            intent,
+                            facts,
                             self.max_steps,
                             strict_types=False,
                         )
@@ -480,7 +485,7 @@ class SpatialAgent(BenchmarkAgent):
                                 plan,
                                 question,
                                 options,
-                                intent,
+                                facts,
                                 self.max_steps,
                                 strict_types=False,
                             )
@@ -703,7 +708,7 @@ def _factorize_validate_plan(
     plan: dict[str, Any],
     question: str,
     options: list[str],
-    intent: str,
+    facts: GroundingFacts,
     max_steps: int,
     *,
     strict_types: bool = True,
@@ -716,13 +721,7 @@ def _factorize_validate_plan(
             f"GeoFlow graph has {len(raw_steps)} operators, exceeding "
             f"MAX_REASONING_STEPS={max_steps}"
         )
-    grounded = _ground_graph_literals(
-        raw_steps,
-        question,
-        options,
-        intent,
-        inferred_type=analysis.get("target_type"),
-    )
+    grounded = _ground_graph_literals(raw_steps, question, options, facts)
     factorized = factorize_geoflow(analysis, {"graph": grounded}, strict_types=strict_types)
     # The planner budget above governs what the planner authored. Retrieval fan-out added
     # during grounding is deterministic and gets its own allowance on top of it.
@@ -1175,33 +1174,129 @@ def _carries_written_sum(value: str) -> bool:
     return parsed is not None and (len(parsed[0]) > 1 or parsed[1] != 0.0)
 
 
+@dataclass(frozen=True)
+class GroundingFacts:
+    """What the question states, read once, before any node of the graph is looked at.
+
+    Each field is a spatial factor the paper's concept graph is supposed to carry: the extent to
+    search from, the kind of thing sought, the sub-conditions that narrow it, and the objective.
+    Grounding used to reach for these one at a time and only when `analysis["intent"]` matched a
+    hard-coded set -- a radius was read only from a question the Analysis stage had labelled
+    `radius`, a compared pair only from one it had labelled `distance`. Whether a question
+    *states* a radius is a property of the question; whether a classifier said "radius" is a
+    property of the classifier, and on the recorded runs the two disagree often: 21 of 90
+    `nearby_subtype_kth` graphs were labelled `poi`, so their retrieval never received the kind
+    of place the question names.
+
+    Presence is the gate now. A fact that is not in the question is `None`, and the branch that
+    needs it does not run.
+    """
+
+    anchor: str | None = None
+    target_type: str | None = None
+    radius_m: int | None = None
+    direction: str | None = None
+    compared_pair: tuple[str, str] | None = None
+    route_priority: str | None = None
+    returns_to_start: bool = False
+    stated_order: bool = False
+
+
+def extract_facts(analysis: dict[str, Any], question: str) -> GroundingFacts:
+    """Read the question's stated factors once, from the concept graph and the question text.
+
+    Which of the two leads is decided per fact rather than globally, and the rule is what kind of
+    fact it is.
+
+    A radius, a compass sector, a pair of compared names, a routing preference, a closing leg and
+    a fixed order are all written in the sentence verbatim. For those the question is the record
+    and the scan over it is exact, so it goes first; an LLM re-transcription of a literal can only
+    introduce error, which is the same reason the option texts and the place names are bound from
+    the question rather than accepted from the planner. The concept graph is consulted *after*,
+    to recover a literal the scan did not find -- a phrasing the patterns do not know is exactly
+    the case the analysis can still describe.
+
+    `target_type` is the other kind. "우산을 사야 합니다" states no kind of place at all, and the
+    answer is 편의점 only by inference, which is the Analysis stage's job and not a regex's. The
+    question's own words still win when it names one; `analysis["target_type"]` fills the rest.
+    """
+
+    radius_m = _extract_radius_m(question)
+    if radius_m is None:
+        radius_m = _stated_number(analysis, "radius_m", "radius")
+    direction = _extract_requested_direction(question) or _stated_text(
+        analysis, "direction", "bearing"
+    )
+    return GroundingFacts(
+        anchor=_extract_anchor(question),
+        target_type=_extract_target_type(question) or analysis.get("target_type"),
+        radius_m=radius_m,
+        direction=direction,
+        compared_pair=_extract_compared_places(question),
+        route_priority=_extract_route_priority(question),
+        returns_to_start=_returns_to_start(question),
+        stated_order=_states_visiting_order(question),
+    )
+
+
+def _concept_attributes(analysis: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        concept["attributes"]
+        for concept in (analysis.get("concepts") or [])
+        if isinstance(concept, dict) and isinstance(concept.get("attributes"), dict)
+    ]
+
+
+def _stated_number(analysis: dict[str, Any], *keys: str) -> int | None:
+    """A metre count the Analysis stage attached to a concept, under any of these keys.
+
+    Written leniently on purpose: the stage returns free-form attributes today, so "600",
+    "600m" and 600 all have to read as 600. It is a recovery path -- the question scan has
+    already failed by the time this runs.
+    """
+
+    for attributes in _concept_attributes(analysis):
+        for key in keys:
+            if key not in attributes:
+                continue
+            found = re.search(r"([\d,]+(?:\.\d+)?)\s*(km)?", str(attributes[key]), re.IGNORECASE)
+            if not found:
+                continue
+            value = float(found.group(1).replace(",", ""))
+            return round(value * 1000 if found.group(2) else value)
+    return None
+
+
+def _stated_text(analysis: dict[str, Any], *keys: str) -> str | None:
+    for attributes in _concept_attributes(analysis):
+        for key in keys:
+            value = attributes.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
 def _ground_graph_literals(
     steps: list[dict[str, Any]],
     question: str,
     options: list[str],
-    intent: str,
-    *,
-    inferred_type: str | None = None,
+    facts: GroundingFacts,
 ) -> list[dict[str, Any]]:
     """Bind verbatim question literals after drafting, before graph validation.
 
     GeoFlow factors such as a radius, requested direction, and the candidate option texts are
     constants from the question, not values that an LLM should invent or route through a
-    synthetic operator output.
+    synthetic operator output. `facts` is that reading of the question; every branch below asks
+    whether a fact is present, never what a classifier called the question.
     """
 
-    anchor = _extract_anchor(question, intent)
-    target = None
-    if intent in {"nearby", "direction", "radius"}:
-        # The question's own words first; the Analysis stage's inference when it did not name a
-        # type. A question that describes a need never states one, and without this the
-        # retrieval loses its category and the ranking answers "nearest of anything".
-        target = _extract_target_type(question, intent) or inferred_type
-    radius_m = _extract_radius_m(question) if intent == "radius" else None
+    anchor = facts.anchor
+    target = facts.target_type
+    radius_m = facts.radius_m
     specifications = _nearby_retrieval_specs(target) if target else []
     # tsp_tw's service_times are positional, so the stays can only be bound once the node list the
     # plan geocoded is known — it is the place order every downstream index refers to.
-    route_priority = _extract_route_priority(question)
+    route_priority = facts.route_priority
     # The itinerary is whichever `batch_geocode` node lists more than two places. That structural
     # test is the real guard; the `intent == "trip"` conjunct that used to sit in front of it did
     # nothing a trip plan can notice, and in a plan the Analysis stage labelled something else it
@@ -1431,9 +1526,8 @@ def _ground_graph_literals(
             grounded.append({**step, "arguments": arguments})
             continue
         if operator == "filter_by_direction":
-            direction = _extract_requested_direction(question)
-            if direction:
-                arguments["direction"] = direction
+            if facts.direction:
+                arguments["direction"] = facts.direction
             grounded.append({**step, "arguments": arguments})
             continue
         if operator == "recover_option_places":
@@ -1452,16 +1546,14 @@ def _ground_graph_literals(
             )
             if category and len(specifications) == 1:
                 arguments["category_code"] = category
-            if intent == "direction":
+            if facts.direction:
                 # Recovery runs after the candidates were filtered and adds the option texts the
                 # retrieval missed — regardless of where they are, until it is told. A recovered
                 # mart 271 m *south* of the anchor out-ranked the northern one the filter had
                 # correctly found at 961 m, and the direction the question asks about was gone
                 # from the answer. The sector is the recovered option's constraint like the
-                # radius already is.
-                requested = _extract_requested_direction(question)
-                if requested:
-                    arguments["direction"] = requested
+                # radius already is. A question that names no sector has none to bind.
+                arguments["direction"] = facts.direction
             grounded.append({**step, "arguments": arguments})
             continue
         if operator in {"match_options", "match_distance_options", "match_type_options"}:
@@ -1469,7 +1561,10 @@ def _ground_graph_literals(
             # paraphrases or numerically re-types them breaks the comparison.
             arguments["options"] = options
             if operator == "match_options":
-                arguments["mode"] = "radius_set" if intent == "radius" else "nearest"
+                # A stated radius is what makes the options a set to be matched whole
+                # rather than candidates to be ranked; the classifier's label was standing in
+                # for the same fact.
+                arguments["mode"] = "radius_set" if radius_m is not None else "nearest"
             grounded.append({**step, "arguments": arguments})
             continue
         if operator != "batch_geocode":
@@ -1479,7 +1574,7 @@ def _ground_graph_literals(
             grounded.append({**step, "arguments": arguments})
             continue
         names = list(arguments.get("place_names") or [])
-        pair = _extract_compared_places(question) if intent == "distance" else None
+        pair = facts.compared_pair
         written_anchor = arguments.get("anchor")
         batch_anchor = anchor or (
             written_anchor if isinstance(written_anchor, str) and written_anchor.strip() else None
@@ -1520,7 +1615,7 @@ def _ground_graph_literals(
             ):
                 names.insert(0, batch_anchor)
         if (
-            intent in {"nearby", "direction", "routing"}
+            _ranks_the_options(steps, str(step.get("id") or ""))
             and len(names) == len(options) + 1
             and all("|" not in option for option in options)
         ):
@@ -1528,6 +1623,85 @@ def _ground_graph_literals(
         arguments["place_names"] = names
         grounded.append({**step, "arguments": arguments})
     return grounded
+
+
+# What a batch of geocoded names is *for*, read off the graph rather than off a classifier's
+# label. A node whose places end up in an option match or a nearest-of ranking is a candidate
+# search, and its list after the anchor is the option texts. A node whose places end up in a tour
+# or a schedule is an itinerary, and overwriting its stops with the option texts would answer a
+# different trip.
+_OPTION_RANKING_OPERATORS = frozenset(
+    {
+        "match_options",
+        "match_distance_options",
+        "match_type_options",
+        "nearest",
+        "filter_by_direction",
+        "recover_option_places",
+    }
+)
+_ITINERARY_OPERATORS = frozenset(
+    {"tsp_tw", "calculate_finish_time", "calculate_start_time", "aggregate_route_groups"}
+)
+
+
+def _ranks_the_options(steps: list[dict[str, Any]], node_id: str) -> bool:
+    """Does everything downstream of this node treat its places as the candidate options?
+
+    This replaces `intent in {"nearby", "direction", "routing"}`, whose real content was "not a
+    trip": the excluded label that mattered was `trip`, because splicing the option texts into an
+    itinerary rewrites the stops. Asking the graph is both narrower and safer -- a routing plan
+    the Analysis stage happened to call `trip` used to lose the splice, and a trip plan it called
+    `routing` used to get one.
+    """
+
+    if not node_id:
+        return False
+    reachable = _downstream_operators(steps, node_id)
+    return bool(reachable & _OPTION_RANKING_OPERATORS) and not (reachable & _ITINERARY_OPERATORS)
+
+
+def _downstream_operators(steps: list[dict[str, Any]], node_id: str) -> set[str]:
+    """Every operator reachable from this node, following `depends_on` and `$node` references."""
+
+    consumers: dict[str, set[str]] = {}
+    operators: dict[str, str] = {}
+    for step in steps:
+        current = str(step.get("id") or "")
+        if not current:
+            continue
+        operators[current] = str(step.get("operator") or "")
+        for source in _referenced_nodes(step):
+            consumers.setdefault(source, set()).add(current)
+    seen: set[str] = set()
+    frontier = [node_id]
+    while frontier:
+        current = frontier.pop()
+        for consumer in consumers.get(current, ()):
+            if consumer not in seen:
+                seen.add(consumer)
+                frontier.append(consumer)
+    return {operators[node] for node in seen if node in operators}
+
+
+def _referenced_nodes(step: dict[str, Any]) -> set[str]:
+    """The node ids this step reads: its declared dependencies plus any `$node` it writes."""
+
+    sources = {str(value) for value in (step.get("depends_on") or [])}
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+        elif isinstance(value, str):
+            for match in re.finditer(r"\$([A-Za-z_][\w-]*)", canonical_reference(value)):
+                sources.add(match.group(1))
+
+    walk(step.get("arguments") if step.get("arguments") is not None else step.get("params"))
+    return sources
 
 
 def _indexed_references_by_root(steps: list[dict[str, Any]]) -> dict[str, int]:
@@ -1601,10 +1775,25 @@ _COMPARED_PLACE_PATTERNS = (
     re.compile(r"^(.+?)에서\s+(.+?)까지(?:의)?\s+직선\s*거리"),
 )
 
+# How many separations the question actually states. Two of them is a difference question over
+# three places -- "A에서 B까지의 직선거리와 A에서 C까지의 직선거리는 얼마나 차이가 나나요?" --
+# and the patterns above read only the first pair out of it.
+_SEPARATION_CLAUSE = re.compile(r"(?:까지|사이|간)(?:의)?\s*직선\s*거리")
+
 
 def _extract_compared_places(question: str) -> tuple[str, str] | None:
-    """The two POI names a straight-line-distance question compares, verbatim."""
+    """The two POI names a straight-line-distance question compares, verbatim.
 
+    Only when the question compares exactly two. "A에서 B까지의 직선거리와 A에서 C까지의
+    직선거리는 얼마나 차이가 나나요?" names three places and states two separations, and reading
+    the first pair off it and binding `place_names` to it deletes C from the plan -- the question
+    then measures one of the two distances it asked to compare. That was already happening on the
+    `poi_distance_difference` rows the Analysis stage happened to label `distance`; it is refused
+    outright now rather than more widely.
+    """
+
+    if len(_SEPARATION_CLAUSE.findall(question)) != 1:
+        return None
     for pattern in _COMPARED_PLACE_PATTERNS:
         match = pattern.search(question)
         if match:
@@ -1631,10 +1820,16 @@ _TARGET_TYPE_LEADS: dict[str, tuple[str, ...]] = {
     "radius": (r"(?:이내|안|내)에\s*(?:있는|위치한)\s+",),
 }
 
-_TARGET_TYPE_PATTERNS: dict[str, tuple[str, ...]] = {
-    intent: tuple(lead + r"(.+?)" + _TARGET_TYPE_TAIL for lead in leads)
-    for intent, leads in _TARGET_TYPE_LEADS.items()
-}
+# Flattened deliberately. The leads were keyed by intent and only the matching key was tried,
+# which meant a question the Analysis stage mislabelled had its stated kind of place read as "no
+# kind at all". The leads do not compete: each names a different relation, and over every question
+# in `dataset/` trying all three finds a type in exactly the `nearby`, `radius`, `direction` and
+# legacy `poi` rows and in no `trip` or `routing` row.
+_TARGET_TYPE_PATTERNS: tuple[str, ...] = tuple(
+    lead + r"(.+?)" + _TARGET_TYPE_TAIL
+    for leads in _TARGET_TYPE_LEADS.values()
+    for lead in leads
+)
 
 
 # What a question says when it is *not* naming a kind of place. "다음 중 걸어가기에 가장 가까운
@@ -1643,8 +1838,8 @@ _TARGET_TYPE_PATTERNS: dict[str, tuple[str, ...]] = {
 _PLACEHOLDER_TYPES = frozenset({"곳", "장소", "것", "데", "지점", "위치"})
 
 
-def _extract_target_type(question: str, intent: str) -> str | None:
-    for pattern in _TARGET_TYPE_PATTERNS.get(intent, ()):
+def _extract_target_type(question: str) -> str | None:
+    for pattern in _TARGET_TYPE_PATTERNS:
         match = re.search(pattern, question)
         found = match.group(1).strip() if match else ""
         if found and "".join(found.split()) not in _PLACEHOLDER_TYPES:
@@ -1882,13 +2077,20 @@ def _extract_route_priority(question: str) -> str | None:
     return None
 
 
-def _extract_radius_m(question: str) -> int:
+def _extract_radius_m(question: str) -> int | None:
+    """The radius the question states, in metres, or nothing when it states none.
+
+    It used to answer 2,000 for a question with no radius in it. That was harmless only because
+    nothing called it unless a classifier had already said "radius"; with presence as the gate,
+    a made-up default would be a stated constraint the question never stated.
+    """
+
     for pattern in _RADIUS_PATTERNS:
         match = re.search(pattern, question, re.IGNORECASE)
         if match:
             radius = float(match.group(1).replace(",", ""))
             return round(radius * 1000 if match.group(2).lower() == "km" else radius)
-    return 2000
+    return None
 
 
 def _extract_requested_direction(question: str) -> str | None:
@@ -1914,11 +2116,46 @@ def _extract_requested_direction(question: str) -> str | None:
 
 # "I am at X" is said several ways, and an anchor phrasing the splitter does not know reads as
 # no anchor at all — the geocoder then loses its disambiguation and `recover_option_places` its
-# centre. Tried before the intent-specific separators because it names the anchor outright.
+# centre. Tried before the relational patterns because it names the anchor outright.
 _ANCHOR_PATTERNS = (
     r"지금\s+(.+?)에\s+(?:있|와\s*있|머물)",
     r"현재\s+(.+?)에\s+(?:있|머물)",
     r"^(.+?)에\s+있는데",
+)
+
+# Then the relation the question states between the anchor and what it asks about: nearest-of,
+# within-a-radius, in-a-sector. These were three per-intent tables and only the entry matching the
+# Analysis stage's guess was ever tried, so a question it mislabelled lost its anchor -- which
+# costs the geocoder its disambiguation and `recover_option_places` its centre. They are one
+# ordered list now, most specific first, and a question that states none of these relations falls
+# through to the separators exactly as before.
+# Ordered most-constrained first, which is what the per-intent keying used to do implicitly. A
+# sector question also says "가장 가까운" -- "서울역 기준 북쪽에서 가장 가까운 편의점" -- so the
+# nearest-of pattern would swallow "서울역 기준 북쪽" as the anchor if it ran first. Likewise a
+# radius question says "에서"; its metre count is what distinguishes it.
+_ANCHOR_RELATIONS = (
+    r"^(.+?)(?:에서|을\s*기준으로|를\s*기준으로|\s기준(?:으로)?)\s*"
+    r"(?:볼\s*때\s*)?(?:북동|남동|남서|북서|북|남|동|서)쪽\s*(?:방향)?(?:에|에서|으로)",
+    r"^(.+?)(?:에서|으로부터)\s*(?:반경|직선\s*거리|거리)?\s*[\d,.]+\s*(?:km|m)",
+    r"^(.+?)(?:에서|으로부터|와|과)\s*(?:가장\s*)?(?:가까운|인접한)",
+)
+
+# Last, the plain phrase splits, ordered longest-and-most-specific first so the bare "에서" that
+# ends the list only ever runs when nothing more definite matched. "A에서 B까지 자동차로" is the
+# routing phrasing and the first "에서" is where the drive starts: without it a plan that geocoded
+# `문래` for the question's `빈칸 문래` kept the shortened name, resolved a different place, and
+# counted the turns of a route nobody asked about.
+_ANCHOR_SEPARATORS = (
+    "에서 가장 가까운",
+    "에서 직선거리",
+    "에서 북쪽",
+    "에서 남쪽",
+    "에서 동쪽",
+    "에서 서쪽",
+    "에서 출발",
+    "에서 자동차",
+    " 반경",
+    "에서",
 )
 
 
@@ -1927,39 +2164,14 @@ _ANCHOR_PATTERNS = (
 _TWO_ANCHOR_MARKERS = ("양쪽", "둘 다", "모두에서")
 
 
-def _extract_anchor(question: str, intent: str) -> str | None:
-    for pattern in _ANCHOR_PATTERNS:
+def _extract_anchor(question: str) -> str | None:
+    """The place the question measures from, read from the question and nothing else."""
+
+    for pattern in (*_ANCHOR_PATTERNS, *_ANCHOR_RELATIONS):
         match = re.search(pattern, question)
         if match and match.group(1).strip():
             return _single_anchor(match.group(1).strip())
-    intent_patterns = {
-        "nearby": (
-            r"^(.+?)(?:에서|으로부터|와|과)\s*(?:가장\s*)?(?:가까운|인접한)",
-        ),
-        "radius": (
-            r"^(.+?)(?:에서|으로부터)\s*(?:반경|직선\s*거리|거리)?\s*[\d,.]+\s*(?:km|m)",
-        ),
-        "direction": (
-            r"^(.+?)(?:에서|을\s*기준으로|를\s*기준으로|\s기준(?:으로)?)\s*"
-            r"(?:볼\s*때\s*)?(?:북동|남동|남서|북서|북|남|동|서)쪽\s*(?:방향)?(?:에|에서|으로)",
-        ),
-    }
-    for pattern in intent_patterns.get(intent, ()):
-        match = re.search(pattern, question)
-        if match and match.group(1).strip():
-            return _single_anchor(match.group(1).strip())
-    separators = {
-        "radius": (" 반경", "에서 직선거리"),
-        "trip": ("에서 출발",),
-        # "A에서 B까지 자동차로" is the other half of the routing phrasing, and the first "에서"
-        # is where the drive starts. Without it a plan that geocoded `문래` for the question's
-        # `빈칸 문래` kept the shortened name, resolved a different place, and counted the turns
-        # of a route nobody asked about.
-        "routing": ("에서 자동차", "에서"),
-        "nearby": ("에서 가장 가까운",),
-        "direction": ("에서 북쪽", "에서 남쪽", "에서 동쪽", "에서 서쪽"),
-    }
-    for separator in separators.get(intent, ()):
+    for separator in _ANCHOR_SEPARATORS:
         if separator in question:
             return _single_anchor(question.split(separator, 1)[0].strip())
     return None
@@ -2037,6 +2249,13 @@ def _question_spans(question: str, length: int) -> list[str]:
     return spans
 
 
+# "헤이갤러리 근처에서 분위기가 가장 좋은 카페" names 헤이갤러리 and then says "near it". The
+# vicinity word is not part of the name, and binding it produced `batch_geocode("헤이갤러리 근처")`
+# -- a place that does not exist, written over the option the plan had geocoded. Only ever
+# stripped from the *tail*, and only when something is left.
+_VICINITY_TAIL = re.compile(r"\s*(?:근처|인근|주변|부근|일대)$")
+
+
 def _single_anchor(candidate: str) -> str | None:
     """The anchor, unless the text in hand names two of them.
 
@@ -2047,7 +2266,7 @@ def _single_anchor(candidate: str) -> str | None:
 
     if any(marker in candidate for marker in _TWO_ANCHOR_MARKERS):
         return None
-    return candidate or None
+    return _VICINITY_TAIL.sub("", candidate).strip() or None
 
 
 def _is_shortened_name(candidate: Any, expected: Any) -> bool:

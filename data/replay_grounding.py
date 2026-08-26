@@ -98,18 +98,22 @@ def _same_question(logged: str, asked: str) -> bool:
 def _ground(graph: list[dict[str, Any]], question: str, options: list[str], analysis: dict) -> Any:
     """Call whichever signature this revision's grounding has."""
 
-    from src.agent.spatial import _ground_graph_literals
+    from src.agent import spatial
 
-    parameters = inspect.signature(_ground_graph_literals).parameters
+    parameters = inspect.signature(spatial._ground_graph_literals).parameters
     if "intent" in parameters:
-        return _ground_graph_literals(
+        return spatial._ground_graph_literals(
             graph,
             question,
             options,
             str(analysis.get("intent") or "poi"),
             inferred_type=analysis.get("target_type"),
         )
-    return _ground_graph_literals(graph, question, options, analysis=analysis)
+    # Grounding takes the question's stated factors now, and reading them is part of what a
+    # replay has to reproduce -- `extract_facts` is where the intent branches went.
+    return spatial._ground_graph_literals(
+        graph, question, options, spatial.extract_facts(analysis, question)
+    )
 
 
 def replay(report_paths: list[Path]) -> dict[str, Any]:

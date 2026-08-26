@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.agent.spatial import _ground_graph_literals, _states_visiting_order
+from src.agent.spatial import _ground_graph_literals, _states_visiting_order, extract_facts
 from src.tools.spatial import SpatialOperatorRegistry, _normalize_arguments
 
 
@@ -307,7 +307,11 @@ def test_grounding_binds_the_stated_order_and_drops_a_fixed_end() -> None:
             "총 3시간이 있고 자동차로 이동합니다. 몇 곳을 방문할 수 있나요?"
         ),
         options=["한 곳", "두 곳", "세 곳", "네 곳"],
-        intent="trip",
+        facts=extract_facts({}, (
+            "지금 헤이븐스테이 종로에 있습니다. GS더프레시 성북보문점을 1.5시간, "
+            "선유도역골목형상점가를 1시간 동안 적힌 순서대로 둘러보려 합니다. "
+            "총 3시간이 있고 자동차로 이동합니다. 몇 곳을 방문할 수 있나요?"
+        )),
     )
     arguments = grounded[0]["arguments"]
     assert arguments["fixed_order"] is True
@@ -342,7 +346,11 @@ def test_grounding_leaves_an_optimal_order_question_free_to_reorder() -> None:
             "자동차 총 주행거리가 가장 짧은 방문 순서는 다음 중 무엇인가요?"
         ),
         options=["A → B", "B → A", "A → A", "B → B"],
-        intent="trip",
+        facts=extract_facts({}, (
+            "제일모텔에서 출발해 난곡동 벽화마을을 1시간, 봉산무장애숲길을 1.5시간 동안 "
+            "둘러본 뒤 다시 제일모텔로 돌아옵니다. "
+            "자동차 총 주행거리가 가장 짧은 방문 순서는 다음 중 무엇인가요?"
+        )),
     )
     arguments = grounded[0]["arguments"]
     assert not arguments.get("fixed_order")

@@ -23,6 +23,7 @@ from src.agent.spatial import (
     _heuristic_intent,
     _resolve_output_binding,
     _resolve_references,
+    extract_facts,
 )
 from src.llm import LLMResponse, LLMToolCall
 from src.models import Place, Route
@@ -1010,7 +1011,7 @@ def test_grounding_prepends_anchor_only_when_plan_references_the_extra_record() 
         graph,
         "기준점에서 세 후보 가운데 가장 먼 곳까지의 직선거리는?",
         ["1km", "2km", "3km", "알 수 없음"],
-        "distance",
+        extract_facts({}, "기준점에서 세 후보 가운데 가장 먼 곳까지의 직선거리는?"),
     )
 
     assert grounded[0]["arguments"]["place_names"] == [
@@ -1034,7 +1035,7 @@ def test_grounding_prepends_anchor_only_when_plan_references_the_extra_record() 
         no_extra_reference,
         "기준점에서 후보까지의 직선거리는?",
         ["1km", "2km", "3km", "알 수 없음"],
-        "distance",
+        extract_facts({}, "기준점에서 후보까지의 직선거리는?"),
     )
     assert unchanged[0]["arguments"]["place_names"] == ["후보1", "후보2", "후보3"]
 
@@ -1096,7 +1097,7 @@ def test_factorization_binds_every_analysis_concept_and_validates() -> None:
             ],
         },
         "서울역에서 가장 가까운 카페는?",
-        "nearby",
+        extract_facts({}, "서울역에서 가장 가까운 카페는?"),
     )
     factorized = factorize_geoflow(
         analysis,
@@ -1232,7 +1233,7 @@ def test_concept_edges_are_not_inferred_from_role_levels() -> None:
             ],
         },
         "질문",
-        "poi",
+        extract_facts({}, "질문"),
     )
     assert build_concept_graph(analysis).edges == ()
 
@@ -1441,6 +1442,16 @@ def test_geoflow_repairs_numeric_dependencies_and_placeholder_node_references() 
 
 
 def test_graph_grounding_restores_verbatim_anchor_and_options() -> None:
+    """The batch is [anchor, *option texts] when the graph goes on to rank those options.
+
+    "Goes on to rank them" is the condition, read off the dataflow. It used to be
+    `intent in {"nearby", "direction", "routing"}`, whose real content was "not a trip" -- and a
+    trip is exactly the plan whose `batch_geocode` must keep its stops, because overwriting them
+    with the option texts answers a different itinerary. So the `match_options` node below is not
+    decoration: it is what says these names are candidates. Replayed over 2,577 recorded planner
+    graphs the two rules splice the same 61 nodes, neither more nor fewer.
+    """
+
     steps = [
         {
             "id": "places",
@@ -1452,13 +1463,22 @@ def test_graph_grounding_restores_verbatim_anchor_and_options() -> None:
             "depends_on": [],
             "output_type": "object",
             "role": "support",
-        }
+        },
+        {
+            "id": "chosen",
+            "operator": "match_options",
+            "arguments": {"options": [], "places": "$places"},
+            "depends_on": ["places"],
+            "output_type": "object",
+            "role": "measure",
+        },
     ]
+    question = "뜻밖에 양꼬치에서 남쪽에 있는 가장 가까운 카페 중 어디인가요?"
     grounded = _ground_graph_literals(
         steps,
-        "뜻밖에 양꼬치에서 남쪽에 있는 가장 가까운 카페 중 어디인가요?",
+        question,
         ["포근한 다락방 카페", "코티지블루"],
-        "direction",
+        extract_facts({}, question),
     )
     assert grounded[0]["arguments"]["anchor"] == "뜻밖에 양꼬치"
     assert grounded[0]["arguments"]["place_names"] == [
@@ -1466,6 +1486,35 @@ def test_graph_grounding_restores_verbatim_anchor_and_options() -> None:
         "포근한 다락방 카페",
         "코티지블루",
     ]
+
+
+def test_an_itinerary_batch_keeps_its_stops_however_many_options_there_are() -> None:
+    """The case the intent set was really excluding, now stated as the graph states it."""
+
+    steps = [
+        {
+            "id": "places",
+            "operator": "batch_geocode",
+            "arguments": {"place_names": ["가예", "A", "B"]},
+            "depends_on": [],
+            "output_type": "object",
+            "role": "extent",
+        },
+        {
+            "id": "tour",
+            "operator": "tsp_tw",
+            "arguments": {"nodes": "$places", "distance_matrix": "$legs"},
+            "depends_on": ["places"],
+            "output_type": "network",
+            "role": "measure",
+        },
+    ]
+    question = "가예에서 출발해 A를 1시간, B를 1시간 둘러본 뒤 가예로 돌아옵니다. 순서는?"
+    grounded = _ground_graph_literals(
+        steps, question, ["A → B", "B → A"], extract_facts({}, question)
+    )
+
+    assert grounded[0]["arguments"]["place_names"] == ["가예", "A", "B"]
 
 
 def test_radius_literals_are_factors_not_synthetic_output_references() -> None:
@@ -1502,7 +1551,7 @@ def test_radius_literals_are_factors_not_synthetic_output_references() -> None:
         steps,
         "기준점 반경 500m 안에 있는 카페 목록은 무엇인가요?",
         ["A | B", "A | B | C"],
-        "radius",
+        extract_facts({}, "기준점 반경 500m 안에 있는 카페 목록은 무엇인가요?"),
     )
 
     assert grounded[0]["arguments"]["place_names"] == ["기준점"]
@@ -1541,7 +1590,7 @@ def test_retrieval_grounding_fans_out_over_kakao_place_type_synonyms() -> None:
         steps,
         "기준점에서 가장 가까운 경찰서 중 어디인가요?",
         ["동묘파출소", "안임지구대"],
-        "nearby",
+        extract_facts({}, "기준점에서 가장 가까운 경찰서 중 어디인가요?"),
     )
 
     retrievals = [step for step in grounded if step["operator"] == "nearby_places"]
@@ -1588,7 +1637,7 @@ def test_distance_measure_grounding_restores_verbatim_option_texts() -> None:
         steps,
         "A 및 B 사이의 직선거리는 몇 m인가요?",
         ["349 m", "358 m", "340 m", "342 m"],
-        "distance",
+        extract_facts({}, "A 및 B 사이의 직선거리는 몇 m인가요?"),
     )
 
     assert grounded[-1]["arguments"]["options"] == ["349 m", "358 m", "340 m", "342 m"]
@@ -1630,7 +1679,7 @@ def test_factorization_keeps_radius_and_category_as_operator_factors() -> None:
             ],
         },
         "기준점 반경 500m 안에 있는 카페 목록은 무엇인가요?",
-        "radius",
+        extract_facts({}, "기준점 반경 500m 안에 있는 카페 목록은 무엇인가요?"),
     )
     factorized = factorize_geoflow(
         analysis,
@@ -2082,7 +2131,7 @@ def test_grounding_gives_option_recovery_the_questions_radius_and_category() -> 
         graph,
         "교보문고 목동점 반경 500m 안에 있는 역 목록은 무엇인가요?",
         ["오목교", "목동", "까치산", "오목교 | 목동"],
-        "radius",
+        extract_facts({}, "교보문고 목동점 반경 500m 안에 있는 역 목록은 무엇인가요?"),
     )
 
     arguments = grounded[0]["arguments"]
@@ -2735,7 +2784,7 @@ def test_a_name_the_planner_wrote_short_is_restored_from_the_question() -> None:
             "role": "extent",
         }
     ]
-    grounded = _ground_graph_literals(steps, question, ["1번", "2번"], "routing")
+    grounded = _ground_graph_literals(steps, question, ["1번", "2번"], extract_facts({}, question))
     assert grounded[0]["arguments"]["place_names"] == ["빈칸 문래", "훈련원공원 야외극장"]
 
 
@@ -2796,7 +2845,7 @@ def test_grounding_does_not_overwrite_an_option_with_the_anchor() -> None:
             "role": "support",
         },
     ]
-    grounded = _ground_graph_literals(steps, question, options, "radius")
+    grounded = _ground_graph_literals(steps, question, options, extract_facts({}, question))
     assert grounded[0]["arguments"]["place_names"] == ["강북솔밭국악당"]
     assert grounded[1]["arguments"]["place_names"] == options
     # The anchor still biases both lookups; it just does not replace a name.
@@ -2865,7 +2914,7 @@ def test_option_recovery_stays_in_the_sector_the_question_asks_about() -> None:
 
 
 @pytest.mark.parametrize(
-    ("question", "intent", "expected"),
+    ("question", "family", "expected"),
     [
         ("아트힐 연희에서 가장 가까운 대형마트는 다음 중 어디인가요?", "nearby", "대형마트"),
         (
@@ -2902,9 +2951,9 @@ def test_option_recovery_stays_in_the_sector_the_question_asks_about() -> None:
     ],
 )
 def test_the_kind_of_place_is_read_from_the_phrasings_the_questions_use(
-    question: str, intent: str, expected: str | None
+    question: str, family: str, expected: str | None
 ) -> None:
-    """The lead-in carries the intent; the tail is grammar and must not be enumerated.
+    """The lead-in carries the relation; the tail is grammar and must not be enumerated.
 
     An earlier revision wrote one regex per observed sentence — "북쪽에 있는 가장 가까운 X 중",
     "안에 있는 X 목록" — against benchmarks that say "북쪽 방향에 있는 X 중 가장 가까운 곳" and
@@ -2912,11 +2961,17 @@ def test_the_kind_of_place_is_read_from_the_phrasings_the_questions_use(
     only as the Analysis stage's guess. Rewriting the sentences we had seen would have made the
     extractor a function of the test set, so the split is structural: the final cases use
     endings no dataset row does.
+
+    `family` records which kind of question each phrasing came from and is deliberately not
+    passed to the extractor. The leads used to be keyed by it and only the matching key was
+    tried, so a question the Analysis stage mislabelled read as stating no kind at all -- and it
+    mislabelled 21 of 90 `nearby_subtype_kth` graphs on the recorded runs. All three leads are
+    tried now, and they do not compete: each names a different relation.
     """
 
     from src.agent.spatial import _extract_target_type
 
-    assert _extract_target_type(question, intent) == expected
+    assert _extract_target_type(question) == expected, family
 
 
 def test_a_geocode_node_written_where_its_places_belong_is_flattened() -> None:
@@ -3012,7 +3067,12 @@ def test_a_nested_itinerary_is_flattened_before_the_stays_are_counted() -> None:
             "role": "measure",
         }
     ]
-    grounded = _ground_graph_literals(steps, question, ["오후 1시", "오후 2시"], "trip")
+    grounded = _ground_graph_literals(
+        steps,
+        question,
+        ["오후 1시", "오후 2시"],
+        extract_facts({}, question),
+    )
     arguments = grounded[0]["arguments"]
     assert len(arguments["locations"]) == 4
     assert len(arguments["stay_durations_s"]) == 4
@@ -3087,7 +3147,7 @@ def test_a_trip_stop_the_planner_cut_short_is_restored_from_the_stays() -> None:
             "role": "extent",
         }
     ]
-    grounded = _ground_graph_literals(steps, question, options, "trip")
+    grounded = _ground_graph_literals(steps, question, options, extract_facts({}, question))
     assert grounded[0]["arguments"]["place_names"] == [
         "인게스트하우스",
         "한남매봉공원산책길",
@@ -3116,7 +3176,12 @@ def test_a_stop_that_resembles_nothing_the_question_states_is_left_alone() -> No
             "role": "extent",
         }
     ]
-    grounded = _ground_graph_literals(steps, question, ["약 1km", "약 2km"], "trip")
+    grounded = _ground_graph_literals(
+        steps,
+        question,
+        ["약 1km", "약 2km"],
+        extract_facts({}, question),
+    )
     assert grounded[0]["arguments"]["place_names"] == [
         "A타워",
         "B공원",

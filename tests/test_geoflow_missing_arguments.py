@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 from src.agent.geoflow import normalize_and_validate_graph
-from src.agent.spatial import _factorize_validate_plan
+from src.agent.spatial import _factorize_validate_plan, extract_facts
 from src.tools.spatial import SpatialOperatorRegistry
 
 _ANALYSIS = {
@@ -242,7 +242,9 @@ def test_a_bare_reference_as_arguments_binds_the_operators_one_slot() -> None:
             },
         ]
     }
-    _, steps, _ = _factorize_validate_plan(_ANALYSIS, plan, "q", ["a", "b", "c", "d"], "nearby", 15)
+    _, steps, _ = _factorize_validate_plan(
+        _ANALYSIS, plan, "q", ["a", "b", "c", "d"], extract_facts({}, "q"), 15
+    )
     final = next(step for step in steps if step["id"] == "final_measure")
     assert final["arguments"] == {"value": "$nearest_result"}
 
@@ -269,4 +271,6 @@ def test_a_bare_reference_on_a_multi_argument_operator_still_refuses_cleanly() -
         ]
     }
     with pytest.raises(ValueError, match="arguments must be an object"):
-        _factorize_validate_plan(_ANALYSIS, plan, "q", ["a", "b", "c", "d"], "nearby", 15)
+        _factorize_validate_plan(
+            _ANALYSIS, plan, "q", ["a", "b", "c", "d"], extract_facts({}, "q"), 15
+        )

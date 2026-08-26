@@ -1843,12 +1843,14 @@ def normalize_and_validate_graph(
     """Normalize a planner graph and refuse the ones that cannot run.
 
     `strict_types=False` keeps every structural rule -- an unknown operator, a dependency that is
-    not a node, a cycle, a graph with no Measure -- and skips the two that are this port's own
-    invention: declared output-type compatibility and functional-role ordering. Upstream has
-    neither (there is no type check anywhere in `spatial-agent`), so a graph they reject is a
-    graph upstream would have executed, and refusing it measures our validator rather than the
-    architecture. They stay on by default because their message is what the repair round is given
-    to work with; the lenient pass is the last thing tried before a question is given up on.
+    not a node, a cycle, a graph with no Measure, and the formal constraints the validator
+    reports -- and skips the three that are this port's own invention: declared output-type
+    compatibility, functional-role ordering, and the statically knowable argument values.
+    Upstream has none of them (there is no type check anywhere in `spatial-agent`), so a graph
+    they reject is a graph upstream would have executed, and refusing it measures our validator
+    rather than the architecture. They stay on by default because their message is what the
+    repair round is given to work with; the lenient pass is the last thing tried before a
+    question is given up on.
     """
 
     raw_steps = payload.get("graph")
@@ -1979,7 +1981,14 @@ def normalize_and_validate_graph(
 
     by_id = {step["id"]: step for step in steps}
     _validate_statically_known_reference_shapes(steps, by_id)
-    _validate_statically_known_argument_values(steps, by_id)
+    if strict_types:
+        # These predict one step's refusal, not a graph that cannot run. The executor already
+        # records a step that raises and carries on, and generation answers from whatever did
+        # resolve -- four of eighteen terminal failures over three passes were given up on here
+        # for one bad argument the run could have absorbed. So they inform the repair round and
+        # then step aside on the lenient pass, exactly like the other two rules upstream
+        # does not have.
+        _validate_statically_known_argument_values(steps, by_id)
     consumed = {
         dependency
         for step in steps

@@ -3319,3 +3319,120 @@ def test_a_superseded_template_is_not_offered_beside_the_one_that_beat_it() -> N
     # A question neither template is about keeps whatever it had.
     radius = [t["name"] for t in retrieve_templates("nearby", "반경 500m 이내에 약국은 몇 곳?")]
     assert radius[0] == "Filter-Aggregate-Measure"
+
+
+def test_a_value_check_informs_the_repair_round_and_then_steps_aside() -> None:
+    """The lenient pass is the last thing tried, so a one-argument miss must not end the question.
+
+    Three of the eighteen terminal failures over three passes at `98fb7d0` were the new value
+    checks refusing a plan whose *rest* was fine: `kmapeval_181` twice for a list where
+    `steps_analysis` reads one route, `kmapeval_255` for five service times against six nodes.
+    The executor records a step that raises and carries on -- an `open_at_time` AttributeError in
+    the same set left its question answered correctly -- so refusing the whole graph for it
+    trades a partial answer for none. These checks are this port's own, exactly like declared
+    output types and role ordering, and they step aside on the same pass those two do.
+    """
+
+    from src.agent.geoflow import normalize_and_validate_graph
+
+    listed_route = {
+        "graph": [
+            {
+                "id": "ends",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["A", "B"]},
+                "role": "extent",
+            },
+            {
+                "id": "route",
+                "operator": "distance_matrix",
+                "arguments": {"origins": "$ends.0.place", "destinations": "$ends.1.place"},
+                "depends_on": ["ends"],
+                "role": "support",
+            },
+            {
+                "id": "analysis",
+                "operator": "steps_analysis",
+                "arguments": {"route": ["$route"]},
+                "depends_on": ["route"],
+                "role": "measure",
+            },
+        ]
+    }
+    with pytest.raises(ValueError, match="accepts one object"):
+        normalize_and_validate_graph(listed_route, max_steps=8)
+    steps, _ = normalize_and_validate_graph(listed_route, max_steps=8, strict_types=False)
+    assert [step["id"] for step in steps] == ["ends", "route", "analysis"]
+
+    short_service_times = {
+        "graph": [
+            {
+                "id": "stops",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["A", "B", "C"]},
+                "role": "extent",
+            },
+            {
+                "id": "legs",
+                "operator": "distance_matrix",
+                "arguments": {"origins": "$stops", "destinations": "$stops"},
+                "depends_on": ["stops"],
+                "role": "support",
+            },
+            {
+                "id": "trip",
+                "operator": "tsp_tw",
+                "arguments": {
+                    "nodes": "$stops",
+                    "distance_matrix": "$legs",
+                    "service_times": [0, 600],
+                },
+                "depends_on": ["stops", "legs"],
+                "role": "measure",
+            },
+        ]
+    }
+    with pytest.raises(ValueError, match="service_times"):
+        normalize_and_validate_graph(short_service_times, max_steps=8)
+    steps, _ = normalize_and_validate_graph(
+        short_service_times, max_steps=8, strict_types=False
+    )
+    assert [step["id"] for step in steps] == ["stops", "legs", "trip"]
+
+
+def test_a_structural_rule_still_refuses_on_the_lenient_pass() -> None:
+    """Stepping aside is for the port's own value rules, not for the formal constraints.
+
+    Data availability is one of the eight constraints the validator reports on every valid graph,
+    and the ambiguity it catches -- one whole `batch_geocode` list repeated inside one argument --
+    has no reading the executor could pick. It refuses leniently too, and so does a graph whose
+    argument list outruns a provider limit that is not a per-step refusal but a whole missing node.
+    """
+
+    from src.agent.geoflow import normalize_and_validate_graph
+
+    repeated_whole_list = {
+        "graph": [
+            {
+                "id": "stops",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["A", "B", "C"]},
+                "role": "extent",
+            },
+            {
+                "id": "legs",
+                "operator": "distance_matrix",
+                "arguments": {
+                    "origins": ["$stops", "$stops", "$stops"],
+                    "destinations": ["$stops", "$stops", "$stops"],
+                },
+                "depends_on": ["stops"],
+                "role": "measure",
+            },
+        ]
+    }
+    for strict in (True, False):
+        with pytest.raises(ValueError, match="repeats whole batch_geocode reference"):
+            normalize_and_validate_graph(
+                repeated_whole_list, max_steps=8, strict_types=strict
+            )

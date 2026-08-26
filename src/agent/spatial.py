@@ -1202,17 +1202,20 @@ def _ground_graph_literals(
     # tsp_tw's service_times are positional, so the stays can only be bound once the node list the
     # plan geocoded is known — it is the place order every downstream index refers to.
     route_priority = _extract_route_priority(question)
-    trip_node_names: list[str] = []
-    if intent == "trip":
-        trip_node_names = next(
-            (
-                [str(name) for name in (step.get("arguments") or {}).get("place_names") or []]
-                for step in steps
-                if step.get("operator") == "batch_geocode"
-                and len((step.get("arguments") or {}).get("place_names") or []) > 2
-            ),
-            [],
-        )
+    # The itinerary is whichever `batch_geocode` node lists more than two places. That structural
+    # test is the real guard; the `intent == "trip"` conjunct that used to sit in front of it did
+    # nothing a trip plan can notice, and in a plan the Analysis stage labelled something else it
+    # withheld the stays from an operator that still ran -- binding every stay to zero rather
+    # than refusing.
+    trip_node_names: list[str] = next(
+        (
+            [str(name) for name in (step.get("arguments") or {}).get("place_names") or []]
+            for step in steps
+            if step.get("operator") == "batch_geocode"
+            and len((step.get("arguments") or {}).get("place_names") or []) > 2
+        ),
+        [],
+    )
     # Which node ids produce a tour whose cost already carries the stays.
     tour_totals = {
         str(step.get("id"))
@@ -1287,7 +1290,7 @@ def _ground_graph_literals(
             continue
         if route_priority and operator in _PRIORITY_OPERATORS:
             arguments["priority"] = route_priority
-        if operator == "calculate_start_time" and intent == "trip":
+        if operator == "calculate_start_time":
             stays, _ = _extract_trip_schedule(question)
             # Only when the travel total is computed by another node: a reference to a route sum
             # carries travel and nothing else, so the stays are certainly missing. A literal may
@@ -1318,7 +1321,7 @@ def _ground_graph_literals(
                 arguments["value"] = f"${source}"
             grounded.append({**step, "arguments": arguments})
             continue
-        if operator == "calculate_finish_time" and intent == "trip":
+        if operator == "calculate_finish_time":
             stays, _ = _extract_trip_schedule(question)
             locations = _whole_list_reference(arguments.get("locations"))
             arguments["locations"] = locations
@@ -1361,7 +1364,7 @@ def _ground_graph_literals(
                 ]
             grounded.append({**step, "arguments": arguments})
             continue
-        if operator == "tsp_tw" and intent == "trip":
+        if operator == "tsp_tw":
             stays, budget = _extract_trip_schedule(question)
             if _asks_for_distance(question):
                 # "총 주행거리가 가장 짧은 방문 순서" is a question about metres. The tours it
@@ -1427,7 +1430,7 @@ def _ground_graph_literals(
             arguments["required_type"] = target
             grounded.append({**step, "arguments": arguments})
             continue
-        if operator == "filter_by_direction" and intent == "direction":
+        if operator == "filter_by_direction":
             direction = _extract_requested_direction(question)
             if direction:
                 arguments["direction"] = direction

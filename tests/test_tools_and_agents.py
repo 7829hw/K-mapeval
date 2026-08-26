@@ -3122,3 +3122,24 @@ def test_a_stop_that_resembles_nothing_the_question_states_is_left_alone() -> No
         "B공원",
         "전혀다른어떤장소이름",
     ]
+
+
+def test_a_field_projected_off_a_batch_list_resolves_to_the_list_and_runs() -> None:
+    """The proof behind letting that spelling through: the plan the validator refused executes.
+
+    `place_ids` is not a field of a `batch_geocode` list, so `_resolve_references` degrades the
+    projection to the whole list -- the same value the legal `$geo` names -- and
+    `batch_place_details` reads each row's existing id. Nothing is searched and nothing is
+    invented; the refusal was costing the question a plan the executor answers.
+    """
+
+    from src.agent.spatial import _resolve_references
+
+    registry = ToolRegistry(FakeProvider())
+    rows = registry.invoke("batch_geocode", {"place_names": ["경복궁", "남산타워"]}).output
+    assert _resolve_references("$geo.place_ids", {"geo": rows}) == rows
+
+    details = registry.invoke(
+        "batch_place_details", {"place_ids": _resolve_references("$geo.place_ids", {"geo": rows})}
+    ).output
+    assert [place["place_id"] for place in details] == ["경복궁", "남산타워"]

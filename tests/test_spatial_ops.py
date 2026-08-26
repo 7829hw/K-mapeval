@@ -3439,3 +3439,62 @@ def test_a_structural_rule_still_refuses_on_the_lenient_pass() -> None:
             normalize_and_validate_graph(
                 repeated_whole_list, max_steps=8, strict_types=strict
             )
+
+    out_of_range = {
+        "graph": [
+            {
+                "id": "stops",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["A", "B", "C"]},
+                "role": "extent",
+            },
+            {
+                "id": "answer",
+                "operator": "identity_measure",
+                "arguments": {"value": "$stops.3"},
+                "depends_on": ["stops"],
+                "role": "measure",
+            },
+        ]
+    }
+    for strict in (True, False):
+        with pytest.raises(ValueError, match="indexes batch_geocode node"):
+            normalize_and_validate_graph(out_of_range, max_steps=8, strict_types=strict)
+
+
+def test_a_field_projected_off_a_batch_list_is_a_spelling_the_executor_survives() -> None:
+    """The refusal was throwing away plans that run, and it fell on four families in particular.
+
+    `$geo.place_ids` is not a field of a `batch_geocode` list, so the reference resolver degrades
+    it to the whole list -- which is precisely what the legal spelling `$geo` resolves to. Since
+    `batch_place_details` learned to read the id off a geocode row, that plan executes and answers.
+    Refusing it on the lenient pass ended the question instead, and a plan that geocodes the
+    options and then asks for their details is the standard shape of the `unanswerable_*`
+    families: the refusal fired on 22 of their 124 graphs against 42 of the other 1,651.
+
+    It is still worth telling the repair round about, so strict validation keeps refusing it.
+    """
+
+    from src.agent.geoflow import normalize_and_validate_graph
+
+    projected = {
+        "graph": [
+            {
+                "id": "geo",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["A", "B"]},
+                "role": "extent",
+            },
+            {
+                "id": "details",
+                "operator": "batch_place_details",
+                "arguments": {"place_ids": "$geo.place_ids"},
+                "depends_on": ["geo"],
+                "role": "measure",
+            },
+        ]
+    }
+    with pytest.raises(ValueError, match="projects field 'place_ids'"):
+        normalize_and_validate_graph(projected, max_steps=8)
+    steps, _ = normalize_and_validate_graph(projected, max_steps=8, strict_types=False)
+    assert [step["id"] for step in steps] == ["geo", "details"]

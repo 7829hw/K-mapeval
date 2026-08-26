@@ -1761,7 +1761,7 @@ def _validate_statically_known_argument_values(
 
 
 def _validate_statically_known_reference_shapes(
-    steps: list[dict[str, Any]], by_id: dict[str, dict[str, Any]]
+    steps: list[dict[str, Any]], by_id: dict[str, dict[str, Any]], *, strict_types: bool = True
 ) -> None:
     """Refuse projections that cannot exist on an output whose shape is already known.
 
@@ -1772,9 +1772,21 @@ def _validate_statically_known_reference_shapes(
     to the whole list in the executor and made the next spatial operator compute over the wrong
     evidence.  Likewise, ``$places.anchor_place`` can never name a field on a list.
 
-    This is a structural data-availability rule, so it applies to the final lenient pass as well
-    as strict validation.  Unknown paths below a valid record (for example Google's
-    ``$places.0.geometry.location`` spelling) remain deliberately lenient.
+    Two of the three refusals here are structural and apply to the final lenient pass as well as
+    to strict validation, because each one silently substitutes *different* evidence and no legal
+    spelling of the plan produces what the planner asked for: an out-of-range record index, and one
+    whole batch reference repeated inside a single list.
+
+    The third is not.  A named field on a batch list -- ``$places.place_ids`` -- degrades in the
+    executor to the whole list, which is exactly what the legal spelling ``$places`` resolves to,
+    and since ``batch_place_details`` learned to read ids off geocode rows that plan runs and
+    answers.  So it is a spelling the repair round should still be asked to fix, and not a graph
+    that cannot run: it steps aside on the lenient pass with the rest of this port's own rules.
+    Leaving it on cost the four ``unanswerable_*`` families a third to a half of their rows, which
+    is where a plan that geocodes options and then wants their details is the standard shape.
+
+    Unknown paths below a valid record (for example Google's ``$places.0.geometry.location``
+    spelling) remain deliberately lenient throughout.
     """
 
     def nested_lists(value: Any) -> list[list[Any]]:
@@ -1823,11 +1835,13 @@ def _validate_statically_known_reference_shapes(
                 continue
             projection = parts[1]
             if not projection.isdigit():
-                raise ValueError(
-                    "Data availability violation: "
-                    f"{reference} projects field {projection!r} from batch_geocode list "
-                    f"{producer['id']!r}; use a numeric record index first"
-                )
+                if strict_types:
+                    raise ValueError(
+                        "Data availability violation: "
+                        f"{reference} projects field {projection!r} from batch_geocode list "
+                        f"{producer['id']!r}; use a numeric record index first"
+                    )
+                continue
             names = producer["arguments"].get("place_names")
             if isinstance(names, list) and int(projection) >= len(names):
                 raise ValueError(
@@ -1844,8 +1858,10 @@ def normalize_and_validate_graph(
 
     `strict_types=False` keeps every structural rule -- an unknown operator, a dependency that is
     not a node, a cycle, a graph with no Measure, and the formal constraints the validator
-    reports -- and skips the three that are this port's own invention: declared output-type
-    compatibility, functional-role ordering, and the statically knowable argument values.
+    reports -- and skips the four that are this port's own invention: declared output-type
+    compatibility, functional-role ordering, the statically knowable argument values, and a named
+    field projected off a batch list, which the executor degrades to the whole list the legal
+    spelling would have named anyway.
     Upstream has none of them (there is no type check anywhere in `spatial-agent`), so a graph
     they reject is a graph upstream would have executed, and refusing it measures our validator
     rather than the architecture. They stay on by default because their message is what the
@@ -1980,7 +1996,7 @@ def normalize_and_validate_graph(
         )
 
     by_id = {step["id"]: step for step in steps}
-    _validate_statically_known_reference_shapes(steps, by_id)
+    _validate_statically_known_reference_shapes(steps, by_id, strict_types=strict_types)
     if strict_types:
         # These predict one step's refusal, not a graph that cannot run. The executor already
         # records a step that raises and carries on, and generation answers from whatever did

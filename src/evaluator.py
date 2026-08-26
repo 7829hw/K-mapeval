@@ -321,6 +321,8 @@ class Evaluator:
                 # or its evaluator can answer from another branch.  Preserve both the count and
                 # the compact details so aggregate accuracy cannot hide a broken execution path.
                 "execution_error_count": len(result.execution_errors),
+                "graph_nodes": result.graph_nodes,
+                "planner_named_operator_nodes": result.planner_named_operator_nodes,
                 "execution_errors": result.execution_errors,
                 "error": error,
                 "failure_type": result.failure_type,
@@ -385,6 +387,8 @@ class Evaluator:
             "reasoning_tokens": None,
             "reasoning_chars": 0,
             "execution_error_count": 0,
+            "graph_nodes": 0,
+            "planner_named_operator_nodes": 0,
             "execution_errors": [],
             "error": error,
             "failure_type": failure_type,
@@ -503,6 +507,19 @@ def calculate_statistics(results: list[dict[str, Any]]) -> dict[str, Any]:
             "iteration_limit_count": failure_types[ITERATION_LIMIT_FAILURE],
             # Questions no valid GeoFlow graph was produced for, after the draft and the repair.
             "graph_validation_failure_count": failure_types[GRAPH_VALIDATION_FAILURE],
+            # Concept Transformation. A question whose planner answered in transformations has
+            # `planner_named_operator_nodes == 0`; the ratio says whether the semantic vocabulary
+            # took, and an accuracy measured with it should be read beside that.
+            "graph_nodes": sum(int(row.get("graph_nodes") or 0) for row in results),
+            "planner_named_operator_nodes": sum(
+                int(row.get("planner_named_operator_nodes") or 0) for row in results
+            ),
+            "fully_semantic_question_count": sum(
+                1
+                for row in results
+                if int(row.get("graph_nodes") or 0)
+                and not int(row.get("planner_named_operator_nodes") or 0)
+            ),
             # A question can still answer after one branch failed.  Keep this beside accuracy so
             # those failures do not disappear merely because the final option happened to match.
             "execution_error_question_count": len(execution_error_rows),
@@ -617,6 +634,15 @@ def print_summary(statistics: dict[str, Any]) -> None:
         print(
             f"Ran out of steps on {stopped} question(s) without answering. Upstream counts these "
             "as misses; check whether the family can be answered within the step budget at all."
+        )
+    nodes = performance.get("graph_nodes") or 0
+    if nodes:
+        named = performance.get("planner_named_operator_nodes") or 0
+        whole = performance.get("fully_semantic_question_count") or 0
+        print(
+            f"Concept Transformation: {nodes - named}/{nodes} nodes "
+            f"({100 * (nodes - named) / nodes:.1f}%) were transformations the factorizer mapped; "
+            f"{whole} question(s) were composed entirely in the semantic vocabulary."
         )
     unbuildable = performance.get("graph_validation_failure_count") or 0
     if unbuildable:

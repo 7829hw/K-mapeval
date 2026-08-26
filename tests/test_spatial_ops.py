@@ -2800,7 +2800,7 @@ def test_the_concept_role_rule_is_skipped_leniently_like_the_node_one() -> None:
             analysis, {"graph": graph}, question, options, extract_facts({}, question), 15
         )
 
-    _, steps, _ = _factorize_validate_plan(
+    _, steps, _, _semantic = _factorize_validate_plan(
         analysis,
         {"graph": graph},
         question,
@@ -3263,32 +3263,55 @@ def test_a_minimum_asked_for_by_index_is_an_ordinal_not_a_minimum() -> None:
     assert ops.invoke("select_by_index", {"items": ranked, "index": 1})["distance_m"] == 600.0
 
 
-def test_an_ordinal_nearby_question_retrieves_before_it_ranks() -> None:
+def test_an_ordinal_is_a_factor_rather_than_a_family() -> None:
     """The k-th nearest place is the k-th of the neighbourhood, not of the option list.
 
     `nearby_kth_nearest` draws the gold as rank k of everything within 1800 m and the three
-    decoys from ranks 1 to 6, so the options are a subset of the ranking and the nearest place is
-    only sometimes among them. Ranking the four options against each other therefore answers a
-    different question. Across the v7 runs, 130 composed plans for the two ordinal families
-    retrieved anything four times: `Geocode-Batch-Compare` won on "가까운" and its example is
-    exactly "geocode the anchor and the options, then take the nearest".
+    decoys from ranks 1 to 6, so the options are a subset of the ranking and ranking the four
+    options against each other answers a different question. That used to need its own macro-
+    template, `Retrieve-Rank-Ordinal`, which is a benchmark family wearing a template's clothes.
+
+    It is a composition now: retrieve, sort, take the k-th, match. The ordinal is `ordinal=k` on
+    the selection, and `ordinal=1` is the superlative -- the same graph, one factor apart. The
+    template is deleted, and this is what replaced it.
     """
 
-    from src.agent.geoflow import retrieve_templates
+    from src.agent.geoflow import OPERATOR_CONTRACTS, TEMPLATES
+    from src.agent.semantics import factorize_semantic_graph
 
-    ordinal = retrieve_templates({}, "삼성출판박물관에서 두 번째로 가까운 편의점은?")
-    assert ordinal[0]["name"] == "Retrieve-Rank-Ordinal"
-    assert "nearby_places" in ordinal[0]["pattern"]
+    assert "Retrieve-Rank-Ordinal" not in {t["name"] for t in TEMPLATES.values()}
 
-    # A superlative is not an ordinal: there the options *are* the candidates, and the template
-    # that ranks them stays in front.
-    superlative = retrieve_templates({}, "서울역에서 가장 가까운 편의점은 어디인가요?")
-    assert superlative[0]["name"] == "Geocode-Batch-Compare"
+    def ordinal_graph(position: int) -> list[str]:
+        semantic = [
+            {"id": "anchor", "transform": "RESOLVE_PLACES", "inputs": [],
+             "concept_ids": ["a"], "role": "extent"},
+            {"id": "found", "transform": "PLACE_SEARCH", "inputs": ["anchor"], "role": "support"},
+            {"id": "ranked", "transform": "SORT", "inputs": ["anchor", "found"],
+             "role": "support"},
+            {"id": "kth", "transform": "ORDINAL_SELECT", "inputs": ["ranked"],
+             "factors": {"ordinal": position}, "role": "support"},
+            {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["kth"], "role": "measure"},
+        ]
+        built = factorize_semantic_graph(
+            semantic,
+            concepts=[{"id": "a", "text": "삼성출판박물관"}],
+            options=["A", "B"],
+            facts=None,
+            available=frozenset(OPERATOR_CONTRACTS),
+        )
+        assert built.graph[3]["arguments"]["index"] == position - 1
+        return [step["operator"] for step in built.graph]
 
-    # And a radius question is neither.
-    radius = retrieve_templates({}, "서울역 반경 500m 이내에 있는 약국은 몇 곳인가요?")
-    assert radius[0]["name"] == "Filter-Aggregate-Measure"
-
+    # The composition is exactly what the deleted template's example graph was.
+    assert ordinal_graph(2) == [
+        "batch_geocode",
+        "nearby_places",
+        "nearest",
+        "select_by_index",
+        "match_options",
+    ]
+    # And the superlative is the same graph with a different factor, not a different template.
+    assert ordinal_graph(1) == ordinal_graph(2)
 
 def test_the_ordinal_nearby_chain_lands_on_the_option_the_ranking_names() -> None:
     """Retrieve, rank, take index k-1, ground it back to an option -- on real numbers.
@@ -3344,32 +3367,29 @@ def test_template_retrieval_ignores_whichever_intent_the_analysis_guessed() -> N
             )
         ]
         selections.append(names)
-        assert names[0] == "Retrieve-Rank-Ordinal", intent
+        # Which template, specifically, is not the claim -- an ordinal is a factor now and the
+        # retrieval that serves it also serves the superlative. The claim is that the label the
+        # Analysis stage guessed changes nothing.
+        assert names, intent
     assert selections[0] == selections[1]
 
 
-def test_a_superseded_template_is_not_offered_beside_the_one_that_beat_it() -> None:
-    """A worked example that answers a different question is worse than no second example.
+def test_nothing_supersedes_geocode_batch_compare_any_more() -> None:
+    """Suppression existed to keep the ordinal template's rival out of the prompt beside it.
 
-    27 of the 40 plans that were offered the ordinal template still built
-    `Geocode-Batch-Compare`'s shape -- geocode the four options, take the nearest -- because it
-    was sitting right there beside it. Suppression only runs downward: on a superlative question
-    `Geocode-Batch-Compare` wins and keeps its place.
+    27 of the 40 plans offered the ordinal template still built `Geocode-Batch-Compare`'s shape,
+    because the planner copied whichever worked example it recognised. With the ordinal expressed
+    as a factor there is no rival shape to suppress: both questions retrieve the same template
+    and differ by one number.
     """
 
-    from src.agent.geoflow import retrieve_templates
+    from src.agent.geoflow import TEMPLATES, retrieve_templates
 
-    ordinal = [t["name"] for t in retrieve_templates({}, "두 번째로 가까운 편의점은?")]
-    assert "Geocode-Batch-Compare" not in ordinal
+    assert not any(template.get("supersedes") for template in TEMPLATES.values())
 
-    superlative = [t["name"] for t in retrieve_templates({}, "가장 가까운 편의점은?")]
-    assert superlative[0] == "Geocode-Batch-Compare"
-    assert "Retrieve-Rank-Ordinal" in superlative
-
-    # A question neither template is about keeps whatever it had.
-    radius = [t["name"] for t in retrieve_templates({}, "반경 500m 이내에 약국은 몇 곳?")]
-    assert radius[0] == "Filter-Aggregate-Measure"
-
+    for question in ("두 번째로 가까운 편의점은?", "가장 가까운 편의점은?"):
+        names = [t["name"] for t in retrieve_templates({}, question)]
+        assert "Geocode-Batch-Compare" in names
 
 def test_a_value_check_informs_the_repair_round_and_then_steps_aside() -> None:
     """The lenient pass is the last thing tried, so a one-argument miss must not end the question.

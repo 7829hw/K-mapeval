@@ -366,10 +366,14 @@ def test_spatial_agent_runs_paper_aligned_pipeline() -> None:
     result = agent.answer("질문", ["A", "B"])
     assert result.predicted_answer == 1
     assert result.response == "^^1^^"
+    # The paper's pipeline, one trace entry per stage. `transform` is Concept Transformation:
+    # the planner's semantic graph mapped onto executable operators, deterministically, between
+    # composition and factorization.
     assert [entry["stage"] for entry in result.trace] == [
         "analyze",
         "retrieve_templates",
         "compose",
+        "transform",
         "factorize",
         "validate",
         "execute",
@@ -1205,11 +1209,14 @@ def test_template_catalog_covers_appendix_e_macro_families() -> None:
         "Time-Window-Reverse",
     }
     assert appendix_e <= names
-    # This port's own additions, which upstream's Appendix E does not carry. A template is what
-    # the retrieval stage hands the planner as a worked example, so adding one changes what every
-    # question of that shape gets composed from -- keep them named here and in
-    # docs/REFERENCE_MAPPING.md rather than letting the catalogue drift.
-    assert names - appendix_e == {"Retrieve-Rank-Ordinal"}
+    # And nothing else. `Retrieve-Rank-Ordinal` was this port's one addition, and it was a
+    # benchmark family wearing a template's clothes: the ordinal is a factor on a selection now,
+    # so the composition RESOLVE_PLACES -> PLACE_SEARCH -> SORT -> ORDINAL_SELECT -> MATCH_OPTIONS
+    # reproduces its example graph exactly. A template is what the retrieval stage hands the
+    # planner as a worked example, so adding one changes what every question of that shape gets
+    # composed from -- keep the catalogue at Appendix E's ten unless there is a reason recorded
+    # in docs/REFERENCE_MAPPING.md.
+    assert names == appendix_e
 
 
 @pytest.mark.parametrize("template_key", sorted(TEMPLATES))

@@ -201,3 +201,18 @@ def test_an_unbuildable_graph_is_its_own_failure_type() -> None:
 
     assert GRAPH_VALIDATION_FAILURE == "graph_validation_failure"
     assert issubclass(GraphValidationError, RuntimeError)
+
+
+def test_the_two_kinds_of_check_are_named_apart_in_code() -> None:
+    """A comparison against the paper's numbers has to say which rules were the paper's."""
+
+    from src.agent.geoflow import PAPER_CONSTRAINTS, PORT_LOCAL_CHECKS
+
+    assert set(PAPER_CONSTRAINTS) == {"G1", "G2", "G3", "G4", "G5"}
+    assert set(PORT_LOCAL_CHECKS) == {
+        "concept_role_ordering",
+        "operator_input_types",
+        "reference_shapes",
+        "statically_known_values",
+    }
+    assert not set(PAPER_CONSTRAINTS) & set(PORT_LOCAL_CHECKS)

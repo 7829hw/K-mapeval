@@ -37,6 +37,12 @@ class AgentResult(BaseModel):
     # itself failed.  Without this field a confident answer hid every broken intermediate step in
     # a per-query log that the JSON report could not aggregate.
     execution_errors: list[dict[str, str]] = Field(default_factory=list)
+    # Concept Transformation, per question. `graph_nodes` is how many nodes the planner's
+    # semantic graph had; `planner_named_operator_nodes` is how many of them named an operator
+    # instead of a transformation. The second over the first is the measure of whether the
+    # semantic vocabulary took, and it belongs beside an accuracy that was measured with it.
+    graph_nodes: int = Field(default=0, ge=0)
+    planner_named_operator_nodes: int = Field(default=0, ge=0)
     latency_ms: float = Field(default=0.0, ge=0)
     failure_type: str | None = None
     failure_message: str | None = None

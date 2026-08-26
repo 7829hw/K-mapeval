@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
+from src.agent.semantics import lift_to_semantic
 from src.spatial_contracts import MATRIX_METRICS, normalize_tsp_metric
 
 CORE_CONCEPTS = frozenset(
@@ -563,7 +564,7 @@ TEMPLATES = {
         # that need it: "반경 600m 안의 편의점 중 이 브랜드가 몇 퍼센트인가".
         "affinity": {"proportion", "percentage", "distribution"},
         "keywords": ("속성", "분포", "비율", "field", "proportion"),
-        "pattern": "objects -> event/field restriction -> amount or proportion Measure",
+        "pattern": "PLACE_SEARCH -> FILTER -> AGGREGATE -> MEASURE",
         "example": {
             "graph": [
                 {
@@ -593,7 +594,7 @@ TEMPLATES = {
         "name": "Place-Attribute-Query",
         "affinity": {"type", "category", "address", "attribute", "information"},
         "keywords": ("유형", "종류", "카테고리", "주소", "정보"),
-        "pattern": "place_search(name) -> inspect normalized place attribute -> Measure",
+        "pattern": "PLACE_SEARCH -> PLACE_DETAILS -> MEASURE",
         "example": {
             "graph": [
                 {
@@ -625,7 +626,7 @@ TEMPLATES = {
         "name": "Location-Bearing-Classify",
         "affinity": {"direction", "bearing", "sector"},
         "keywords": ("방향", "동쪽", "서쪽", "남쪽", "북쪽"),
-        "pattern": "batch_geocode(locations) -> bearing/filter direction -> Measure",
+        "pattern": "RESOLVE_PLACES -> FILTER (the stated sector) -> MEASURE",
         "example": {
             "graph": [
                 {
@@ -658,7 +659,7 @@ TEMPLATES = {
         "name": "Geocode-Batch-Compare",
         "affinity": {"nearest", "closest", "distance", "proximity", "comparison"},
         "keywords": ("가까운", "거리", "짧은", "nearest", "distance"),
-        "pattern": "batch_geocode(anchor and candidates) -> deterministic distance comparison",
+        "pattern": "RESOLVE_PLACES (anchor and candidates) -> SORT -> MATCH_OPTIONS",
         "example": {
             "graph": [
                 {
@@ -693,87 +694,13 @@ TEMPLATES = {
     # for these two families composed a graph and 4 of them retrieved anything, because
     # `Geocode-Batch-Compare` outranked everything else on "가까운" and its example does exactly
     # what the planner then did.
-    "ordinal_nearby": {
-        "name": "Retrieve-Rank-Ordinal",
-        # The Analysis stage labels these questions `nearby` about three times in four and `poi`
-        # the rest of the time, and the fourteen it called `poi` were offered
-        # `Geocode-Batch-Compare` instead -- which spans four intents and shows the option-ranking
-        # shape. A template gated on one intent label is gated on that stage guessing right.
-        "affinity": {"ordinal", "rank", "second", "third", "nearest", "closest"},
-        "keywords": ("번째", "가까운", "nearest", "second", "third"),
-        # An example that answers a different question is worse than no second example: the
-        # planner copies whichever shape it recognises, and 27 of the 40 plans that were offered
-        # this template still built `Geocode-Batch-Compare`'s. Where one pattern supersedes
-        # another for a question shape, the loser is dropped rather than offered beside it.
-        "supersedes": ("geocode_compare",),
-        "pattern": (
-            "nearby_places(center, category/keyword, limit≈15) -> nearest -> select_by_index(k-1) "
-            "-> match_options"
-        ),
-        "example": {
-            "graph": [
-                {
-                    "id": "anchor",
-                    "operator": "batch_geocode",
-                    "arguments": {"place_names": ["기준 장소"], "limit": 1},
-                    "depends_on": [],
-                    "output_type": "object",
-                    "role": "extent",
-                },
-                {
-                    "id": "neighbourhood",
-                    "operator": "nearby_places",
-                    "arguments": {
-                        "center": "$anchor.0.place",
-                        "query": "편의점",
-                        # Retrieve as deep as the ordinal needs, not as deep as the tool allows.
-                        # The example asked for 45 and the planner then wrote 100 (clamped to 45)
-                        # in fourteen plans: 45 place records travel through `nearest` into every
-                        # later prompt, which pushed the median question to 27k tokens and the
-                        # worst to 68k against a 65,536 window -- five of fifty-four questions
-                        # died of `llm_context_overflow` rather than of anything they got wrong.
-                        # A k-th nearest question needs k plus margin.
-                        "limit": 15,
-                    },
-                    "depends_on": ["anchor"],
-                    "output_type": "object",
-                    "role": "support",
-                },
-                {
-                    "id": "ranking",
-                    "operator": "nearest",
-                    "arguments": {
-                        "anchor": "$anchor.0.place",
-                        "candidates": "$neighbourhood",
-                    },
-                    "depends_on": ["neighbourhood"],
-                    "output_type": "object",
-                    "role": "support",
-                },
-                {
-                    "id": "kth",
-                    "operator": "select_by_index",
-                    "arguments": {"items": "$ranking.ranked", "index": 1},
-                    "depends_on": ["ranking"],
-                    "output_type": "object",
-                    "role": "support",
-                },
-                {
-                    "id": "answer",
-                    "operator": "match_options",
-                    "arguments": {"options": ["선택지 0", "선택지 1"], "places": ["$kth"]},
-                    "depends_on": ["kth"],
-                    "output_type": "object",
-                    "role": "measure",
-                },
-            ]
-        },
-    },
     "radius": {
         "name": "Filter-Aggregate-Measure",
         "affinity": {"radius", "within", "count"},
         "keywords": ("반경", "이내", "within", "radius"),
-        "pattern": "nearby_places(center, exact radius and category/keyword) -> Measure",
+        "pattern": (
+            "RESOLVE_PLACES -> PLACE_SEARCH -> FILTER (the stated radius) -> AGGREGATE -> MEASURE"
+        ),
         "example": {
             "graph": [
                 {
@@ -803,7 +730,7 @@ TEMPLATES = {
         "affinity": {"route", "routing", "travel", "duration", "driving"},
         "network_literal": True,
         "keywords": ("경로", "자동차", "주행", "route", "driving"),
-        "pattern": "distance_matrix(one origin, all option destinations) -> Measure",
+        "pattern": "ROUTE_MATRIX -> ROUTE_COMPARE -> MEASURE",
         "example": {
             "graph": [
                 {
@@ -834,7 +761,7 @@ TEMPLATES = {
         "trip_literal": True,
         "keywords": ("일정", "차례", "경유", "여행", "trip", "itinerary"),
         "pattern": (
-            "distance_matrix(explicit ordered segment pairs) -> aggregate_route_groups -> Measure"
+            "ROUTE_MATRIX -> AGGREGATE (scope=groups) -> MEASURE"
         ),
         "example": {
             "graph": [
@@ -877,10 +804,7 @@ TEMPLATES = {
         },
         "trip_literal": True,
         "keywords": ("최적 순서", "시간창", "방문 순서", "몇 곳", "tsp"),
-        "pattern": (
-            "locations -> distance_matrix(all ordered pairs) -> tsp_tw(service times, budget)"
-            " -> Measure"
-        ),
+"pattern": "RESOLVE_PLACES -> ROUTE_MATRIX -> ROUTE_OPTIMIZE -> MEASURE",
         "example": {
             "graph": [
                 {
@@ -922,7 +846,7 @@ TEMPLATES = {
         "affinity": {"turn", "step", "instruction", "guidance"},
         "network_literal": True,
         "keywords": ("경로 단계", "도로", "회전", "step"),
-        "pattern": "directions -> route-step field extraction -> Measure",
+        "pattern": "RESOLVE_PLACES -> ROUTE_MEASURE -> ROUTE_STEPS -> MEASURE",
         "example": {
             "graph": [
                 {
@@ -956,7 +880,7 @@ TEMPLATES = {
         "name": "Time-Window-Reverse",
         "affinity": {"departure", "arrival", "finish_time", "start_time", "time_window"},
         "keywords": ("도착 시간", "출발 시간", "영업시간", "time window"),
-        "pattern": "TEXTENT -> route duration -> reverse/finish-time calculation -> Measure",
+        "pattern": "ROUTE_MEASURE (measure=duration) -> SCHEDULE -> MEASURE",
         "example": {
             "graph": [
                 {
@@ -1079,7 +1003,9 @@ def _example_bank() -> list[dict[str, Any]]:
     return [
         {
             "name": template["name"],
-            "example": template["example"],
+            # Stored as the operator graph they produce -- which is what makes the round-trip
+            # test possible -- and shown to the planner in the vocabulary it answers in.
+            "example": {"graph": lift_to_semantic(template["example"]["graph"])},
             "pattern": template["pattern"],
             "affinity": tuple(template.get("affinity", ())),
             "keywords": tuple(template.get("keywords", ())),
@@ -2027,6 +1953,41 @@ def _validate_statically_known_reference_shapes(
                     f"{reference} indexes batch_geocode node {producer['id']!r} at "
                     f"{projection}, but it has {len(names)} place_names"
                 )
+
+
+#: Which validation rule belongs to the paper and which is this port's. The distinction is not
+#: cosmetic: upstream Spatial-Agent has no operator input-type table, no reference-shape rule and
+#: no statically-known-argument check, so a graph refused by one of those is refused by
+#: K-MapEval, not by GeoFlow. Any comparison against the paper's numbers has to say which.
+#:
+#: The paper's G1-G5 refuse on both passes. The port's heuristics refuse strictly, so the repair
+#: round is told about them, and step aside on the last attempt -- measured, that is worth 5.7
+#: points of pooled accuracy on graphs the executor runs correctly.
+PAPER_CONSTRAINTS: dict[str, str] = {
+    "G1": "acyclicity",
+    "G2": "functional-role ordering on the operator graph",
+    "G3": "operator output-type compatibility",
+    "G4": "executable operators with their required arguments",
+    "G5": "connectivity from contextual input through every node to a measure",
+}
+
+PORT_LOCAL_CHECKS: dict[str, str] = {
+    "concept_role_ordering": (
+        "role ordering over the *concept* graph, whose roles and edges the Analysis stage wrote. "
+        "A violation reports disagreement with that stage's labelling, not a fault in the graph "
+        "about to execute."
+    ),
+    "operator_input_types": (
+        "OPERATOR_INPUT_TYPES, a declared table of what each operator accepts. Where it and an "
+        "implementation disagree the implementation is right."
+    ),
+    "reference_shapes": (
+        "data availability: whether a `$node.field` projection names a field that node produces."
+    ),
+    "statically_known_values": (
+        "argument values derivable before execution, such as a list length that must match."
+    ),
+}
 
 
 def normalize_and_validate_graph(

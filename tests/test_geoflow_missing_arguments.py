@@ -242,7 +242,7 @@ def test_a_bare_reference_as_arguments_binds_the_operators_one_slot() -> None:
             },
         ]
     }
-    _, steps, _ = _factorize_validate_plan(
+    _, steps, _, _semantic = _factorize_validate_plan(
         _ANALYSIS, plan, "q", ["a", "b", "c", "d"], extract_facts({}, "q"), 15
     )
     final = next(step for step in steps if step["id"] == "final_measure")

@@ -27,6 +27,10 @@ from src.agent.geoflow import (
     retrieve_templates,
     split_reference_arithmetic,
 )
+from src.agent.semantics import (
+    factorize_semantic_graph,
+    transform_catalogue,
+)
 from src.llm import (
     ChatClient,
     LLMContextOverflowError,
@@ -90,174 +94,60 @@ Return JSON only:
 {"intent":"direction","concepts":[{"id":"anchor","text":"서울역","concept_type":"location","role":"extent","attributes":{},"depends_on":[]},{"id":"sector","text":"북동쪽","concept_type":"field","role":"sub_condition","attributes":{"direction":"북동쪽"},"depends_on":["anchor"]},{"id":"answer","text":"direction","concept_type":"field","role":"measure","attributes":{},"depends_on":["anchor"]}],"measure":"direction"}
 Do not answer the multiple-choice question and do not invent coordinates."""
 
-GRAPH_PROMPT = """You are Spatial-Agent's Concept Transformation Drafting, GeoFlow Graph
-Construction, and Factorization stage. Compose the retrieved pre-validated templates into an
-executable operator-concept DAG. Every node must contribute to a Measure node.
+GRAPH_PROMPT = """You are Spatial-Agent's Concept Transformation stage. Read the spatial concept
+analysis and say which transformations the question needs, in what order. You are not choosing
+tools: which operator performs a transformation is decided afterwards, deterministically, from the
+concept types and the transformation you name. Name the relation, not the implementation.
+
+Transformations:
+{transform_catalogue}
+
+Every node is {"id", "transform", "inputs", "role"} and may carry "concept_ids" and "factors".
+- inputs are the ids of the nodes this one consumes, in order. The first input of a search, a
+  filter, a sort or a route is the place it is measured from.
+- concept_ids are the analysis concepts this node is about. A RESOLVE_PLACES node lists the
+  concepts whose places it resolves, and the names come from those concepts -- do not retype a
+  place name, and do not translate or shorten one.
+- role is one of extent, temporal_extent, sub_condition, condition, support, measure.
+- factors are semantic parameters only: ordinal (1-based: second nearest is 2), measure
+  ("distance" or "duration"), key, extreme ("min"/"max"), aggregate ("sum"/"difference"/
+  "proportion"), scope ("options" to resolve the candidate texts, "one" for a single place).
+  Never put a radius, a compass sector, a stay, a time budget or a place name in factors: the
+  analysis already extracted those and they are bound for you.
 
 The graph must satisfy all five paper constraints:
 1. acyclicity; 2. role ordering
    (sub_condition < condition < support < measure; contextual roles are unordered);
-3. operator output type compatibility; 4. executable operators and available arguments;
-5. connectivity from contextual input through every node to a measure.
+3. output type compatibility; 4. every transformation reachable; 5. connectivity from contextual
+   input through every node to a measure. Keep it within {max_steps} nodes.
 
 Return JSON only:
-{"graph":[{"id":"places","operator":"batch_geocode","arguments":{"place_names":["A","B"]},"depends_on":[],"output_type":"object","role":"extent","concept_ids":["anchor"]}]}
+{"graph":[{"id":"anchor","transform":"RESOLVE_PLACES","inputs":[],"concept_ids":["anchor"],"role":"extent"},{"id":"found","transform":"PLACE_SEARCH","inputs":["anchor"],"concept_ids":["target"],"role":"support"},{"id":"ranked","transform":"SORT","inputs":["anchor","found"],"role":"support"},{"id":"kth","transform":"ORDINAL_SELECT","inputs":["ranked"],"factors":{"ordinal":2},"role":"support"},{"id":"answer","transform":"MATCH_OPTIONS","inputs":["kth"],"role":"measure"}]}
 
-Exact operator contracts:
-- place_search(query?,center?,category_code?,radius_m?,min_rating?,open_now?,limit=5) -> object
-- batch_geocode(place_names, anchor?, radius_m=20000, limit=1) -> object; anchor biases ambiguous
-  names toward the question's reference location. Output preserves order and each item has
-  {query, place, candidates}; reference the best match as $node.0.place
-- geocode(address, limit=5) -> location
-- reverse_geocode(latitude,longitude,limit=5) -> location
-- place_details(place_id) -> object
-- batch_place_details(place_ids) -> object
-- nearby_places(center, query|category_code, radius_m, limit) -> object, nearest first
-  Kakao category codes: MT1 mart, CS2 convenience store, PS3 childcare, SC4 school,
-  AC5 academy, PK6 parking, OL7 gas/charging, SW8 subway station, BK9 bank,
-  CT1 culture, AG2 real estate, PO3 public institution, AT4 attraction, AD5 lodging,
-  FD6 restaurant, CE7 cafe, HP8 hospital, PM9 pharmacy. Use the matching code whenever possible.
-- directions(origin,destination,mode="driving",priority,waypoints?) -> field (with steps)
-- travel_time(origin, destination, mode="driving", priority) -> field Route
-  Kakao Mobility routes cars only, so a walking question — 걸어서, 걸어가기에 가장 가까운 —
-  is answered with haversine_distance or nearest(metric="haversine"), never by asking these two
-  for a walking route: the call fails and the evidence is lost.
-- distance_matrix(origins,destinations OR pairs, mode="driving", priority) -> field;
-  pairs is [{origin,destination,label?}], and output routes preserve pair order at $node.routes
-- haversine_distance(place_a, place_b) -> amount; straight-line distance only. Output is
-  {distance_m, distance_km}, so reference the node itself ($node) or $node.distance_m, never
-  $node.amount. A question about travelling — 주행 거리, 이동 거리, how far you drive or walk —
-  is asking for road distance and must come from directions/distance_matrix, not from this;
-  a straight line is roughly four fifths of the road that follows it, which is close enough to
-  land on a wrong option and far enough to be wrong
-- pairwise_distances(pairs=[{place_a,place_b,label?}]) -> field
-- pairwise_extremes(locations) -> amount
-- bearing_to_direction(place_a, place_b) -> field
-- filter_by_direction(center, places, direction) -> object, nearest first; places is a retrieved
-  POI list such as $nearby, not a batch_geocode node
-- nearest(anchor,candidates,metric="haversine"|"travel_time",routes?,required_type?) -> object;
-  required_type keeps only candidates of that kind before ranking, and is ignored when nothing
-  matches
-- within_radius(center, candidates, radius_m) -> object
-- select_min/select_max(items,key), sort_by(items,key), compare_routes(routes,metric) -> object
-- select_by_index(items,index,key?,descending?) -> object; the k-th item of a ranked list.
-  index is 0-based, so the second closest is index 1 and the third is 2. This is how an
-  ordinal question ends — sort_by or nearest first, then this. There is no
-  select_second_* operator and no rank argument. Rank what the question is about, not the
-  option list: "두 번째로 가까운 편의점" is the second nearest convenience store in the
-  neighbourhood, so retrieve with nearby_places and rank that, then match_options the winner.
-  The options are a subset of the ranking, never the ranking itself
-- sum_amounts(amounts,key?) -> amount; adds measurements several nodes each produced, such
-  as two extract_distance legs of a via-route. Route-shaped records total distance_m and
-  duration_s together. For per-option route totals use aggregate_route_groups instead
-- difference(minuend,subtrahend) -> amount; subtracts one measurement from another, for a
-  detour cost or how much farther one place is than another. Reports `difference` signed
-  and `value` as the magnitude, which is what a numeric option carries
-- filter_routes(routes,keyword,include=true) -> field
-- extract_distance(route), extract_duration(route) -> amount
-- filter_places(places,min_rating?,price_levels?,required_types?,open_now?) -> object
-- steps_analysis(route,landmark?) -> field; totals are left_turn_count/right_turn_count/
-  roundabout_exit_count over the whole drive. With a landmark it also reports landmark_index,
-  instruction_after_landmark, and the same counts split as *_before_landmark / *_after_landmark.
-  A question about turns "before"/"after" reaching a road must read the split counts, never the
-  total — pass the road name as landmark
-- sum_route_metrics(routes) -> amount
-- aggregate_route_groups(routes,groups) -> amount; groups contains route indexes per option and
-  returns option_totals plus best_distance_option and best_duration_option.
-- merge_places(items) -> object; merges and de-duplicates multiple retrieval branches
-- recover_option_places(options,candidates,anchor,radius_m,category_code?,direction?) -> object;
-  conditionally resolves options absent from ranked retrieval and merges their POIs into the
-  candidate list. Pass the same category_code the retrieval used, and the same direction any
-  filter_by_direction used — recovery adds places the filter never saw, so without it the ranking
-  that follows answers without the question's direction.
-- match_options(options,places,anchor?,mode) -> object; grounds options to retrieved POIs
-- match_distance_options(distance,options) -> object; maps a computed distance to numeric options.
-  Pass the haversine node itself as distance and copy the option texts verbatim
-- match_type_options(place,options) -> object; maps normalized category evidence to options
-- events_from_objects(objects,event_type,timestamp_field?) -> event
-- filter_events(events,field,operator,value) -> event
-- build_route_network(nodes,edges) -> network
-- calculate_proportion(numerator,denominator) -> proportion
-- open_at_time(schedule,local_time,timezone) -> event
-- timezone(latitude,longitude,timestamp?) -> event
-- timezone_convert(local_time,from_timezone,to_timezone) -> event
-- calculate_finish_time(start_time|arrival_time,locations,stay_durations_s?,timezone?,mode?,
-  priority?) -> event; routes every leg of `locations` in order and adds the stays. Give
-  start_time to ask when an itinerary ends, or arrival_time to ask the latest departure that still
-  meets it — the output carries both start_time and finish_time either way. Use this rather than
-  summing legs into calculate_start_time by hand
-- calculate_start_time(arrival_time,duration_s,timezone) -> event
-- tsp_tw(nodes,distance_matrix,time_windows?,service_times?,start_index=0,time_budget?,
-  end_index?,fixed_order=false,metric=duration,return_to_start=false) -> network; end_index fixes
-  the last stop when the trip must finish somewhere (an appointment), leaving only the stops
-  between it and the start to order;
-  fixed_order=true when the question states the sequence ("적힌 순서대로", "A → B → C 순서로") so
-  the stops are walked as listed instead of reordered — end_index is then meaningless;
-  metric="distance" when the question ranks by 주행거리/이동거리 rather than by time, which makes
-  total_cost metres and rules out service_times/time_budget/time_windows — they are seconds, and a
-  distance question states the stays as decoys; return_to_start=true when the trip comes home
-  ("다시 …로 돌아옵니다"), because the cheapest way out is not the cheapest loop;
-  distance_matrix accepts a distance_matrix node directly ($legs), which carries the square
-  duration matrix in seconds; nodes must be the matching place list in the same order, with the
-  starting place at start_index. service_times are the stay durations in seconds (0 for the start)
-  and time_budget is the available time in seconds. Output is {order, visited_count, unvisited,
-  total_cost, feasible, objective}, where order indexes nodes and visited_count is how many
-  requested stops the trip reaches, start excluded.
-- identity_measure(value) -> object; explicit Measure projection for a single source operator
+What the question is about, not what the tools are:
+- The candidate options are answer texts, not a candidate set. Retrieve the kind of place the
+  question asks about and match the options against what you found. Resolving the four options and
+  taking the nearest answers "which of these is closest" instead of the question asked.
+- When the question describes a *need* rather than naming a kind of place, the analysis has
+  already worked out which kind satisfies it. PLACE_SEARCH will use it.
+- A question that ranks by 주행거리/이동거리 is decided in metres and one that ranks by time in
+  seconds. Say which with factors.measure; the orders a trip question offers sit about 2% apart,
+  so the wrong measure answers a different question.
+- When the options are counts of places, the answer is how many stops fit the stated time, so let
+  ROUTE_OPTIMIZE decide feasibility rather than counting the places the question mentions.
+- Two anchors bound some questions -- "A와 B 양쪽 모두에서", "A에서 B까지 이동하는 경로 위에" --
+  and every option has to be tested against both. Resolve both anchors and compose two
+  transformations over them; a single neighbourhood search around one anchor cannot see the other.
+- An ordinal is a factor, not a shape: "두 번째로 가까운" is SORT then ORDINAL_SELECT with
+  ordinal=2, over the same graph the nearest question uses with ordinal=1.
 
-Use normalized fields only: latitude, longitude, distance_m, duration_s. Complete Place objects,
-or literal place names for map tools, are valid. Never use Google geometry/lat/lng/legs fields.
-Copy every place name verbatim from the question and candidate options; never shorten, translate,
-or remove a store/branch prefix. References must use $node.0.place, never ${node.0.place}.
-Use batch_geocode for named endpoints and distance_matrix for route candidates so the graph remains
-within {max_steps} nodes. For nearby, direction, and radius questions, geocode only the anchor and
-retrieve the requested type with nearby_places. For nearby/direction, use recover_option_places so
-only missing option evidence is resolved, then use match_options; do not geocode options upfront.
-This holds even when the options already look like a complete list of places: four named options
-are not a candidate set, they are answer texts, and geocoding them and taking the nearest answers
-"which of these is closest" instead of the question asked.
-When the question describes a *need* rather than naming a kind of place, work out which kind of
-place satisfies it and retrieve that kind. The options will include closer places of
-other kinds, so a ranking that ignores the kind returns one of those. If you do rank option places
-directly, filter_places(required_types=[the Korean noun for that kind]) first.
-Supply the question's origin/reference place as batch_geocode.anchor to disambiguate same-name POIs.
-For a trip question, geocode the start and every named stop once, then call distance_matrix with
-origins = destinations = that full place list so every ordered leg is looked up in one node, and
-pass that node to tsp_tw as distance_matrix with the stays as service_times and the stated total
-time as time_budget. When the options are visiting orders, still build the same matrix and compare
-the orders the options name — by the measure the question names, and over the whole loop if the
-trip returns to where it started. "총 주행거리가 가장 짧은 방문 순서" is decided in metres, and the
-orders it offers sit about 2% apart, so ranking them by travel time answers a different question.
-When the options are counts of places ("한 곳"/"두 곳"/…), the answer
-is how many stops fit the budget, so let tsp_tw decide feasibility — never guess from the number
-of places mentioned, and read tsp_tw.visited_count rather than counting order yourself. A count
-question lists its stops 적힌 순서대로, so set fixed_order=true and leave end_index off: the trip
-ends where the time runs out, not at the last place named. Travel time counts against the budget
-just as the stays do — a count that adds only the stays is one too many.
-Convert hours to seconds (1시간 = 3600).
-tsp_tw.total_cost is the whole tour with the stays already in it, and travel_cost/service_cost are
-its halves. Feed calculate_start_time the total_cost itself; adding the stays beside it counts
-every visit twice. When the trip must finish somewhere — an appointment at a named place, with
-errands on the way — give that place as end_index, or the tour will end at an errand instead.
-For nearest among explicit options, geocode every option and compute deterministically.
-When two anchors bound the question, every option has to be tested against both, so geocode the
-two anchors and all the options in one batch_geocode and compute from those places:
-- "A에서 B까지 이동하는 경로 위에 있는" asks which option adds least to the A→B trip. Compare
-  haversine_distance(A,option) + haversine_distance(option,B) across the options, or route A→B
-  through each option as a waypoint and take the smallest. Ranking by the distance to one anchor
-  answers a different question.
-- "A와 B 양쪽 모두에서 직선거리 R 이내" is an intersection: within_radius(center=A) over the
-  option places, then within_radius(center=B) over that result. What survives both is the answer.
-Neither shape is a neighbourhood retrieval — nearby_places around one anchor cannot see the other,
-so do not answer them with nearby_places plus match_options.
-A vertical bar in one option separates grouped place names; preserve its option index while
-resolving each name. For a radius question use the exact radius and requested
-category/keyword.
 Do not select an option and do not use the gold answer."""
 
-REPAIR_PROMPT = """Repair the supplied GeoFlow graph so it passes the listed validation error.
-Keep the question semantics and retrieved template, use only the exact operator contracts from the
-original system prompt, and stay within {max_steps} nodes. Return only {"graph":[...]} JSON."""
+REPAIR_PROMPT = """Repair the supplied transformation graph so it passes the listed validation
+error. Keep the question's semantics and the retrieved template, answer in the same
+transformation vocabulary as before -- the error names operators because that is what the
+transformations were mapped onto, but you choose transformations, not operators -- and stay within
+{max_steps} nodes. Return only {"graph":[...]} JSON."""
 
 EVALUATOR_PROMPT = """You are Spatial-Agent's grounded response generation stage. Select exactly
 one candidate using the final GeoFlow state and topological execution evidence. Large collections
@@ -321,6 +211,21 @@ class SpatialAgent(BenchmarkAgent):
         missing = set(OPERATOR_CONTRACTS) - available
         if missing:
             raise ValueError(f"GeoFlow operators are not executable: {', '.join(sorted(missing))}")
+        #: What factorization may map a transformation onto. Taken from the registries rather
+        #: than from the contract table so a deployment missing a tool cannot have a graph built
+        #: against it.
+        self.executable_operators = frozenset(available)
+
+    def _graph_prompt(self) -> str:
+        """The planner prompt, with the vocabulary rendered from the transform table itself.
+
+        Rendered rather than duplicated so a transformation cannot exist in one and not the
+        other: adding one to `TRANSFORMS` is what puts it in front of the planner.
+        """
+
+        return GRAPH_PROMPT.replace(
+            "{transform_catalogue}", transform_catalogue()
+        ).replace("{max_steps}", str(self.max_steps))
 
     def answer(self, question: str, options: list[str]) -> AgentResult:
         started = time.perf_counter()
@@ -337,6 +242,8 @@ class SpatialAgent(BenchmarkAgent):
         reasoning_steps = 0
         usage = TokenUsage()
         execution_errors: list[dict[str, str]] = []
+        semantic_nodes = 0
+        concrete_nodes = 0
         try:
             analysis_response = self.llm.chat(
                 [
@@ -379,7 +286,7 @@ class SpatialAgent(BenchmarkAgent):
                 [
                     {
                         "role": "system",
-                        "content": GRAPH_PROMPT.replace("{max_steps}", str(self.max_steps)),
+                        "content": self._graph_prompt(),
                     },
                     {
                         "role": "user",
@@ -398,7 +305,7 @@ class SpatialAgent(BenchmarkAgent):
             plan = parse_json_object(plan_response.content)
             trace.append({"stage": "compose", "graph": plan.get("graph") or plan.get("steps")})
             try:
-                factorized, steps, constraints = _factorize_validate_plan(
+                factorized, steps, constraints, semantic = _factorize_validate_plan(
                     runtime_analysis,
                     plan,
                     question,
@@ -406,6 +313,7 @@ class SpatialAgent(BenchmarkAgent):
                     facts,
                     self.max_steps,
                     retrieval_specs=self.tools.retrieval_specs,
+                    available_operators=self.executable_operators,
                 )
             except ValueError as graph_error:
                 trace.append(
@@ -416,7 +324,7 @@ class SpatialAgent(BenchmarkAgent):
                         {
                             "role": "system",
                             "content": (
-                                GRAPH_PROMPT.replace("{max_steps}", str(self.max_steps))
+                                self._graph_prompt()
                                 + "\n\n"
                                 + REPAIR_PROMPT.replace("{max_steps}", str(self.max_steps))
                             ),
@@ -444,7 +352,7 @@ class SpatialAgent(BenchmarkAgent):
                     }
                 )
                 try:
-                    factorized, steps, constraints = _factorize_validate_plan(
+                    factorized, steps, constraints, semantic = _factorize_validate_plan(
                         runtime_analysis,
                         repaired_plan,
                         question,
@@ -452,6 +360,7 @@ class SpatialAgent(BenchmarkAgent):
                         facts,
                         self.max_steps,
                         retrieval_specs=self.tools.retrieval_specs,
+                        available_operators=self.executable_operators,
                     )
                 except ValueError as repair_error:
                     # Upstream has no type or role check to fail in the first place. The repair
@@ -462,7 +371,7 @@ class SpatialAgent(BenchmarkAgent):
                     # the repair is structurally invalid too; this order is identical for every
                     # intent and introduces no family-specific solver.
                     try:
-                        factorized, steps, constraints = _factorize_validate_plan(
+                        factorized, steps, constraints, semantic = _factorize_validate_plan(
                             runtime_analysis,
                             repaired_plan,
                             question,
@@ -470,6 +379,7 @@ class SpatialAgent(BenchmarkAgent):
                             facts,
                             self.max_steps,
                             retrieval_specs=self.tools.retrieval_specs,
+                            available_operators=self.executable_operators,
                             strict_types=False,
                         )
                     except ValueError as repaired_lenient_error:
@@ -483,7 +393,7 @@ class SpatialAgent(BenchmarkAgent):
                             }
                         )
                         try:
-                            factorized, steps, constraints = _factorize_validate_plan(
+                            factorized, steps, constraints, semantic = _factorize_validate_plan(
                                 runtime_analysis,
                                 plan,
                                 question,
@@ -491,6 +401,7 @@ class SpatialAgent(BenchmarkAgent):
                                 facts,
                                 self.max_steps,
                                 retrieval_specs=self.tools.retrieval_specs,
+                                available_operators=self.executable_operators,
                                 strict_types=False,
                             )
                         except ValueError as original_lenient_error:
@@ -523,6 +434,13 @@ class SpatialAgent(BenchmarkAgent):
                                 "error": str(repair_error),
                             }
                         )
+            # G -> G' as this run performed it: which transformation each node asked for, which
+            # operator answered, and which precedence rule decided. `concrete_nodes` counts the
+            # nodes the planner named an operator for anyway, which is the measure of whether
+            # the semantic vocabulary took.
+            semantic_nodes = len(semantic.graph)
+            concrete_nodes = len(semantic.concrete_nodes)
+            trace.append({"stage": "transform", **semantic.as_dict()})
             trace.append({"stage": "factorize", **factorized.as_dict()})
             trace.append(
                 {
@@ -700,6 +618,8 @@ class SpatialAgent(BenchmarkAgent):
             reasoning_tokens=usage.reasoning_tokens,
             reasoning_chars=usage.reasoning_chars,
             execution_errors=execution_errors,
+            graph_nodes=semantic_nodes,
+            planner_named_operator_nodes=concrete_nodes,
             latency_ms=(time.perf_counter() - started) * 1000,
             failure_type=failure_type,
             failure_message=failure_message,
@@ -734,6 +654,7 @@ def _factorize_validate_plan(
     *,
     strict_types: bool = True,
     retrieval_specs: RetrievalSpecs = canonical_retrieval_specs,
+    available_operators: frozenset[str] = frozenset(OPERATOR_CONTRACTS),
 ):
     raw_steps = plan.get("graph") if plan.get("graph") is not None else plan.get("steps")
     if not isinstance(raw_steps, list):
@@ -743,8 +664,20 @@ def _factorize_validate_plan(
             f"GeoFlow graph has {len(raw_steps)} operators, exceeding "
             f"MAX_REASONING_STEPS={max_steps}"
         )
+    # G -> G'. The planner answered in transformations; which operator performs each is decided
+    # here, deterministically, from the concept types and the transformation alone. A planner
+    # that named operators anyway is carried through as already-factorized and counted, because
+    # losing a graph that would have executed to a vocabulary preference is a worse trade than
+    # knowing how often it happens.
+    semantic = factorize_semantic_graph(
+        raw_steps,
+        concepts=analysis.get("concepts") or [],
+        options=options,
+        facts=facts,
+        available=available_operators,
+    )
     grounded = _ground_graph_literals(
-        raw_steps, question, options, facts, retrieval_specs=retrieval_specs
+        semantic.graph, question, options, facts, retrieval_specs=retrieval_specs
     )
     factorized = factorize_geoflow(analysis, {"graph": grounded}, strict_types=strict_types)
     # The planner budget above governs what the planner authored. Retrieval fan-out added
@@ -754,7 +687,7 @@ def _factorize_validate_plan(
         max_steps=max(max_steps, len(grounded)),
         strict_types=strict_types,
     )
-    return factorized, steps, constraints
+    return factorized, steps, constraints, semantic
 
 
 def _compact_evaluation_evidence(

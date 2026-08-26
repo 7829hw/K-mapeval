@@ -87,3 +87,101 @@ redundant. Rebuilding it is the remaining work, and each attempt costs a benchma
 
 Not a held-out number: v7-283 has been tuned against throughout this project. Not a three-pass
 result: run 3 is one pass. Not a statement about ReAct, which this change does not touch.
+
+
+---
+
+# Recovery iteration: skeletons, then Concept Analysis
+
+Same dataset, same conditions. All runs one pass, so no spread is claimed; the movements below
+are larger than any spread this endpoint has shown on 283 rows.
+
+## The required ablation
+
+**A** = the semantic planner as it stood (`8f67f01`). **B** = A plus retrieved semantic
+macro-template skeletons (`ecb9400`). **C** = B plus the Concept Analysis completion
+(`689734d`), which the acceptance criteria redirected to when B did not recover.
+
+| metric | A `8f67f01` | B `ecb9400` | C `689734d` | `af51e93` |
+|---|---:|---:|---:|---:|
+| concrete operator leakage | 0 / 1,548 | 0 / 1,640 | **0 / 1,678** | n/a |
+| semantic-vocabulary ratio | 100% | 100% | **100%** | n/a |
+| questions composed wholly in semantics | 269 / 283 | 275 / 283 | **277 / 283** | n/a |
+| graph-generation success | 95.1% | 97.5% | **97.9%** | 99.1% |
+| G1-G5 validation success | 95.1% | 97.5% | **97.9%** | 99.1% |
+| execution success (no errored step) | 49.1% | 47.7% | **54.8%** | — |
+| **final accuracy** | 50.9% | 50.5% | **60.4%** | **82.1%** (3 passes) |
+
+Graph-generation and validation success are one number here: a question that fails validation
+after the draft and the repair is exactly the one that produces no graph, and it is reported as
+`graph_validation_failure`.
+
+### Acceptance criteria
+
+* 0% concrete operator leakage -- **met**, 0 of 1,678 nodes, and no compound operator name or
+  category code appears in the prompt, the patterns or the skeletons.
+* approximately >=95% graph validation -- **met**, 97.9%.
+* clear accuracy recovery from 50.9% -- **met**, 60.4%.
+
+## Per family, against `af51e93`
+
+| family | `af51e93` | C | delta |
+|---|---:|---:|---:|
+| `nearby_subtype_kth` | — | 100.0 | — |
+| `nearby_kth_nearest` | 75.0 | 75.0 | **+0.0** |
+| `trip_optimal_order` | 56.9 | 62.5 | **+5.6** |
+| `trip_feasible_count_five` | 73.0 | 66.7 | -6.3 |
+| `routing_nth_turn` | 90.5 | 71.4 | -19.1 |
+| `poi_distance_difference` | 94.9 | 60.6 | -34.3 |
+| `trip_total_distance` | 95.2 | 52.4 | -42.8 |
+| `nearby_within_radius_count` | 61.1 | 16.7 | -44.4 |
+| `nearby_cuisine_subtype` | 83.3 | 33.3 | -50.0 |
+| `routing_turn_count_via` | 84.1 | 14.3 | -69.8 |
+
+`nearby_kth_nearest` reaching parity is the one that matters most: it is the family the whole
+diagnosis was built on, it was at 41.7% two iterations ago, and the ordinal is now a factor on a
+composed shape rather than a template of its own.
+
+## What B established, and why it did not show in the accuracy
+
+B is not a failure. It fixed the thing it was aimed at -- validation rose to 97.5%, and
+`nearby_kth_nearest` stopped ranking the four answer texts -- but the accuracy did not move,
+because a second constraint was binding underneath it.
+
+## What C established
+
+Concept Analysis quality, measured over the same benchmark rows at both revisions:
+
+| | `af51e93` (82.1%) | `ecb9400` (50.5%) |
+|---|---:|---:|
+| no usable concepts at all | 24% | 19% |
+| names a kind of place, `target_type` null | 43% | 44% |
+| candidate options present as concepts | 8% | 9% |
+
+Identical. The Analysis stage was not damaged by any of this work; it has always been this weak.
+What changed is that the old architecture did not depend on it -- the planner copied place names
+straight out of the question, so the concept graph was decoration for the role checks. The
+semantic architecture routes place identity *through* the concept graph, so a fifth of questions
+went from "thin analysis" to "no place to resolve", and the fallback handed `RESOLVE_PLACES` the
+entire question text as one concept, typed as a place, to geocode.
+
+Completing that fallback from the facts the deterministic extractors had already read off the
+same question -- the anchor, the kind, the stops, the compared pair -- is worth **+9.9 points**,
+and 312 of 312 recorded fallback analyses now geocode places rather than a sentence.
+
+## The remaining 22 points, diagnosed
+
+Three families carry most of it, and none of them is a factorizer question:
+
+* `routing_turn_count_via` (-69.8, 30 errored steps). A via-route has three places and
+  `ROUTE_MEASURE` wires only an origin and a destination, so the waypoint is dropped and the turn
+  count is counted on a different route. The vocabulary has no way to say "through here".
+* `trip_total_distance` (-42.8, **2** errored steps). The graph runs and computes the wrong
+  number: `AGGREGATE(scope=groups)` over a route matrix has no groups wired, so it totals the
+  matrix rather than the consecutive legs the itinerary visits.
+* `nearby_cuisine_subtype` (-50.0) and `nearby_within_radius_count` (-44.4). Both retrieve and
+  then narrow, and both still error on a third of their steps.
+
+The first two are missing semantic distinctions -- a via point, and which legs an aggregate
+covers -- which is where the acceptance criteria point next. Neither is fixed by changing how
+operators are chosen.

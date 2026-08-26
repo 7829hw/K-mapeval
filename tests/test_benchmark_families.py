@@ -121,3 +121,105 @@ def test_v6_and_v7_draw_exactly_what_they_drew() -> None:
     assert _scan_limit(ORDINAL_SCAN_FLOOR, 4) == ORDINAL_SCAN_FLOOR
     # And it grows once the build is bigger than the floor was sized for.
     assert _scan_limit(ORDINAL_SCAN_FLOOR, 24) == 72
+
+
+# --------------------------------------------------------------------------------------------
+# The dataset label axes.
+#
+# Every row carries three independent labels: `mapeval_class` (MapEval-API's task category, plus
+# this port's `unanswerable`), `classification` (what is measured), and `template_id` (which
+# generator wrote it). They were being written by the builders and read by nothing -- `extra=
+# "allow"` let the first two through unvalidated, and only `classification` reached a report.
+# These pin the relationship between them so a builder cannot drift one axis away from another.
+# --------------------------------------------------------------------------------------------
+
+import json  # noqa: E402
+from typing import Any  # noqa: E402
+
+import pytest  # noqa: E402
+
+from src.agent.spatial import SUPPORTED_INTENTS  # noqa: E402
+from src.dataset import (  # noqa: E402
+    _CLASSIFICATION_TO_MAPEVAL,
+    load_dataset,
+    resolve_mapeval_class,
+)
+
+DATASET_DIR = Path(__file__).resolve().parents[1] / "dataset"
+DATASETS = sorted(DATASET_DIR.glob("*.jsonl"))
+# The rows built before the label existed. Every other file states its own `mapeval_class`.
+UNLABELLED = {
+    "seoul_mapeval_v1_mcq_100.jsonl",
+    "seoul_kmapeval_v2_mcq_100.jsonl",
+    "seoul_kmapeval_v3_mcq_100.jsonl",
+}
+
+
+def _rows(path: Path) -> list[dict[str, Any]]:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    return [json.loads(line) for line in lines if line.strip()]
+
+
+@pytest.mark.parametrize("path", DATASETS, ids=lambda path: path.name)
+def test_the_stored_task_category_agrees_with_what_the_measurement_type_implies(path: Path) -> None:
+    """`unanswerable` excepted: it is written as a `nearby` question and only the label says so."""
+
+    for row in _rows(path):
+        stored = row.get("mapeval_class")
+        if stored is None or stored == "unanswerable":
+            continue
+        assert stored == _CLASSIFICATION_TO_MAPEVAL[row["classification"]], row["id"]
+
+
+@pytest.mark.parametrize("path", DATASETS, ids=lambda path: path.name)
+def test_every_set_the_labelled_builders_wrote_labels_every_row(path: Path) -> None:
+    rows = _rows(path)
+    if path.name in UNLABELLED:
+        assert all(row.get("mapeval_class") is None for row in rows)
+    else:
+        assert all(row.get("mapeval_class") for row in rows), path.name
+    # `template_id` predates `mapeval_class` and is on every row of every set here.
+    assert all(row.get("template_id") for row in rows), path.name
+
+
+@pytest.mark.parametrize("path", DATASETS, ids=lambda path: path.name)
+def test_every_measurement_type_in_the_data_is_one_the_agent_prompt_knows(path: Path) -> None:
+    """One direction only.
+
+    A `classification` the Analysis stage has never heard of would be a question no template
+    retrieval can score. The converse is *not* asserted: `type` is a v1 label and `poi` a v2/v3
+    one, so both live in `SUPPORTED_INTENTS` with nothing in a current set to exercise them, and
+    the v6-and-later builders emit five of the eight. That is a coverage gap worth knowing about,
+    not a failure -- see the count this test records below.
+    """
+
+    assert {row["classification"] for row in _rows(path)} <= SUPPORTED_INTENTS
+
+
+def test_which_supported_intents_no_current_benchmark_exercises() -> None:
+    current = {
+        row["classification"]
+        for path in DATASETS
+        if path.name not in UNLABELLED
+        for row in _rows(path)
+    }
+    assert current == {"nearby", "radius", "distance", "direction", "routing", "trip"}
+    # `poi` and `type` are reachable in `src/` and regression-tested nowhere in `dataset/`.
+    assert SUPPORTED_INTENTS - current == {"poi", "type"}
+
+
+@pytest.mark.parametrize("path", DATASETS, ids=lambda path: path.name)
+def test_the_resolver_answers_for_every_row_of_every_set(path: Path) -> None:
+    for item in load_dataset(path):
+        assert resolve_mapeval_class(item) in {"nearby", "poi", "routing", "trip", "unanswerable"}
+
+
+def test_the_stored_label_beats_the_derivation_where_they_disagree() -> None:
+    """The `unanswerable_*` families are the whole reason the resolver reads the field first."""
+
+    items = load_dataset(DATASET_DIR / "seoul_kmapeval_v7_mcq_300.jsonl")
+    resolved = Counter(resolve_mapeval_class(item) for item in items)
+    derived = Counter(_CLASSIFICATION_TO_MAPEVAL[item.classification] for item in items)
+    assert resolved["unanswerable"] == 21
+    assert derived["unanswerable"] == 0
+    assert derived["nearby"] - resolved["nearby"] == 21

@@ -15,7 +15,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 from src.agent.base import BenchmarkAgent
-from src.dataset import BenchmarkItem
+from src.dataset import BenchmarkItem, resolve_mapeval_class
 from src.llm import LLMContextOverflowError, LLMOutputTruncatedError, LLMUnavailableError
 from src.logging import log_agent_result, log_trace_entry, query_log
 
@@ -284,6 +284,11 @@ class Evaluator:
                 "id": item.id,
                 "question": question,
                 "expected_classification": item.classification,
+                # Three labels, three axes, one property of the question each: the MapEval task
+                # category the paper's table is indexed by, the measurement type, and the
+                # generator template. None of them is derivable from another.
+                "expected_mapeval_class": resolve_mapeval_class(item),
+                "template_id": item.template_id,
                 "predicted_intent": result.predicted_intent,
                 "correct_answer": correct_option,
                 "correct_answer_text": correct_text,
@@ -354,6 +359,8 @@ class Evaluator:
             "id": item.id,
             "question": question,
             "expected_classification": item.classification,
+            "expected_mapeval_class": resolve_mapeval_class(item),
+            "template_id": item.template_id,
             "predicted_intent": None,
             "correct_answer": item.answer,
             "correct_answer_text": correct_text,
@@ -412,22 +419,42 @@ class Evaluator:
         return path
 
 
+def _accuracy_by(results: list[dict[str, Any]], field: str) -> dict[str, dict[str, Any]]:
+    """Answer accuracy grouped by one dataset label, in the label's own sort order."""
+
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in results:
+        # A v1/v2/v3 row carries no `template_id`, and a row whose label the evaluator never
+        # wrote reads as "unknown" rather than vanishing from the total.
+        key = str(row.get(field) or "unknown")
+        stats = grouped.setdefault(key, {"total": 0, "correct": 0})
+        stats["total"] += 1
+        if row.get("answer_correct"):
+            stats["correct"] += 1
+    for stats in grouped.values():
+        stats["accuracy"] = round(stats["correct"] / stats["total"], 4) if stats["total"] else 0.0
+    return dict(sorted(grouped.items()))
+
+
 def calculate_statistics(results: list[dict[str, Any]]) -> dict[str, Any]:
     total = len(results)
     answer_correct = sum(1 for row in results if row.get("answer_correct"))
     failed = [row["id"] for row in results if row.get("error")]
-    # Answer accuracy split by the *dataset's* class, which is a property of the question and not
-    # of anything an agent predicted. It was called "by intent", which is how scoring an agent's
-    # intent against it came to look like a measurement in the first place.
-    by_class: dict[str, dict[str, Any]] = {}
-    for row in results:
-        classification = str(row.get("expected_classification", "unknown"))
-        stats = by_class.setdefault(classification, {"total": 0, "correct": 0})
-        stats["total"] += 1
-        if row.get("answer_correct"):
-            stats["correct"] += 1
-    for stats in by_class.values():
-        stats["accuracy"] = round(stats["correct"] / stats["total"], 4) if stats["total"] else 0.0
+    # Answer accuracy split by the *dataset's* labels, which are properties of the question and
+    # not of anything an agent predicted. It was called "by intent", which is how scoring an
+    # agent's intent against it came to look like a measurement in the first place.
+    #
+    # Three axes over the same rows, so the extra ones cost one pass each and no LLM calls:
+    #   mapeval_class -- MapEval-API's four task categories, the axis the paper's table is
+    #     indexed by, plus this port's own `unanswerable`. Report that one as its own row: it is
+    #     an addition to the paper's four, not a member of them, and folding it in would compare
+    #     a five-category number against a four-category one.
+    #   classification -- what is measured. Two `nearby` questions can be a nearest-of-a-kind and
+    #     a count-within-600m, and only this tells them apart.
+    #   template_id  -- the generator family, which is the grain error analysis actually needs.
+    by_class = _accuracy_by(results, "expected_classification")
+    by_mapeval_class = _accuracy_by(results, "expected_mapeval_class")
+    by_template = _accuracy_by(results, "template_id")
     average_time = sum(float(row.get("time", 0.0)) for row in results) / total if total else 0.0
     failure_types = Counter(str(row["failure_type"]) for row in results if row.get("failure_type"))
     retried = [row for row in results if int(row.get("attempts") or 1) > 1]
@@ -441,6 +468,8 @@ def calculate_statistics(results: list[dict[str, Any]]) -> dict[str, Any]:
     )
     return {
         "answer_accuracy_by_class": by_class,
+        "answer_accuracy_by_mapeval_class": by_mapeval_class,
+        "answer_accuracy_by_template": by_template,
         "overall_answer_accuracy": {
             "correct": answer_correct,
             "total": total,
@@ -509,18 +538,37 @@ def _token_totals(results: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _print_accuracy_rows(rows: dict[str, Any], *, width: int = 12) -> None:
+    for label, stats in sorted(rows.items()):
+        print(
+            f"  {label:{width}s}: {stats['correct']:3d}/{stats['total']:3d} "
+            f"({stats['accuracy'] * 100:.1f}%)"
+        )
+
+
 def print_summary(statistics: dict[str, Any]) -> None:
     print("=" * 80)
     print("Summary")
     print("=" * 80)
     overall = statistics["overall_answer_accuracy"]
     performance = statistics["performance"]
-    print("Answer accuracy by question class:")
-    for classification, stats in sorted(statistics["answer_accuracy_by_class"].items()):
-        print(
-            f"  {classification:10s}: {stats['correct']:3d}/{stats['total']:3d} "
-            f"({stats['accuracy'] * 100:.1f}%)"
-        )
+    # `unanswerable` is printed under its own heading rather than as a fifth MapEval category:
+    # it is this port's addition to the paper's four, and a mean over five categories is not
+    # comparable to a mean over four.
+    mapeval = dict(statistics.get("answer_accuracy_by_mapeval_class") or {})
+    added = {name: mapeval.pop(name) for name in list(mapeval) if name == "unanswerable"}
+    if mapeval:
+        print("Answer accuracy by MapEval task category:")
+        _print_accuracy_rows(mapeval)
+    if added:
+        print("Answer accuracy on this port's added category (not one of MapEval's four):")
+        _print_accuracy_rows(added)
+    print("Answer accuracy by measurement type:")
+    _print_accuracy_rows(statistics["answer_accuracy_by_class"])
+    by_template = statistics.get("answer_accuracy_by_template") or {}
+    if by_template:
+        print("Answer accuracy by generator template:")
+        _print_accuracy_rows(by_template, width=32)
     print(
         f"Overall answer accuracy: {overall['correct']}/{overall['total']} "
         f"({overall['accuracy'] * 100:.1f}%)"

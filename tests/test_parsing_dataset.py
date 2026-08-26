@@ -282,3 +282,41 @@ def test_extended_benchmark_classifications_are_supported(classification: str) -
     )
     assert item.classification == classification
     assert item.answer == 3
+
+
+def test_the_new_label_axes_are_evaluation_only() -> None:
+    """Promoting `mapeval_class` and `template_id` to the schema must not widen `agent_input`.
+
+    They are typed and reported now; the agent still sees the question and the options and
+    nothing else. `template_id` in particular names the generator family outright -- handing it
+    over would tell the agent which solver to reach for.
+    """
+
+    items = load_dataset(Path("dataset/seoul_kmapeval_v7_mcq_300.jsonl"))
+    assert all(item.mapeval_class for item in items)
+    assert all(item.template_id for item in items)
+    for item in items:
+        question, options = item.agent_input()
+        assert (question, options) == (item.question, item.options)
+        assert item.template_id not in question
+        assert all(item.template_id not in option for option in options)
+
+
+def test_an_unknown_task_category_is_refused_rather_than_carried() -> None:
+    """`extra="allow"` used to let any spelling of these through untouched."""
+
+    import pytest
+
+    from src.dataset import BenchmarkItem
+
+    row = {
+        "id": "x",
+        "question": "q",
+        "options": ["a", "b"],
+        "answer": 0,
+        "classification": "nearby",
+        "mapeval_class": "unanswerable_subjective",
+    }
+    with pytest.raises(ValueError):
+        BenchmarkItem.model_validate(row)
+    assert BenchmarkItem.model_validate({**row, "mapeval_class": "unanswerable"}).mapeval_class

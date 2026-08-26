@@ -5,9 +5,20 @@ MapEval 방식 ReAct와 Spatial-Agent의 공간 추론 성능을 같은 조건�
 두 에이전트의 근거(evidence)는 항상 `KakaoMapProvider`에서 옵니다. Kakao Local / Kakao
 Mobility 실호출과 두 에이전트가 공유하는 SQLite 캐시만 사용합니다.
 
-지원 classification은 `nearby`, `poi`, `routing`, `trip`, `type`, `direction`,
-`distance`, `radius`입니다. `answer`와 에이전트의 선택지 번호는 모두 `options`의
-0-based index입니다.
+데이터셋 라벨은 세 축입니다. 어느 것도 나머지에서 유도되지 않습니다.
+
+- `mapeval_class` — MapEval-API의 태스크 카테고리 `nearby`/`poi`/`routing`/`trip`, 그리고 이
+  포팅이 추가한 `unanswerable`. 논문 대비표의 축이며, 추가분인 `unanswerable`은 네 개에 섞지
+  않고 별도 행으로 보고합니다. v4 이후 모든 세트가 행마다 기록하고, v1~v3 행은
+  `classification`에서 유도합니다(`src/dataset.py`의 `resolve_mapeval_class`).
+- `classification` — 무엇을 재는지. `nearby`, `poi`, `routing`, `trip`, `type`, `direction`,
+  `distance`, `radius` 여덟 개가 `SUPPORTED_INTENTS`에 있지만, v6 이후 빌더가 쓰는 것은
+  `nearby`, `distance`, `radius`, `routing`, `trip` 다섯 개입니다. `poi`는 v2/v3에만, `type`은
+  v1에만 있고 현재 세트에서는 회귀 검증되지 않습니다.
+- `template_id` — 문항을 만든 생성기. 오류 분석이 실제로 필요한 입도입니다.
+
+`answer`와 에이전트의 선택지 번호는 모두 `options`의 0-based index입니다. 세 라벨 모두
+평가 전용이고 `BenchmarkItem.agent_input()`은 여전히 `(question, options)`만 돌려줍니다.
 
 ## 구조
 
@@ -110,7 +121,8 @@ python main.py --agent both --ids seoul_mapqa_v0_000907 seoul_mapqa_v0_000009
 
 ## 평가 항목
 
-- 전체 및 classification별 multiple-choice accuracy
+- 전체 accuracy, 그리고 `mapeval_class`·`classification`·`template_id` 세 축별
+  multiple-choice accuracy
 - tool-call, Kakao API-call, reasoning-step 수
 - SQLite cache hit/miss 수
 - latency와 failure 수

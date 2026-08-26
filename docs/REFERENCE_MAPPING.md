@@ -3016,3 +3016,49 @@ The *shared* name resolution below the tools — query variants, the evidence fl
 in `src/tools/registry.py` — is equivalent, which is what the invariant requires. But a repair
 layer that grows on one side only would widen the gap for a reason that is not the architecture, so
 its footprint belongs in any report that quotes a trip number.
+
+#### The `unanswerable_*` regression, half of it closed
+
+Reading the whole v7-283 trajectory by family showed the four `unanswerable_*` families falling
+while everything else rose: 82.5 as a group at `41513ae` down to 65.1, on the 21 rows those five
+families hold. The cause was in this port, not in the model. `a18719e` added a reference-shape
+check that refuses a named field projected off a `batch_geocode` list, and geocoding the options
+and then asking for their details is the standard plan shape there — the refusal fired on 22 of
+their 124 graphs against 42 of the other 1,651, and because it was classed structural it refused on
+the lenient pass too and ended the question.
+
+It should not have. `$geo.place_ids` names no field of that list, so the resolver degrades it to
+the whole list, which is exactly what the legal `$geo` resolves to; and since `98fb7d0` taught
+`batch_place_details` to read the id off a geocode row, the plan executes and answers. A registry
+test drives that end to end. The three refusals sharing this validator were given separate
+verdicts: an out-of-range record index and a repeated whole-list reference each substitute
+*different* evidence with no legal spelling that produces what the planner meant, so both stay
+structural; a named field is a spelling, so strict validation still refuses it for the repair round
+and it steps aside leniently.
+
+Three passes a side at concurrency 32, against the same three that preceded it:
+
+| | before | after |
+|---|---|---|
+| passes | 80.9 / 84.1 / 85.2 | 82.0 / 84.5 / 85.5 |
+| overall | 83.4 | 84.0 |
+| terminal failures, 3 passes | 14 | **3** |
+| `unanswerable_*`, 21 rows | 65.1 | 69.8 |
+
+The overall move is inside the spread and is not the claim. The claim is the failure count: twelve
+questions stopped being terminal failures, spread across eight families, and what was left is three.
+`trip_optimal_order` reads −11.1 and `trip_feasible_count_five` −7.9 over the same passes, which is
+pass-to-pass movement rather than this change — the per-pass numbers overlap (79/75/92 against
+62/75/75), and the replay says two graphs per family were newly admitted, which cannot move eight
+rows.
+
+Half the regression is still there: 69.8 against `41513ae`'s 82.5, and it is a different defect that
+this fix exposed rather than caused. `unanswerable_rating` fell to 11.1 at `98fb7d0` and has stayed
+there. Its rows used to fail terminally and now run: `batch_place_details` returns records whose
+`rating` is `None`, `select_max(key="rating")` refuses with "No item contains comparable key:
+rating", and the generation stage — told by its own prompt that "an operator that reports an error
+contributed no evidence; fall back to the surviving steps" — falls back to the retrieval and names
+a café. The absence of the field across every record *is* the evidence those questions are about,
+and the operator's message does not say so. That is a message-and-prompt change in the generation
+stage, the same place a decline flag cost 5.8 points, so it wants its own footprint replay and its
+own passes before anything is written.

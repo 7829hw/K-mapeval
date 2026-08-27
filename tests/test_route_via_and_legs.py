@@ -93,6 +93,28 @@ def test_several_waypoints_are_driven_in_the_order_the_graph_lists_them() -> Non
     }
 
 
+def test_a_waypoint_listed_among_the_inputs_is_not_also_an_end_of_the_route() -> None:
+    """The shape the planner actually writes: every place an input, the middle one also `via`."""
+
+    built = _build(
+        [
+            {"id": "a", "transform": "RESOLVE_PLACES", "inputs": [], "concept_ids": ["start"]},
+            {"id": "b", "transform": "RESOLVE_PLACES", "inputs": [],
+             "concept_ids": ["intermediate"]},
+            {"id": "c", "transform": "RESOLVE_PLACES", "inputs": [], "concept_ids": ["end"]},
+            {"id": "route", "transform": "ROUTE_MEASURE", "inputs": ["a", "b", "c"],
+             "via": ["b"], "factors": {"measure": "distance"}},
+        ],
+        concepts=STOPS,
+    )
+
+    assert built.graph[3]["arguments"] == {
+        "origin": "$a.0.place",
+        "destination": "$c.0.place",
+        "waypoints": ["$b.0.place"],
+    }
+
+
 def test_a_waypoint_may_be_a_node_of_its_own() -> None:
     """The planner resolves the three places separately as often as it resolves them together."""
 

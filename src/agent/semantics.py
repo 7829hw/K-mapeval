@@ -505,6 +505,8 @@ class _Wiring:
     #: Positions inside a single record-list input that `via` claimed, so the ends of the route
     #: are read from the positions it did not.
     via_positions: frozenset[int] = frozenset()
+    #: Input nodes that `via` claimed, for the graphs that resolve each place separately.
+    via_inputs: frozenset[str] = frozenset()
     #: How many places the single record-list input resolved, so the far end can be found.
     resolved_count: int = 0
     #: How many places each input resolved, so a stop list gathers all of them.
@@ -535,6 +537,13 @@ class _Wiring:
         if not self.inputs:
             return "", ""
         if len(self.inputs) >= 2:
+            ends = [
+                position
+                for position, node in enumerate(self.inputs)
+                if node not in self.via_inputs
+            ]
+            if len(ends) >= 2:
+                return self.place(ends[0]), self.place(ends[-1])
             return self.place(0), self.place(1)
         if self.via_positions:
             free = [
@@ -985,6 +994,7 @@ def factorize_semantic_graph(
                     factors=factors,
                     via=via_refs,
                     via_positions=via_positions,
+                    via_inputs=frozenset(via_nodes),
                     resolved_count=resolved_counts.get(inputs[0], 0) if inputs else 0,
                     resolved_sizes=tuple(resolved_counts.get(name, 0) for name in inputs),
                 )
@@ -1125,6 +1135,7 @@ def factorize_semantic_graph(
                 ),
                 via=via_refs,
                 via_positions=via_positions,
+                via_inputs=frozenset(via_nodes),
                 resolved_count=resolved_counts.get(inputs[0], 0) if inputs else 0,
                 resolved_sizes=tuple(resolved_counts.get(name, 0) for name in inputs),
                 matrix_stops=matrix_stops,

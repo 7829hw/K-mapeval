@@ -69,6 +69,9 @@ class Resolution:
     #: How many places the node declared as waypoints. A route through somewhere is a different
     #: route from the one between its ends, and only the graph can say which is asked for.
     via_count: int = 0
+    #: How many places the node named as the endpoints of its measure. A pairwise measure that
+    #: says which pair it is between is a pair, whatever its inputs look like.
+    endpoint_count: int = 0
 
     @property
     def fans_out(self) -> bool:
@@ -95,15 +98,18 @@ def _one_place_against_many(resolution: Resolution) -> bool:
 
     Wiring it as `haversine_distance(place_a=anchor, place_b=$candidates.0.place)` measures the
     first candidate and throws the rest away -- which is what it did, on 190 recorded graphs.
+
+    Three or more inputs is the same relation written a different way: a pair has two ends, so a
+    measure over an anchor and three candidate nodes is a ranking whatever their types say.
     """
 
-    return resolution.fans_out
+    return resolution.fans_out or (resolution.arity >= 3 and resolution.endpoint_count != 2)
 
 
 def _pairwise(resolution: Resolution) -> bool:
     """Two distinct places to separate, rather than a list to cross-join."""
 
-    return resolution.arity >= 2
+    return resolution.endpoint_count == 2 or resolution.arity == 2
 
 
 def _over_a_collection(resolution: Resolution) -> bool:
@@ -154,12 +160,47 @@ def _distance(_: Resolution) -> bool:
     return True
 
 
-def _within_a_stated_radius(resolution: Resolution) -> bool:
+#: Operators whose output carries a per-item distance, so a radius filter over one of them has
+#: the measurement already and needs no centre of its own.
+_MEASURED_OPERATORS = frozenset(
+    {"nearest", "within_radius", "pairwise_distances", "sort_by", "haversine_distance"}
+)
+
+
+def _over_measured_candidates(resolution: Resolution) -> bool:
+    """The graph measured first and is narrowing what it measured.
+
+    This is the shape the question states -- "how far is each of these, keep the ones inside R" --
+    and it is the one a planner writes. `within_radius` measures and filters together, so a FILTER
+    that follows a DISTANCE_MEASURE has no centre to give it and wired the candidate list itself
+    as `center`, which is exactly what "center has no resolved coordinates" was.
+    """
+
+    return (
+        _stated_radius(resolution)
+        and resolution.arity == 1
+        and bool(set(resolution.input_operators) & _MEASURED_OPERATORS)
+    )
+
+
+def _stated_radius(resolution: Resolution) -> bool:
     return resolution.facts is not None and getattr(resolution.facts, "radius_m", None) is not None
+
+
+def _within_a_stated_radius(resolution: Resolution) -> bool:
+    return _stated_radius(resolution)
 
 
 def _within_a_stated_sector(resolution: Resolution) -> bool:
     return resolution.facts is not None and bool(getattr(resolution.facts, "direction", None))
+
+
+def _by_a_stated_attribute(resolution: Resolution) -> bool:
+    """A kind narrowed by a modifier -- 중식 of "중식 음식점" -- is an attribute of the places."""
+
+    return resolution.facts is not None and bool(
+        getattr(resolution.facts, "target_subtype", None)
+    )
 
 
 def _by_place_attribute(_: Resolution) -> bool:
@@ -209,6 +250,16 @@ def _over_route_legs(resolution: Resolution) -> bool:
     """A total over routes that have already been narrowed to the ones the trip drives."""
 
     return "select_legs" in resolution.input_operators
+
+
+def _counts_a_set(resolution: Resolution) -> bool:
+    """"몇 곳" is how many, not how much. A set of places carries nothing to add up."""
+
+    if str(resolution.factor("aggregate", "sum")).lower() in {"count", "how_many", "cardinality"}:
+        return True
+    # A total over a collection of *places* can only be a count: `sum_amounts` reads a
+    # measurement off each item and a place carries none, which raised "received nothing to add".
+    return resolution.arity == 1 and any(resolution.input_is_collection)
 
 
 def _sum(_: Resolution) -> bool:
@@ -324,8 +375,10 @@ TRANSFORMS: dict[str, Transform] = {
         "FILTER",
         "Narrow a set of places by a sub-condition the question states.",
         (
+            ("filter_by_distance", _over_measured_candidates),
             ("within_radius", _within_a_stated_radius),
             ("filter_by_direction", _within_a_stated_sector),
+            ("filter_places", _by_a_stated_attribute),
             ("filter_places", _by_place_attribute),
         ),
         "object",
@@ -363,6 +416,7 @@ TRANSFORMS: dict[str, Transform] = {
             # a group list nothing in the graph carries.
             ("sum_route_metrics", _over_route_legs),
             ("aggregate_route_groups", _grouped),
+            ("count_items", _counts_a_set),
             ("sum_amounts", _sum),
         ),
         "amount",
@@ -402,6 +456,7 @@ def resolve_operator(
     input_is_collection: Sequence[bool] | None = None,
     input_operators: Sequence[str] | None = None,
     via_count: int = 0,
+    endpoint_count: int = 0,
 ) -> tuple[str, str]:
     """Which operator performs this transformation here, and which rule chose it.
 
@@ -425,6 +480,7 @@ def resolve_operator(
         input_is_collection=tuple(input_is_collection or ()),
         input_operators=tuple(input_operators or ()),
         via_count=via_count,
+        endpoint_count=endpoint_count,
     )
     chosen = transform.choose(resolution)
     if chosen is None or chosen[0] not in available:
@@ -507,6 +563,8 @@ class _Wiring:
     via_positions: frozenset[int] = frozenset()
     #: Input nodes that `via` claimed, for the graphs that resolve each place separately.
     via_inputs: frozenset[str] = frozenset()
+    #: The two places the graph named as the ends of this measure, in that order.
+    endpoints: tuple[str, ...] = ()
     #: How many places the single record-list input resolved, so the far end can be found.
     resolved_count: int = 0
     #: How many places each input resolved, so a stop list gathers all of them.
@@ -514,6 +572,10 @@ class _Wiring:
     #: The stop references every matrix node was built over, keyed by node id. A tour indexes
     #: into its cost matrix, so its node list has to be that matrix's own stops in that order.
     matrix_stops: dict[str, list[str]] = field(default_factory=dict)
+    #: The arguments each input node was wired with. A retrieval records the place it searched
+    #: around, so a filter over that retrieval can measure from the same centre instead of being
+    #: handed the candidate list as one.
+    producer_arguments: tuple[dict[str, Any], ...] = ()
 
     def place(self, position: int, index: int = 0) -> str:
         node = self.inputs[position]
@@ -534,6 +596,8 @@ class _Wiring:
         인디스타 → 소설호텔 → 공작지.
         """
 
+        if len(self.endpoints) == 2:
+            return self.endpoints[0], self.endpoints[1]
         if not self.inputs:
             return "", ""
         if len(self.inputs) >= 2:
@@ -571,6 +635,30 @@ class _Wiring:
             else:
                 references.append(self.place(position))
         return references
+
+    def gathered(self, start: int = 0) -> Any:
+        """Every input from this position on, as one slot's worth of evidence.
+
+        A slot that takes a collection takes *all* of it. A planner that measured three
+        distances in three nodes and asked for the smallest, or retrieved in two branches and
+        filtered the union, wrote several inputs into one slot; reading the first of them
+        returned a minimum over one candidate and a filter over half the evidence.
+        """
+
+        positions = range(start, len(self.inputs))
+        references = [self.items(position) for position in positions]
+        if not references:
+            return None
+        return references[0] if len(references) == 1 else references
+
+    def upstream_center(self) -> str | None:
+        """The place an input node searched around, as that node recorded it."""
+
+        for arguments in self.producer_arguments:
+            center = arguments.get("center") if isinstance(arguments, dict) else None
+            if isinstance(center, str) and center.startswith("$"):
+                return center
+        return None
 
     def by_type(self, wanted: str, produced_by: dict[str, str]) -> str | None:
         for node in self.inputs:
@@ -614,16 +702,24 @@ def wire_arguments(
         return {"place_ids": wiring.whole(0)} if arity else {}
     if operator == "place_details":
         # The id lives on the located place, so the reference is that place's `place_id` field.
-        return {"place_id": f"{wiring.place(0)}_id"} if arity else {}
+        # A record list ends in `.place` and the id is the sibling field `.place_id`; anything
+        # else is the place itself and the id is a field of it. Appending `_id` to a bare node
+        # reference produced `$place_id`, which names a node called `place_id` and not a field of
+        # anything -- the multi-input check found it, because the input then went unread.
+        if not arity:
+            return {}
+        reference = wiring.place(0)
+        suffix = "_id" if reference.endswith(".place") else ".place_id"
+        return {"place_id": f"{reference}{suffix}"}
     if operator == "place_search":
         return {}
     if operator == "haversine_distance":
         first, second = wiring.two_places()
         return {"place_a": first, "place_b": second} if first else {}
     if operator == "pairwise_distances":
-        return {"pairs": wiring.whole(0)} if arity else {}
+        return {"pairs": wiring.gathered()} if arity else {}
     if operator == "pairwise_extremes":
-        return {"locations": wiring.whole(0)} if arity else {}
+        return {"locations": wiring.gathered()} if arity else {}
     if operator in {"directions", "travel_time"}:
         origin, destination = wiring.two_places()
         if not origin:
@@ -645,7 +741,10 @@ def wire_arguments(
     if operator in {"extract_distance", "extract_duration", "steps_analysis"}:
         return {"route": wiring.whole(0)} if arity else {}
     if operator == "select_legs":
-        return {"routes": wiring.whole(0)} if arity else {}
+        # The legs come out of the matrix, whichever input that is; the stop nodes beside it are
+        # what the matrix was built over and are already inside it.
+        source = wiring.by_type("field", output_types) or (wiring.whole(0) if arity else None)
+        return {"routes": source} if source else {}
     if operator == "sum_route_metrics":
         return {"routes": wiring.whole(0)} if arity else {}
     if operator == "compare_routes":
@@ -666,17 +765,25 @@ def wire_arguments(
             arguments["distance_matrix"] = matrix
         return arguments
     if operator == "calculate_finish_time":
-        return {"locations": wiring.whole(0)} if arity else {}
+        return {"locations": wiring.gathered()} if arity else {}
     if operator == "calculate_start_time":
         return {"duration_s": wiring.whole(0)} if arity else {}
     if operator == "within_radius":
         # The radius is a stated fact and grounding binds it; the centre is whichever input is a
-        # single place. A FILTER given only the candidate set has no centre to offer, and asking
-        # for one it does not have is a refusal rather than a graph.
+        # single place. Given only the candidate set, the centre is the one the retrieval that
+        # produced it already searched around -- read off that node's own arguments, not guessed.
+        # Wiring the candidate list itself as `center` is what "center has no resolved
+        # coordinates" was, on seven rows of one pass.
         if arity >= 2:
             return {"center": wiring.place(0), "candidates": wiring.whole(1)}
         if arity == 1:
-            return {"center": wiring.place(0), "candidates": wiring.whole(0)}
+            center = wiring.upstream_center()
+            if center is None:
+                raise ValueError(
+                    "FILTER by radius has no place to measure from: give it the anchor as its "
+                    "first input, or measure the candidates before filtering them"
+                )
+            return {"center": center, "candidates": wiring.items(0)}
         return {}
     if operator == "filter_by_direction":
         return (
@@ -685,19 +792,25 @@ def wire_arguments(
             else {"places": wiring.whole(0)}
         )
     if operator == "filter_places":
-        return {"places": wiring.whole(0)} if arity else {}
+        return {"places": wiring.gathered()} if arity else {}
+    if operator == "filter_by_distance":
+        # The radius is a stated fact and grounding binds it, exactly as it does for
+        # `within_radius`; the measured set is whatever the measure steps produced.
+        return {"items": wiring.gathered()} if arity else {}
+    if operator == "count_items":
+        return {"items": wiring.gathered()} if arity else {}
     if operator == "nearest":
         return (
-            {"anchor": wiring.place(0), "candidates": wiring.whole(1)}
+            {"anchor": wiring.place(0), "candidates": wiring.gathered(1)}
             if arity >= 2
-            else {"candidates": wiring.whole(0)}
+            else {"candidates": wiring.gathered()}
         )
     if operator == "sort_by":
-        return {"items": wiring.items(0), "key": _rank_key(factors)} if arity else {}
+        return {"items": wiring.gathered(), "key": _rank_key(factors)} if arity else {}
     if operator == "select_by_index":
-        return {"items": wiring.items(0), "index": _ordinal_index(factors)} if arity else {}
+        return {"items": wiring.gathered(), "index": _ordinal_index(factors)} if arity else {}
     if operator in {"select_min", "select_max"}:
-        return {"items": wiring.items(0), "key": _rank_key(factors)} if arity else {}
+        return {"items": wiring.gathered(), "key": _rank_key(factors)} if arity else {}
     if operator == "sum_amounts":
         return {"amounts": [wiring.whole(i) for i in range(arity)]}
     if operator == "difference":
@@ -730,6 +843,56 @@ def wire_arguments(
     # input under its single required slot is what `normalize_and_validate_graph` does for a lone
     # dependency, so it is the same convention rather than a new one.
     return {"value": wiring.whole(0)} if arity else {}
+
+
+def consumed_inputs(arguments: Any) -> set[str]:
+    """Every node id a wired argument set actually reads, however deeply it is nested."""
+
+    found: set[str] = set()
+    stack: list[Any] = [arguments]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, dict):
+            stack.extend(value.values())
+        elif isinstance(value, list | tuple):
+            stack.extend(value)
+        elif isinstance(value, str) and value.startswith("$"):
+            found.add(value[1:].split(".", 1)[0])
+    return found
+
+
+def unconsumed_inputs(inputs: Sequence[str], arguments: Any) -> list[str]:
+    """Inputs the graph declared that the wiring never reads.
+
+    Every defect this module has shipped had this shape. `distance_matrix` over four resolved
+    stops read `inputs[0]` and built a 1x1 grid; `tsp_tw` took its node list from whichever input
+    was object-typed and got one place beside a six-place matrix; a via-route read the first two
+    inputs and drove to the waypoint; two `DISTANCE_MEASURE` nodes over one list measured the same
+    thing twice. None of them failed loudly -- each returned a confident number computed over less
+    evidence than the graph had gathered.
+
+    So it is checked rather than remembered: a node that declares an input and does not read it is
+    a wiring bug in this file, and the check names it at the node where it happens.
+    """
+
+    read = consumed_inputs(arguments)
+    return [name for name in inputs if name not in read]
+
+
+#: Operators that deliberately read fewer nodes than the graph makes them depend on. Each is a
+#: real relation, not an oversight, and each is listed with why.
+_PARTIAL_CONSUMERS: dict[str, str] = {
+    # A tour reads its stops through the matrix they were priced in, so the stop nodes reach it
+    # only as the matrix's own list.
+    "tsp_tw": "reads its stops through the cost matrix",
+    # The legs are in the matrix; the stop nodes beside it are what the matrix was built over.
+    "select_legs": "reads its stops through the cost matrix",
+    # The centre a retrieval already searched around is read off that retrieval's arguments.
+    "within_radius": "reads the centre its retrieval recorded",
+    # The names come from the concept graph, never from an upstream node.
+    "batch_geocode": "resolves concepts, not upstream output",
+    "place_search": "retrieves by the kind asked for",
+}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -849,26 +1012,107 @@ def _resolve_via(
     if not isinstance(declared, list) or not declared:
         return (), frozenset(), ()
 
-    references: list[str] = []
-    positions: set[int] = set()
-    depends: list[str] = []
-    for raw in declared:
+    found = _place_references(declared, inputs, follow, produced_by, resolved_concepts)
+    return (
+        tuple(reference for reference, _, _ in found),
+        frozenset(position for _, _, position in found if position is not None),
+        tuple(dict.fromkeys(node for _, node, position in found if position is None)),
+    )
+
+
+def _place_references(
+    names: Sequence[Any],
+    inputs: Sequence[str],
+    follow: Callable[[str], str],
+    produced_by: dict[str, str],
+    resolved_concepts: dict[str, list[str]],
+) -> list[tuple[str, str, int | None]]:
+    """Resolve ids the graph wrote into references to located places, in the order written.
+
+    An id names either an upstream node that resolved a place, or a concept an upstream
+    `RESOLVE_PLACES` bound. Both are things the *graph* said; neither is read out of the question
+    and neither is inferred from which argument slot an input happened to fall into.
+
+    Each result carries the node it resolves through and, for a concept, its position inside that
+    node's resolved list -- which is what lets the ends of a route be the positions a waypoint did
+    not claim.
+    """
+
+    found: list[tuple[str, str, int | None]] = []
+    for raw in names:
         name = str(raw).lstrip("$").strip()
         if not name:
             continue
         node = follow(name.split(".", 1)[0])
         if node in produced_by:
-            references.append(_place_ref(node, produced_by[node]))
-            depends.append(node)
+            found.append((_place_ref(node, produced_by[node]), node, None))
             continue
         for source in inputs:
             aligned = resolved_concepts.get(source) or []
             if name in aligned:
                 index = aligned.index(name)
-                references.append(_place_ref(source, produced_by.get(source), index))
-                positions.add(index)
+                found.append((_place_ref(source, produced_by.get(source), index), source, index))
                 break
-    return tuple(references), frozenset(positions), tuple(dict.fromkeys(depends))
+    return found
+
+
+#: Transformations that relate exactly two places, and so have a pair to name.
+_PAIRWISE_TRANSFORMS = frozenset({"DISTANCE_MEASURE", "ROUTE_MEASURE"})
+
+
+def _resolvable_sources(
+    inputs: Sequence[str],
+    produced_by: dict[str, str],
+    resolved_concepts: dict[str, list[str]],
+) -> list[str]:
+    """The nodes a concept id could be found in: this node's inputs, then every resolved list.
+
+    A node that named its endpoints as concepts sometimes lists no input at all -- the places it
+    means were resolved elsewhere in the graph and it simply did not say so. Widening the search
+    past its own inputs is what lets that graph resolve; the ids it names are still the graph's
+    own words.
+    """
+
+    return list(dict.fromkeys([*inputs, *resolved_concepts]))
+
+
+def _resolve_endpoints(
+    step: dict[str, Any],
+    inputs: Sequence[str],
+    declared_inputs: Sequence[Any],
+    follow: Callable[[str], str],
+    produced_by: dict[str, str],
+    resolved_concepts: dict[str, list[str]],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The two places a measure is between, when the graph named them as concepts.
+
+    A pairwise measure needs to say *which* pair. The planner says it two ways and neither was
+    read: it writes the concept ids in `inputs` -- "inputs": ["anchor", "target1"] -- where node
+    ids belong, or it writes them in `concept_ids` beside a single resolved node. Both were
+    dropped, so two `DISTANCE_MEASURE` nodes over the same list factorized identically and their
+    difference was zero, or measured nothing at all. That is 13 of 33 `poi_distance_difference`
+    rows in one pass, every one of them reported as a clean run.
+
+    Only consulted when the node's own inputs cannot already supply a pair, so a graph that wires
+    two nodes keeps wiring two nodes.
+    """
+
+    sources = [name for name in inputs if produced_by.get(name)]
+    if len(sources) >= 2:
+        return (), ()
+    unresolved = [
+        value
+        for value in declared_inputs
+        if str(value).lstrip("$").split(".", 1)[0] not in produced_by
+    ]
+    for candidates in (unresolved, step.get("concept_ids") or []):
+        found = _place_references(candidates, inputs, follow, produced_by, resolved_concepts)
+        if len(found) == 2:
+            return (
+                tuple(reference for reference, _, _ in found),
+                tuple(dict.fromkeys(node for _, node, _ in found)),
+            )
+    return (), ()
 
 
 def factorize_semantic_graph(
@@ -920,6 +1164,8 @@ def factorize_semantic_graph(
     resolved_concepts: dict[str, list[str]] = {}
     # How many places each node resolved, so the far end of a route can be found.
     resolved_counts: dict[str, int] = {}
+    # The arguments each node was wired with, so a filter can read the centre its retrieval used.
+    wired_arguments: dict[str, dict[str, Any]] = {}
     # Matrix nodes whose origins and destinations are the same list, so their routes form a
     # square grid whose consecutive legs are the ones an itinerary drives.
     square_matrices: set[str] = set()
@@ -949,6 +1195,7 @@ def factorize_semantic_graph(
         inputs = [follow(str(value).split(".", 1)[0]) for value in inputs]
         inputs = [value for value in inputs if value in produced_by]
         inputs = list(dict.fromkeys(inputs))
+        declared_inputs = list(step.get("inputs") or step.get("depends_on") or [])
         factors = step.get("factors")
         factors = dict(factors) if isinstance(factors, dict) else {}
         transform_name = str(step.get("transform") or "").strip()
@@ -958,6 +1205,17 @@ def factorize_semantic_graph(
         # A waypoint is something the route depends on, so it joins the dependencies even when
         # the node did not also list it as an input.
         inputs = list(dict.fromkeys([*inputs, *via_nodes]))
+        endpoints: tuple[str, ...] = ()
+        if transform_name.upper() in _PAIRWISE_TRANSFORMS:
+            endpoints, endpoint_nodes = _resolve_endpoints(
+                step,
+                _resolvable_sources(inputs, produced_by, resolved_concepts),
+                declared_inputs,
+                follow,
+                produced_by,
+                resolved_concepts,
+            )
+            inputs = list(dict.fromkeys([*inputs, *endpoint_nodes]))
 
         if not transform_name:
             # The planner named an operator. Kept rather than refused -- a graph that would have
@@ -1107,6 +1365,7 @@ def factorize_semantic_graph(
                 input_is_collection=[emits_collection.get(name, False) for name in inputs],
                 input_operators=[produced_by.get(name) or "" for name in inputs],
                 via_count=len(via_refs),
+                endpoint_count=len(endpoints),
             )
             if (
                 transform_name.upper() == "SORT"
@@ -1136,14 +1395,35 @@ def factorize_semantic_graph(
                 via=via_refs,
                 via_positions=via_positions,
                 via_inputs=frozenset(via_nodes),
+                endpoints=endpoints,
                 resolved_count=resolved_counts.get(inputs[0], 0) if inputs else 0,
                 resolved_sizes=tuple(resolved_counts.get(name, 0) for name in inputs),
                 matrix_stops=matrix_stops,
+                producer_arguments=tuple(wired_arguments.get(name, {}) for name in inputs),
             )
             arguments = wire_arguments(operator, wiring, output_types=output_types)
             arguments, aligned = _bind_named_entities(
-                operator, arguments, step, factors, concept_text, options, concepts, claimed
+                operator,
+                arguments,
+                step,
+                factors,
+                concept_text,
+                options,
+                concepts,
+                claimed,
+                facts,
             )
+            missed = (
+                []
+                if operator in _PARTIAL_CONSUMERS
+                else unconsumed_inputs(inputs, arguments)
+            )
+            if missed:
+                raise ValueError(
+                    f"GeoFlow node {node_id!r} ({transform_name} -> {operator}) declares "
+                    f"{len(inputs)} inputs and its wiring reads {len(inputs) - len(missed)}: "
+                    f"{', '.join(missed)} would be gathered and never used"
+                )
             names = arguments.get("place_names") or []
             for name in names:
                 claimed.add(str(name))
@@ -1198,6 +1478,8 @@ def factorize_semantic_graph(
                 square_matrices.add(node_id)
                 if isinstance(origins, list):
                     matrix_stops[node_id] = list(origins)
+        if isinstance(arguments, dict):
+            wired_arguments[node_id] = arguments
         produced_by[node_id] = operator if isinstance(operator, str) else ""
         # `operator` may not be a string here: a planner that writes
         # `"operator": ["extract_distance", "extract_distance"]` is carried through so the graph
@@ -1243,6 +1525,7 @@ def _bind_named_entities(
     options: Sequence[str],
     concepts: Sequence[dict[str, Any]],
     claimed: set[str],
+    facts: Any = None,
 ) -> tuple[dict[str, Any], list[str]]:
     """Fill the place names a geocode needs from the concept graph, never from the planner.
 
@@ -1262,13 +1545,22 @@ def _bind_named_entities(
     if operator != "batch_geocode":
         return arguments, []
     requested = [str(value) for value in (step.get("concept_ids") or [])]
+    scope = str(factors.get("scope") or "").lower()
 
-    # 1. The node said outright that it resolves the candidate texts.
-    if str(factors.get("scope") or "").lower() in {"options", "candidates"}:
+    # 1. The node said it resolves the candidates the *question* listed. Those are a question
+    #    literal like the radius, so they come from the facts the analysis extracted and not from
+    #    a planner retyping four place names it read once.
+    listed = tuple(getattr(facts, "listed_places", ()) or ()) if facts is not None else ()
+    if scope in {"listed", "named", "offered"} and listed:
+        arguments["place_names"] = list(listed)
+        return arguments, []
+
+    # 2. The node said outright that it resolves the candidate texts.
+    if scope in {"options", "candidates"}:
         arguments["place_names"] = list(options)
         return arguments, []
 
-    # 2. Concepts the analysis actually has.
+    # 3. Concepts the analysis actually has.
     aligned = [
         value
         for value in requested
@@ -1279,7 +1571,7 @@ def _bind_named_entities(
         arguments["place_names"] = named
         return arguments, aligned
 
-    # 3. Every id it named is invented. When they read as the options -- `Option 0`,
+    # 4. Every id it named is invented. When they read as the options -- `Option 0`,
     #    `candidate_options`, `option_places` -- that is what it meant.
     if requested and all(
         "option" in value.lower() or "candidate" in value.lower() for value in requested
@@ -1287,7 +1579,7 @@ def _bind_named_entities(
         arguments["place_names"] = list(options)
         return arguments, []
 
-    # 4. Otherwise take the located concepts no earlier node has claimed. This is the case where
+    # 5. Otherwise take the located concepts no earlier node has claimed. This is the case where
     #    the Analysis stage returned only `question_context` and the planner had nothing to name.
     unclaimed = [
         text
@@ -1308,7 +1600,7 @@ def _bind_named_entities(
         arguments["place_names"] = unclaimed
         return arguments, []
 
-    # 5. Nothing in the concept graph to resolve. The options are the only places left that the
+    # 6. Nothing in the concept graph to resolve. The options are the only places left that the
     #    question certainly names, and an empty geocode is a certain failure.
     arguments["place_names"] = list(options)
     return arguments, []

@@ -78,6 +78,8 @@ class SpatialOperatorRegistry:
         "difference",
         "aggregate_route_groups",
         "select_legs",
+        "filter_by_distance",
+        "count_items",
         "merge_places",
         "match_options",
         "match_distance_options",
@@ -315,7 +317,67 @@ class SpatialOperatorRegistry:
         )
 
     @staticmethod
+    def filter_by_distance(
+        items: Any, max_distance_m: float, key: str = "distance_m"
+    ) -> list[dict[str, Any]]:
+        """Keep the items already measured at no more than this far.
+
+        `within_radius` measures and filters in one step and so needs the centre. A graph that
+        says "measure each candidate from the anchor, then keep the ones inside the radius"
+        already has the measurement, and the filter after it has no centre to offer -- which is
+        how a FILTER over a retrieval wired the candidate list itself as `center` and failed with
+        "center has no resolved coordinates" on seven rows of one pass.
+
+        Missing the measurement is a refusal, not a pass: an unmeasured candidate silently kept
+        is a candidate counted as inside a radius nobody checked it against.
+        """
+
+        values = _amount_collection(items)
+        records = [value for value in values if isinstance(value, dict)]
+        if len(records) != len(values):
+            raise ValueError("filter_by_distance received something that is not a measured item")
+        limit = float(max_distance_m)
+        kept: list[dict[str, Any]] = []
+        for record in records:
+            if not _has_comparable(record, key):
+                raise ValueError(
+                    f"filter_by_distance: an item carries no {key} to compare with the radius"
+                )
+            if float(_path(record, key)) <= limit:
+                kept.append(record)
+        return kept
+
+    @staticmethod
+    def count_items(items: Any) -> dict[str, Any]:
+        """How many things a set holds, which the operator table had no way to say.
+
+        `sum_amounts` adds measurements and a set of places carries none, so counting a filtered
+        candidate set raised "sum_amounts received nothing to add" -- and where it did not raise
+        it added coordinates. A count is its own aggregate.
+        """
+
+        # A node that already counted says so. `tsp_tw` reports `visited_count` -- how many
+        # stops the trip actually reaches -- and wrapping it in a collection of one and calling
+        # that a count answers "one" to every feasibility question.
+        if isinstance(items, dict):
+            for stated in ("visited_count", "count", "leg_count"):
+                if isinstance(items.get(stated), int):
+                    return {"count": items[stated], "value": items[stated], "source": stated}
+        values = _amount_collection(items)
+        total = len(values)
+        return {
+            "count": total,
+            "value": total,
+            "names": [
+                str(value.get("name") or value.get("query") or "")
+                for value in values
+                if isinstance(value, dict)
+            ],
+        }
+
+    @staticmethod
     def select_min(items: list[dict[str, Any]], key: str) -> dict[str, Any]:
+        items = _measured_items(items)
         comparable = [item for item in items if _has_comparable(item, key)]
         if not comparable:
             raise ValueError(f"No item contains comparable key: {key}")
@@ -323,6 +385,7 @@ class SpatialOperatorRegistry:
 
     @staticmethod
     def select_max(items: list[dict[str, Any]], key: str) -> dict[str, Any]:
+        items = _measured_items(items)
         comparable = [item for item in items if _has_comparable(item, key)]
         if not comparable:
             raise ValueError(f"No item contains comparable key: {key}")
@@ -333,7 +396,7 @@ class SpatialOperatorRegistry:
         items: list[dict[str, Any]], key: str, descending: bool = False
     ) -> list[dict[str, Any]]:
         return sorted(
-            (item for item in items if _has_comparable(item, key)),
+            (item for item in _measured_items(items) if _has_comparable(item, key)),
             key=lambda item: float(_path(item, key)),
             reverse=descending,
         )
@@ -1309,6 +1372,32 @@ CATEGORY_CODE_NOUNS: dict[str, str] = {
 }
 
 
+def split_place_type(stated_type: str) -> tuple[str, str | None]:
+    """A stated kind of place as (the broad kind, the narrowing attribute) it is written from.
+
+    "중식 음식점" is a 음식점 narrowed to 중식, and the two halves want different things: the
+    broad half decides what to retrieve, and the narrow half decides which of what came back
+    qualifies. Retrieving the whole phrase asks a provider for a category it does not file, and
+    matching the whole phrase against a category path never matches -- a Chinese restaurant is
+    filed 음식점 > 중식 > 중국요리, which contains "중식" and never "중식 음식점". Every
+    `nearby_cuisine_subtype` row failed on one of those two.
+
+    Structural, not a list of cuisines: the broad half is any kind this lexicon already names,
+    and whatever modifies it is the attribute. So it splits 양식/중식/일식 음식점 and equally a
+    24시 편의점 or a 대학 병원, without a table of them.
+    """
+
+    words = stated_type.split()
+    if len(words) < 2:
+        return stated_type, None
+    head = words[-1]
+    key = "".join(head.split()).casefold()
+    if key not in {alias.casefold() for alias in CATEGORY_ALIASES}:
+        return stated_type, None
+    modifier = " ".join(words[:-1]).strip()
+    return (head, modifier) if modifier else (stated_type, None)
+
+
 def category_terms(required_type: str) -> tuple[str, ...]:
     """The strings that identify a requested kind of place inside a Kakao category path."""
 
@@ -1319,6 +1408,13 @@ def category_terms(required_type: str) -> tuple[str, ...]:
     for alias, terms in CATEGORY_ALIASES.items():
         if key == alias.casefold():
             return terms
+    broad, attribute = split_place_type(required_type)
+    if attribute:
+        # The attribute is the discriminating half. `음식점 > 중식 > 중국요리` carries "중식" and
+        # never the phrase the question wrote, so matching on the phrase matches nothing and the
+        # kind filter falls back to accepting every candidate -- which is how a 분식 question was
+        # answered with the nearest restaurant of any kind.
+        return (attribute,)
     return (noun or required_type,)
 
 
@@ -1922,10 +2018,33 @@ _PLACE_COLLECTION_KEYS = (
 )
 
 
+def _measured_items(value: Any) -> list[Any]:
+    """The records a selection is over, gathered from however many nodes measured them.
+
+    Three `haversine_distance` nodes and a `select_min` across them is how a planner writes "the
+    smallest of these three", and it is the natural shape when each measure names its own pair.
+    The selection used to read the first of the three and return it as the minimum.
+    """
+
+    values = _amount_collection(value)
+    return [item for item in values if isinstance(item, dict)] or values
+
+
 def _place_collection(value: Any) -> list[Any]:
-    """The candidates in hand, whether a list was passed or the node that carries one."""
+    """The candidates in hand, whether a list was passed or the node that carries one.
+
+    A list of lists is a set of candidates gathered from several nodes -- which is what a graph
+    that retrieved, filtered and measured in separate branches produces, and what wiring every
+    declared input instead of the first one now hands over. Flattened one level at a time so a
+    place record, which is a dict, is never taken apart.
+    """
 
     if isinstance(value, list):
+        if any(isinstance(item, list) for item in value):
+            flattened: list[Any] = []
+            for item in value:
+                flattened.extend(_place_collection(item) if isinstance(item, list) else [item])
+            return flattened
         return value
     if isinstance(value, dict) and "latitude" not in value:
         for key in _PLACE_COLLECTION_KEYS:

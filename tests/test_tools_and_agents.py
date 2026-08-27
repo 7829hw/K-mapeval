@@ -1223,7 +1223,16 @@ def test_template_catalog_covers_appendix_e_macro_families() -> None:
     # prompt deleted the question-shape knowledge with it and cost 31 points -- a
     # "네 번째로 가까운 은행" question retrieved `Geocode-Batch-Compare`, whose pattern says to
     # resolve the candidates and rank them, and copied it.
-    assert names - appendix_e == {"Search-Rank-Ordinal", "Pairwise-Difference"}
+    assert names - appendix_e == {
+        "Search-Rank-Ordinal",
+        "Pairwise-Difference",
+        # A question that names its own candidates and one that names a narrowed kind are
+        # different shapes from the retrieval they resemble, and each was answering the other's
+        # question: a count over the neighbourhood instead of over the four names offered, and a
+        # ranking of every restaurant instead of the 중식 ones.
+        "Listed-Measure-Filter-Count",
+        "Search-Narrow-Rank",
+    }
     assert appendix_e <= names
 
 

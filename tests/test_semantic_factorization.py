@@ -472,8 +472,18 @@ def test_a_stated_radius_reaches_the_filter_that_applies_it() -> None:
     built = _build(SKELETONS["radius"], options=["가", "나"], facts=facts)
     grounded = _ground_graph_literals(built.graph, "질문", ["가", "나"], facts)
 
-    filtering = next(step for step in grounded if step["operator"] == "within_radius")
-    assert filtering["arguments"]["radius_m"] == 600
+    # The shape now measures before it narrows, so the operator that applies the radius is the
+    # one that reads a measurement rather than the one that recomputes it. The literal is bound
+    # the same way either way, which is the property under test.
+    filtering = next(
+        step
+        for step in grounded
+        if step["operator"] in {"within_radius", "filter_by_distance"}
+    )
+    stated = filtering["arguments"].get("radius_m") or filtering["arguments"].get(
+        "max_distance_m"
+    )
+    assert stated == 600
 
 
 # ---------------------------------------------------------------------------------------------

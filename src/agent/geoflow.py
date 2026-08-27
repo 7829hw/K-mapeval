@@ -8,6 +8,7 @@ from typing import Any
 
 from src.agent.semantics import lift_to_semantic
 from src.spatial_contracts import MATRIX_METRICS, normalize_tsp_metric
+from src.tools.spatial import split_place_type
 
 CORE_CONCEPTS = frozenset(
     {"location", "object", "field", "event", "network", "amount", "proportion"}
@@ -276,6 +277,12 @@ OPERATOR_CONTRACTS: dict[str, OperatorContract] = {
     "select_legs": OperatorContract(
         "field", ("routes",), ("order",), ("routes",)
     ),
+    "filter_by_distance": OperatorContract(
+        "object", ("items", "max_distance_m"), ("key",), ("items",)
+    ),
+    "count_items": OperatorContract(
+        "amount", ("items",), reference_arguments=("items",)
+    ),
     "merge_places": OperatorContract(
         "object", ("items",), reference_arguments=("items",)
     ),
@@ -519,6 +526,8 @@ OPERATOR_INPUT_TYPES: dict[str, dict[str, frozenset[str]]] = {
     "sum_route_metrics": {"routes": frozenset({"field"})},
     "aggregate_route_groups": {"routes": frozenset({"field"})},
     "select_legs": {"routes": frozenset({"field"})},
+    "filter_by_distance": {"items": frozenset({"object", "field"})},
+    "count_items": {"items": frozenset({"object", "field"})},
     "merge_places": {"items": frozenset({"object"})},
     "match_options": {
         "places": frozenset({"object"}),
@@ -763,6 +772,30 @@ TEMPLATES = {
             ]
         },
     },
+    "listed_candidates_count": {
+        "name": "Listed-Measure-Filter-Count",
+        "affinity": {"radius", "within", "count", "candidates"},
+        "listed_literal": True,
+        "keywords": ("반경", "이내", "목록", "몇 곳"),
+        "supersedes": ("radius",),
+        "pattern": (
+            "RESOLVE_PLACES (anchor) + RESOLVE_PLACES (scope=listed) -> DISTANCE_MEASURE -> "
+            "FILTER (the stated radius) -> AGGREGATE (count) -> MEASURE"
+        ),
+        "example": {"graph": []},
+    },
+    "search_narrow_rank": {
+        "name": "Search-Narrow-Rank",
+        "affinity": {"nearest", "closest", "kind", "subtype", "cuisine"},
+        "subtype_literal": True,
+        "keywords": ("가장 가까운", "가까운", "nearest"),
+        "supersedes": ("search_rank_ordinal",),
+        "pattern": (
+            "RESOLVE_PLACES (the anchor only) -> PLACE_SEARCH (the broad kind) -> "
+            "FILTER (scope=attribute) -> DISTANCE_MEASURE -> ORDINAL_SELECT -> MATCH_OPTIONS"
+        ),
+        "example": {"graph": []},
+    },
     "routes": {
         "name": "Multi-Route-Compare",
         "affinity": {"route", "routing", "travel", "duration", "driving"},
@@ -987,12 +1020,46 @@ SKELETONS: dict[str, list[dict[str, Any]]] = {
     "radius": [
         {"id": "anchor", "transform": "RESOLVE_PLACES", "inputs": [],
          "concept_ids": ["<the anchor concept>"], "role": "extent"},
-        {"id": "found", "transform": "PLACE_SEARCH", "inputs": ["anchor"], "role": "support"},
-        {"id": "inside", "transform": "FILTER", "inputs": ["anchor", "found"],
+        # The candidates: the ones the question lists if it lists any, otherwise a retrieval of
+        # the kind it asks for. A question that names its candidates is asking about those.
+        {"id": "candidates", "transform": "PLACE_SEARCH", "inputs": ["anchor"],
          "role": "support"},
+        {"id": "measured", "transform": "DISTANCE_MEASURE", "inputs": ["anchor", "candidates"],
+         "role": "support"},
+        {"id": "inside", "transform": "FILTER", "inputs": ["measured"], "role": "support"},
         {"id": "count", "transform": "AGGREGATE", "inputs": ["inside"],
-         "factors": {"aggregate": "sum"}, "role": "support"},
-        {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["count"], "role": "measure"},
+         "factors": {"aggregate": "count"}, "role": "support"},
+        {"id": "answer", "transform": "MEASURE", "inputs": ["count"], "role": "measure"},
+    ],
+    # A question that lists its own candidates: resolve those, measure each from the anchor,
+    # keep the ones the stated radius admits, and count them. The radius is a fact the analysis
+    # extracted; the skeleton only says where it applies.
+    "listed_candidates_count": [
+        {"id": "anchor", "transform": "RESOLVE_PLACES", "inputs": [],
+         "concept_ids": ["<the anchor concept>"], "role": "extent"},
+        {"id": "listed", "transform": "RESOLVE_PLACES", "inputs": [],
+         "factors": {"scope": "listed"}, "role": "extent"},
+        {"id": "measured", "transform": "DISTANCE_MEASURE", "inputs": ["anchor", "listed"],
+         "role": "support"},
+        {"id": "inside", "transform": "FILTER", "inputs": ["measured"], "role": "support"},
+        {"id": "count", "transform": "AGGREGATE", "inputs": ["inside"],
+         "factors": {"aggregate": "count"}, "role": "support"},
+        {"id": "answer", "transform": "MEASURE", "inputs": ["count"], "role": "measure"},
+    ],
+    # A kind of place narrowed by an attribute of it -- 중식 of "중식 음식점". Retrieve the broad
+    # kind, narrow to the attribute, then rank: a ranking that skips the narrowing answers with
+    # the nearest place of any kind, and the closer options are exactly the other kinds.
+    "search_narrow_rank": [
+        {"id": "anchor", "transform": "RESOLVE_PLACES", "inputs": [],
+         "concept_ids": ["<the anchor concept>"], "role": "extent"},
+        {"id": "found", "transform": "PLACE_SEARCH", "inputs": ["anchor"], "role": "support"},
+        {"id": "narrowed", "transform": "FILTER", "inputs": ["found"],
+         "factors": {"scope": "attribute"}, "role": "support"},
+        {"id": "ranked", "transform": "DISTANCE_MEASURE", "inputs": ["anchor", "narrowed"],
+         "role": "support"},
+        {"id": "kth", "transform": "ORDINAL_SELECT", "inputs": ["ranked"],
+         "factors": {"ordinal": 1}, "role": "support"},
+        {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["kth"], "role": "measure"},
     ],
     # A compass sector narrows the candidates before the ranking does. Filtering after the rank
     # answers with whichever place was nearest regardless of where it lies.
@@ -1315,6 +1382,16 @@ def _template_shape_score(
         r"(자동차|차량|운전|주행|도로|경로|route|driv)", lowered_question
     ):
         score += 8
+    if template.get("listed_literal") and _lists_its_candidates(lowered_question):
+        # The question names the candidates it is asking about, so the graph resolves those
+        # rather than retrieving a neighbourhood. The two answer different questions: "how many
+        # of these four are within 300 m" and "how many banks are within 300 m".
+        score += 16
+    if template.get("subtype_literal") and _states_a_narrowed_kind(analysis, lowered_question):
+        # A kind written as a modifier plus a broad category -- 중식 음식점 -- needs the
+        # narrowing step between the retrieval and the ranking. Without it the ranking answers
+        # with the nearest place of the broad kind, which is what the other options are.
+        score += 16
     if template.get("guidance_literal") and re.search(
         r"(안내에\s*따르|주행\s*안내|회전|turn|manoeuvr|maneuver)", lowered_question
     ):
@@ -1324,6 +1401,26 @@ def _template_shape_score(
         # Filter-Aggregate-Measure, and never saw the shape that reads a step list at all.
         score += 16
     return score
+
+
+def _lists_its_candidates(question: str) -> bool:
+    """Does the question offer its own candidate list?  Structural, and read from the question."""
+
+    from src.agent.spatial import _extract_listed_places
+
+    return bool(_extract_listed_places(question))
+
+
+def _states_a_narrowed_kind(analysis: dict[str, Any], question: str) -> bool:
+    """Is the kind of place asked for a broad category with a narrowing modifier on it?"""
+
+    from src.agent.spatial import _extract_target_type
+
+    stated = _extract_target_type(question) or analysis.get("target_type")
+    if not stated:
+        return False
+    _broad, attribute = split_place_type(str(stated))
+    return bool(attribute)
 
 
 def normalize_analysis(

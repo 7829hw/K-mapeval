@@ -43,6 +43,7 @@ from src.tools import SpatialOperatorRegistry, ToolRegistry
 from src.tools.map import canonical_retrieval_specs
 from src.tools.spatial import (
     parse_coordinate_literal,
+    split_place_type,
     strip_location_qualifier,
 )
 
@@ -115,7 +116,9 @@ Every node is {"id", "transform", "inputs", "role"} and may carry "concept_ids",
 - role is one of extent, temporal_extent, sub_condition, condition, support, measure.
 - factors are semantic parameters only: ordinal (1-based: second nearest is 2), measure
   ("distance" or "duration"), key, extreme ("min"/"max"), aggregate ("sum"/"difference"/
-  "proportion"), scope ("options" to resolve the candidate texts, "one" for a single place).
+  "proportion"/"count"), scope ("options" to resolve the candidate texts, "listed" to resolve the
+  ones the question itself lists, "attribute" to narrow by the stated kind's modifier, "one" for
+  a single place).
   Never put a radius, a compass sector, a stay, a time budget or a place name in factors: the
   analysis already extracted those and they are bound for you.
 
@@ -153,6 +156,18 @@ What the question is about, not what the tools are:
   transformations over them; a single neighbourhood search around one anchor cannot see the other.
 - An ordinal is a factor, not a shape: "두 번째로 가까운" is SORT then ORDINAL_SELECT with
   ordinal=2, over the same graph the nearest question uses with ordinal=1.
+- A question that lists its own candidates -- "… 아래 목록 중 몇 곳인가요? (A, B, C, D)" -- is
+  asking about those and not about the neighbourhood. Resolve them with RESOLVE_PLACES and
+  scope="listed", measure each from the anchor, FILTER, then AGGREGATE with aggregate="count".
+  A retrieval answers "how many are there", which is a different number.
+- A kind of place written as a modifier and a broad kind -- 중식 음식점, 양식 음식점 -- needs the
+  narrowing between the retrieval and the ranking: PLACE_SEARCH the broad kind, FILTER with
+  scope="attribute", then rank. The analysis extracted both halves and the filter is bound for
+  you. Ranking straight off the retrieval answers with the nearest place of the broad kind, and
+  the other options are exactly that.
+- A measure between two places has to say which two. Give DISTANCE_MEASURE the two nodes that
+  resolved them, or name the two concepts in concept_ids. Two measures over one resolved list
+  are the same measure twice, and their difference is zero.
 
 Do not select an option and do not use the gold answer."""
 
@@ -1176,6 +1191,14 @@ class GroundingFacts:
 
     anchor: str | None = None
     target_type: str | None = None
+    #: The half of a stated kind that narrows it: 중식 of "중식 음식점". The broad half decides
+    #: what to retrieve and this decides which of it qualifies, and they are different questions.
+    target_subtype: str | None = None
+    #: The candidates a question offers outright, as a parenthesised list. A question that names
+    #: its candidates is asking about those and not about the neighbourhood: "반경 300m 이내에
+    #: 있는 은행은 아래 목록 중 몇 곳인가요? (A, B, C, D)" counts A..D, and a retrieval counts
+    #: every bank Kakao knows within the radius, which is a different number.
+    listed_places: tuple[str, ...] = ()
     radius_m: int | None = None
     direction: str | None = None
     compared_pair: tuple[str, str] | None = None
@@ -1216,6 +1239,7 @@ class GroundingFacts:
             self.anchor,
             self.trip_destination,
             *(self.compared_pair or ()),
+            *self.listed_places,
             *(name for name, _ in self.stays),
         )
         return tuple(name for name in named if name)
@@ -1252,9 +1276,13 @@ def extract_facts(analysis: dict[str, Any], question: str) -> GroundingFacts:
     if budget is None:
         budget = _stated_seconds(analysis, "time_budget_s", "time_budget")
     anchor = _extract_anchor(question)
+    stated_type = _extract_target_type(question) or analysis.get("target_type")
+    broad_type, subtype = split_place_type(str(stated_type)) if stated_type else (None, None)
     return GroundingFacts(
         anchor=anchor,
-        target_type=_extract_target_type(question) or analysis.get("target_type"),
+        target_type=broad_type,
+        target_subtype=subtype,
+        listed_places=_extract_listed_places(question),
         radius_m=radius_m,
         direction=direction,
         compared_pair=_extract_compared_places(question),
@@ -1395,6 +1423,10 @@ def _ground_graph_literals(
 
     anchor = facts.anchor
     target = facts.target_type
+    # Which half of a stated kind discriminates. "중식 음식점" retrieves 음식점 -- Kakao files no
+    # 중식 category -- and qualifies on 중식, which is the half that appears in the category path
+    # of the places that came back.
+    qualifier = facts.target_subtype or facts.target_type
     radius_m = facts.radius_m
     specifications = list(retrieval_specs(target)) if target else []
     # tsp_tw's service_times are positional, so the stays can only be bound once the node list the
@@ -1615,12 +1647,24 @@ def _ground_graph_literals(
             # texts directly produces a graph with no retrieval to carry the category, and told
             # only in prose it keeps doing it. The kind asked for is a question literal like the
             # radius and the direction, so it is bound like one.
-            arguments["required_type"] = target
+            arguments["required_type"] = qualifier
             grounded.append({**step, "arguments": arguments})
             continue
         if operator == "filter_by_direction":
             if facts.direction:
                 arguments["direction"] = facts.direction
+            grounded.append({**step, "arguments": arguments})
+            continue
+        if operator == "filter_places" and facts.target_subtype:
+            # The narrowing half of the stated kind, bound as a literal exactly like the radius
+            # and the sector. A planner asked to transcribe it writes the whole phrase, and
+            # "중식 음식점" matches no category path at all.
+            arguments["required_types"] = [facts.target_subtype]
+            grounded.append({**step, "arguments": arguments})
+            continue
+        if operator == "filter_by_distance" and radius_m is not None:
+            # The same stated literal `within_radius` gets, on the shape that measured first.
+            arguments["max_distance_m"] = radius_m
             grounded.append({**step, "arguments": arguments})
             continue
         if operator == "within_radius" and radius_m is not None:
@@ -1908,7 +1952,9 @@ def _extract_compared_places(question: str) -> tuple[str, str] | None:
 # Keep those pieces independent: enumerating complete observed sentences makes the extractor a
 # function of one generator, while the same relation can be written with different particles,
 # endings and ordinary synonyms.
-_TARGET_TYPE_TAIL = r"\s*(?:은|는|이|가|을|를)?\s*(?:다음|어디|무엇|어느|중|목록)"
+# `아래`/`위` sits between the particle and the tail noun in "은행은 아래 목록 중": without it
+# the non-greedy body grew past the particle and read the kind of place as "은행은 아래".
+_TARGET_TYPE_TAIL = r"\s*(?:은|는|이|가|을|를)?\s*(?:아래|위)?\s*(?:다음|어디|무엇|어느|중|목록)"
 
 _TARGET_TYPE_LEADS: dict[str, tuple[str, ...]] = {
     "nearby": (r"(?:가장\s*)?(?:가까운|인접한)\s+",),
@@ -1937,6 +1983,47 @@ _TARGET_TYPE_PATTERNS: tuple[str, ...] = tuple(
 # 곳" is the inferred-category family, whose whole point is that the kind is never stated; reading
 # 곳 as the type would retrieve "places" and hand the ranking every kind there is.
 _PLACEHOLDER_TYPES = frozenset({"곳", "장소", "것", "데", "지점", "위치"})
+
+
+#: A question that offers its candidates writes them as a parenthesised, comma-separated list at
+#: the end. Greedy from the first bracket to the last, because the names carry brackets of their
+#: own and not always balanced ones: "기업은행 구)용산2가 무인 ATM" closes one that never opened,
+#: and a nesting-aware pattern found no list at all in that question. The comma split below is
+#: depth-aware, and two or more entries are required, which is what keeps an ordinary
+#: parenthetical aside from being read as a candidate list.
+_LISTED_PLACES = re.compile(r"\((.+)\)\s*$", re.DOTALL)
+
+
+def _extract_listed_places(question: str) -> tuple[str, ...]:
+    """The candidates a question names outright, in the order it names them.
+
+    A question that lists its candidates is asking about those. Counting a retrieval instead
+    answers "how many banks are within 300m", which is a different number from "how many of these
+    four are", and it is the one every `nearby_within_radius_count` row was returning.
+
+    Two or more entries are required: a single parenthesised phrase at the end of a sentence is
+    an aside, not a candidate list.
+    """
+
+    match = _LISTED_PLACES.search(question.strip())
+    if not match:
+        return ()
+    names: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for character in match.group(1):
+        if character == "(":
+            depth += 1
+        elif character == ")":
+            depth = max(depth - 1, 0)
+        if character == "," and depth == 0:
+            names.append("".join(current).strip())
+            current = []
+            continue
+        current.append(character)
+    names.append("".join(current).strip())
+    listed = tuple(name for name in names if name)
+    return listed if len(listed) >= 2 else ()
 
 
 def _extract_target_type(question: str) -> str | None:

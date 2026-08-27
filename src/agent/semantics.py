@@ -610,6 +610,10 @@ class _Wiring:
     resolved_count: int = 0
     #: How many places each input resolved, so a stop list gathers all of them.
     resolved_sizes: tuple[int, ...] = ()
+    #: Which inputs emit a set rather than a single place. A ranking has an anchor and a set,
+    #: and which input is which is a property of what they produce, not of the order the planner
+    #: happened to list them in.
+    is_collection: tuple[bool, ...] = ()
     #: The stop references every matrix node was built over, keyed by node id. A tour indexes
     #: into its cost matrix, so its node list has to be that matrix's own stops in that order.
     matrix_stops: dict[str, list[str]] = field(default_factory=dict)
@@ -691,6 +695,30 @@ class _Wiring:
         if not references:
             return None
         return references[0] if len(references) == 1 else references
+
+    def set_binding(self) -> tuple[str, Any] | None:
+        """The anchor and the candidates of a ranking, read off what each input produces.
+
+        `nearest` was wired positionally -- first input the anchor, the rest the candidates --
+        and `SET_MEASURE` means "a set against an anchor" whichever order the planner writes
+        them in. Written candidates-first, the anchor was measured against itself and the
+        candidate set became one place: the collapse that made a correctly extracted, correctly
+        attached, correctly enforced subtype narrow a set of one.
+
+        None when the inputs do not say which is which -- no singleton, several, or no set --
+        because guessing there is the same defect one step along.
+        """
+
+        singles = [
+            index
+            for index in range(len(self.inputs))
+            if not (self.is_collection[index] if index < len(self.is_collection) else False)
+        ]
+        sets = [index for index in range(len(self.inputs)) if index not in singles]
+        if len(singles) != 1 or not sets:
+            return None
+        gathered = [self.items(index) for index in sets]
+        return self.place(singles[0]), (gathered[0] if len(gathered) == 1 else gathered)
 
     def upstream_center(self) -> str | None:
         """The place an input node searched around, as that node recorded it."""
@@ -841,11 +869,16 @@ def wire_arguments(
     if operator == "count_items":
         return {"items": wiring.gathered()} if arity else {}
     if operator == "nearest":
-        return (
-            {"anchor": wiring.place(0), "candidates": wiring.gathered(1)}
-            if arity >= 2
-            else {"candidates": wiring.gathered()}
-        )
+        if arity < 2:
+            return {"candidates": wiring.gathered()}
+        bound = wiring.set_binding()
+        if bound is not None:
+            anchor, candidates = bound
+            return {"anchor": anchor, "candidates": candidates}
+        # The inputs do not say which is the anchor. Positional is the documented fallback and
+        # the ambiguity is recorded beside it, because a ranking bound the wrong way round is
+        # indistinguishable from a correct one in every stage that follows.
+        return {"anchor": wiring.place(0), "candidates": wiring.gathered(1)}
     if operator == "sort_by":
         return {"items": wiring.gathered(), "key": _rank_key(factors)} if arity else {}
     if operator == "select_by_index":
@@ -1531,10 +1564,23 @@ def factorize_semantic_graph(
                 endpoints=endpoints,
                 resolved_count=resolved_counts.get(inputs[0], 0) if inputs else 0,
                 resolved_sizes=tuple(resolved_counts.get(name, 0) for name in inputs),
+                is_collection=tuple(emits_collection.get(name, False) for name in inputs),
                 matrix_stops=matrix_stops,
                 producer_arguments=tuple(wired_arguments.get(name, {}) for name in inputs),
             )
             arguments = wire_arguments(operator, wiring, output_types=output_types)
+            if operator == "nearest" and len(inputs) >= 2 and wiring.set_binding() is None:
+                diagnostics.append(
+                    {
+                        "kind": "set_measure_binding_ambiguous",
+                        "node": node_id,
+                        "transform": transform_name,
+                        "inputs": list(inputs),
+                        "collections": [
+                            name for name in inputs if emits_collection.get(name, False)
+                        ],
+                    }
+                )
             arguments, aligned = _bind_named_entities(
                 operator,
                 arguments,

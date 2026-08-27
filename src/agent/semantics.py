@@ -887,12 +887,16 @@ _PARTIAL_CONSUMERS: dict[str, str] = {
     "tsp_tw": "reads its stops through the cost matrix",
     # The legs are in the matrix; the stop nodes beside it are what the matrix was built over.
     "select_legs": "reads its stops through the cost matrix",
-    # The centre a retrieval already searched around is read off that retrieval's arguments.
-    "within_radius": "reads the centre its retrieval recorded",
-    # The names come from the concept graph, never from an upstream node.
+    # The names come from the concept graph, never from an upstream node: a planner that makes
+    # one geocode depend on another means "after that one", and the dependency is real even
+    # though nothing of its output is read.
     "batch_geocode": "resolves concepts, not upstream output",
-    "place_search": "retrieves by the kind asked for",
 }
+# `within_radius` and `place_search` were listed here too and neither was reachable: a radius
+# filter reads its candidate input and takes the centre from the retrieval's own arguments, and
+# a `place_search` given any input resolves to `nearby_places`, which reads it as the centre.
+# Both were removed rather than kept as insurance -- an exemption that never fires is a claim
+# nothing tests. Verified by replaying all 283 recorded graphs with each one removed.
 
 
 # ---------------------------------------------------------------------------------------------

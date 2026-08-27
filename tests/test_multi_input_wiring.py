@@ -64,11 +64,132 @@ def test_an_input_the_wiring_never_reads_is_reported_by_name() -> None:
     assert unconsumed_inputs(["a", "b", "c"], {"place_a": "$a", "place_b": "$c"}) == ["b"]
 
 
+#: One test per exemption, named here so the list cannot grow without one. An exemption is a
+#: claim that the input reaches the operator by another route, and a claim needs a test.
+_EXEMPTION_TESTS = {
+    "tsp_tw": "test_a_tour_reaches_its_stops_through_the_matrix_they_were_priced_in",
+    "select_legs": "test_a_leg_selection_reaches_its_stops_through_the_matrix",
+    "batch_geocode": "test_a_geocode_resolves_concepts_rather_than_upstream_output",
+}
+
+
 def test_every_operator_that_reads_fewer_inputs_than_it_depends_on_says_why() -> None:
-    """The exemption list is small and each entry is a relation, not an oversight."""
+    """The exemption list is small, each entry is a relation, and each one is tested.
+
+    An exemption says the input is consumed indirectly. That is a claim about the graph, not a
+    way to quiet the check, so every entry names the test that demonstrates the indirect route
+    and this test fails if one is added without it.
+    """
 
     assert set(_PARTIAL_CONSUMERS) <= set(OPERATOR_CONTRACTS)
     assert all(reason.strip() for reason in _PARTIAL_CONSUMERS.values())
+    assert set(_PARTIAL_CONSUMERS) == set(_EXEMPTION_TESTS)
+    defined = set(globals())
+    assert not [name for name in _EXEMPTION_TESTS.values() if name not in defined]
+
+
+def test_a_tour_reaches_its_stops_through_the_matrix_they_were_priced_in() -> None:
+    """`tsp_tw` indexes into its cost matrix, so its nodes are that matrix's own stop list."""
+
+    concepts = _places(3)
+    built = _build(
+        [
+            *_resolve_each(concepts),
+            {"id": "legs", "transform": "ROUTE_MATRIX",
+             "inputs": [f"r{index}" for index in range(3)]},
+            {"id": "tour", "transform": "ROUTE_OPTIMIZE",
+             "inputs": [f"r{index}" for index in range(3)] + ["legs"]},
+        ],
+        concepts=concepts,
+    )
+
+    stops = ["$r0.0.place", "$r1.0.place", "$r2.0.place"]
+    tour = built.graph[4]
+    assert tour["operator"] == "tsp_tw"
+    assert set(tour["depends_on"]) == {"r0", "r1", "r2", "legs"}
+    # Not read as arguments of their own, but every one of them is in the list the tour indexes.
+    assert tour["arguments"]["nodes"] == stops
+    assert consumed_inputs(tour["arguments"]) == {"r0", "r1", "r2", "legs"}
+
+
+def test_a_leg_selection_reaches_its_stops_through_the_matrix() -> None:
+    concepts = _places(3)
+    built = _build(
+        [
+            *_resolve_each(concepts),
+            {"id": "legs", "transform": "ROUTE_MATRIX",
+             "inputs": [f"r{index}" for index in range(3)]},
+            {"id": "path", "transform": "SELECT_LEGS",
+             "inputs": [f"r{index}" for index in range(3)] + ["legs"]},
+        ],
+        concepts=concepts,
+    )
+
+    selection = built.graph[4]
+    assert selection["operator"] == "select_legs"
+    assert selection["arguments"] == {"routes": "$legs"}
+    # The stops are the matrix's own origins, so selecting from it selects among them.
+    assert built.graph[3]["arguments"]["origins"] == [
+        "$r0.0.place", "$r1.0.place", "$r2.0.place"
+    ]
+
+
+def test_a_radius_filter_needs_no_exemption_because_it_reads_the_input_it_declares() -> None:
+    """It was on the exemption list and never needed to be: it reads its candidates."""
+
+    facts = GroundingFacts(anchor="기준점", target_type="약국", radius_m=400)
+    built = _build(
+        [
+            {"id": "anchor", "transform": "RESOLVE_PLACES", "inputs": [],
+             "concept_ids": ["a"], "role": "extent"},
+            {"id": "found", "transform": "PLACE_SEARCH", "inputs": ["anchor"]},
+            {"id": "inside", "transform": "FILTER", "inputs": ["found"]},
+        ],
+        concepts=[{"id": "a", "text": "기준점"}],
+        facts=facts,
+    )
+
+    retrieval, filtering = built.graph[1], built.graph[2]
+    assert filtering["operator"] == "within_radius"
+    # The one input it declares is read; the centre comes from the retrieval's own arguments,
+    # which is the anchor that retrieval already searched around.
+    assert filtering["arguments"]["candidates"] == "$found"
+    assert filtering["arguments"]["center"] == retrieval["arguments"]["center"]
+
+
+def test_a_geocode_resolves_concepts_rather_than_upstream_output() -> None:
+    """The names come from the concept graph; an upstream node is context, not content."""
+
+    built = _build(
+        [
+            {"id": "anchor", "transform": "RESOLVE_PLACES", "inputs": [],
+             "concept_ids": ["a"], "role": "extent"},
+            {"id": "more", "transform": "RESOLVE_PLACES", "inputs": ["anchor"],
+             "concept_ids": ["b"], "role": "support"},
+        ],
+        concepts=[{"id": "a", "text": "기준점"}, {"id": "b", "text": "다른곳"}],
+    )
+
+    assert built.graph[1]["operator"] == "batch_geocode"
+    assert built.graph[1]["arguments"] == {"place_names": ["다른곳"]}
+    assert built.graph[1]["depends_on"] == ["anchor"]
+
+
+def test_a_retrieval_needs_no_exemption_because_it_reads_its_centre() -> None:
+    """`place_search` was on the exemption list; given any input it resolves to `nearby_places`,
+    which reads that input as the centre. The exemption was unreachable and is gone."""
+
+    built = _build(
+        [
+            {"id": "anchor", "transform": "RESOLVE_PLACES", "inputs": [],
+             "concept_ids": ["a"], "role": "extent"},
+            {"id": "found", "transform": "PLACE_SEARCH", "inputs": ["anchor"]},
+        ],
+        concepts=[{"id": "a", "text": "기준점"}],
+    )
+
+    assert built.graph[1]["operator"] == "nearby_places"
+    assert built.graph[1]["arguments"] == {"center": "$anchor.0.place"}
 
 
 @pytest.mark.parametrize("key", sorted(SKELETONS))

@@ -3329,9 +3329,12 @@ standing in for every input: a route reader handed geocoded endpoints wired
 place beside a six-place matrix. They were invisible because the families they broke were already
 broken for the stated reason.
 
-Offline replay over the 283 recorded first-compose graphs: 42 changed -- `trip_optimal_order`
-10/24, `trip_feasible_count_five` 9/21, `trip_total_distance` 9/21, `routing_turn_count_via`
-7/21, `routing_detour_cost` 7/24, and **0 of the 151** `nearby_*`/`poi_*`/`unanswerable_*` rows.
+Offline replay over the 283 recorded first-compose graphs: 52 changed -- `trip_total_distance`
+13/21, `routing_detour_cost` 11/24, `trip_feasible_count_five` 10/21, `trip_optimal_order` 10/24,
+`routing_turn_count_via` 8/21, and **0 of the 151** `nearby_*`/`poi_*`/`unanswerable_*` rows.
+(First reported as 42, each family 1-4 lower: the "before" side imported the main checkout's
+`src` instead of the worktree's. Re-measured under the provenance banner the replay now prints.
+The 0 of 151 -- the part the reading rests on -- is unchanged.)
 The replay caught one regression of this work before a benchmark did: the first version of the
 route-composition rule composed a drive from `compare_routes` to itself. Note the limit of that
 measurement -- `via` and `SELECT_LEGS` are planner vocabulary, so graphs recorded before they

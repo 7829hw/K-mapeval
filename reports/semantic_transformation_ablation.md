@@ -239,15 +239,18 @@ deterministic tail can be measured on without spending a pass:
 
 | family | changed / total |
 | --- | --- |
+| `trip_total_distance` | 13 / 21 |
+| `routing_detour_cost` | 11 / 24 |
+| `trip_feasible_count_five` | 10 / 21 |
 | `trip_optimal_order` | 10 / 24 |
-| `trip_feasible_count_five` | 9 / 21 |
-| `trip_total_distance` | 9 / 21 |
-| `routing_turn_count_via` | 7 / 21 |
-| `routing_detour_cost` | 7 / 24 |
+| `routing_turn_count_via` | 8 / 21 |
 | `nearby_*`, `poi_*`, `unanswerable_*` | **0 / 151** |
 
-42 of 283. Every one inspected computed the wrong route, or the wrong set of routes, and now
-computes the one the question states. Note what this footprint cannot show: `via` and
+52 of 283. (These are the corrected counts. They were first reported as 42 with each family
+1-4 lower, because the "before" side of that replay silently imported the main checkout's `src`
+rather than the worktree's -- see "The replay was measuring one revision twice" below. The claim
+that rested on this table, the 0 of 151, is unchanged.) Every one inspected computed the wrong
+route, or the wrong set of routes, and now computes the one the question states. Note what this footprint cannot show: `via` and
 `SELECT_LEGS` are *planner vocabulary*, so recorded graphs written before they existed never use
 them. The replay measures the wiring fixes; the benchmark measures the vocabulary.
 

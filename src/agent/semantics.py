@@ -100,7 +100,7 @@ def _always(_: Resolution) -> bool:
 
 
 def _one_place_against_many(resolution: Resolution) -> bool:
-    """"How far is each of these from that" is a ranking, and `nearest` is what computes it.
+    """ "How far is each of these from that" is a ranking, and `nearest` is what computes it.
 
     Wiring it as `haversine_distance(place_a=anchor, place_b=$candidates.0.place)` measures the
     first candidate and throws the rest away -- which is what it did, on 190 recorded graphs.
@@ -204,9 +204,7 @@ def _within_a_stated_sector(resolution: Resolution) -> bool:
 def _by_a_stated_attribute(resolution: Resolution) -> bool:
     """A kind narrowed by a modifier -- 중식 of "중식 음식점" -- is an attribute of the places."""
 
-    return resolution.facts is not None and bool(
-        getattr(resolution.facts, "target_subtype", None)
-    )
+    return resolution.facts is not None and bool(getattr(resolution.facts, "target_subtype", None))
 
 
 def _by_place_attribute(_: Resolution) -> bool:
@@ -242,8 +240,9 @@ def _proportion(resolution: Resolution) -> bool:
 #: How a node says its aggregate covers the legs an itinerary drives rather than every pair a
 #: matrix holds. `groups` is the older spelling and means the same thing when no explicit group
 #: list is supplied.
-_LEG_SCOPES = frozenset({"groups", "grouped", "legs", "consecutive", "consecutive_legs",
-                         "itinerary", "route_legs"})
+_LEG_SCOPES = frozenset(
+    {"groups", "grouped", "legs", "consecutive", "consecutive_legs", "itinerary", "route_legs"}
+)
 
 
 def _grouped(resolution: Resolution) -> bool:
@@ -259,7 +258,7 @@ def _over_route_legs(resolution: Resolution) -> bool:
 
 
 def _counts_a_set(resolution: Resolution) -> bool:
-    """"몇 곳" is how many, not how much. A set of places carries nothing to add up."""
+    """ "몇 곳" is how many, not how much. A set of places carries nothing to add up."""
 
     if str(resolution.factor("aggregate", "sum")).lower() in {"count", "how_many", "cardinality"}:
         return True
@@ -340,8 +339,7 @@ TRANSFORMS: dict[str, Transform] = {
     "ROUTE_MEASURE": Transform(
         "ROUTE_MEASURE",
         "The road route from one place to another, optionally through stated waypoints.",
-        (("directions", _through_waypoints), ("travel_time", _duration),
-         ("directions", _distance)),
+        (("directions", _through_waypoints), ("travel_time", _duration), ("directions", _distance)),
         "field",
     ),
     "ROUTE_MATRIX": Transform(
@@ -460,10 +458,14 @@ TRANSFORMS: dict[str, Transform] = {
 }
 
 
-def transform_catalogue() -> str:
+def transform_catalogue(*, include_mcq: bool = True) -> str:
     """The vocabulary as the planner prompt states it -- names and meanings, never operators."""
 
-    return "\n".join(f"- {t.name}: {t.summary}" for t in TRANSFORMS.values())
+    return "\n".join(
+        f"- {transform.name}: {transform.summary}"
+        for transform in TRANSFORMS.values()
+        if include_mcq or transform.name != "MATCH_OPTIONS"
+    )
 
 
 def resolve_operator(
@@ -624,18 +626,14 @@ class _Wiring:
             return "", ""
         if len(self.inputs) >= 2:
             ends = [
-                position
-                for position, node in enumerate(self.inputs)
-                if node not in self.via_inputs
+                position for position, node in enumerate(self.inputs) if node not in self.via_inputs
             ]
             if len(ends) >= 2:
                 return self.place(ends[0]), self.place(ends[-1])
             return self.place(0), self.place(1)
         if self.via_positions:
             free = [
-                index
-                for index in range(self.resolved_count)
-                if index not in self.via_positions
+                index for index in range(self.resolved_count) if index not in self.via_positions
             ]
             if len(free) >= 2:
                 return self.place(0, free[0]), self.place(0, free[-1])
@@ -717,7 +715,7 @@ def wire_arguments(
     factors = wiring.factors
     arity = len(wiring.inputs)
     if operator == "batch_geocode":
-        return {}                                        # names are bound from the concept graph
+        return {}  # names are bound from the concept graph
     if operator == "nearby_places":
         return {"center": wiring.place(0)} if arity else {}
     if operator == "batch_place_details":
@@ -1360,9 +1358,7 @@ def factorize_semantic_graph(
         else:
             if _needs_a_route_composed(
                 transform_name, inputs, [produced_by.get(name) or "" for name in inputs]
-            ) and (
-                "directions" in available
-            ):
+            ) and ("directions" in available):
                 route_id = f"{node_id}_route"
                 route_wiring = _Wiring(
                     inputs=tuple(inputs),
@@ -1441,9 +1437,10 @@ def factorize_semantic_graph(
                     }
                 )
                 inputs = [grid_id]
-            if _totals_a_bare_matrix(
-                transform_name, factors, inputs, produced_by, square_matrices
-            ) and "select_legs" in available:
+            if (
+                _totals_a_bare_matrix(transform_name, factors, inputs, produced_by, square_matrices)
+                and "select_legs" in available
+            ):
                 # A square matrix holds every pair; an itinerary drives the consecutive ones.
                 # Totalling the matrix answers a question about n^2 legs when the trip has
                 # n-1 of them, which is how `trip_total_distance` returned a confident number
@@ -1532,11 +1529,7 @@ def factorize_semantic_graph(
                 claimed,
                 facts,
             )
-            missed = (
-                []
-                if operator in _PARTIAL_CONSUMERS
-                else unconsumed_inputs(inputs, arguments)
-            )
+            missed = [] if operator in _PARTIAL_CONSUMERS else unconsumed_inputs(inputs, arguments)
             if missed:
                 raise ValueError(
                     f"GeoFlow node {node_id!r} ({transform_name} -> {operator}) declares "
@@ -1607,10 +1600,7 @@ def factorize_semantic_graph(
         # way there.
         emits_collection[node_id] = isinstance(operator, str) and (
             operator in _COLLECTION_OPERATORS
-            or (
-                operator == "batch_geocode"
-                and len((arguments or {}).get("place_names") or []) > 1
-            )
+            or (operator == "batch_geocode" and len((arguments or {}).get("place_names") or []) > 1)
         )
         output_types[node_id] = output_type
         decisions.append(
@@ -1635,9 +1625,7 @@ def factorize_semantic_graph(
                 **({"constraint_ids": carried} if carried else {}),
             }
         )
-    return SemanticFactorization(
-        graph, tuple(decisions), tuple(concrete), tuple(diagnostics)
-    )
+    return SemanticFactorization(graph, tuple(decisions), tuple(concrete), tuple(diagnostics))
 
 
 def _bind_named_entities(
@@ -1686,9 +1674,7 @@ def _bind_named_entities(
 
     # 3. Concepts the analysis actually has.
     aligned = [
-        value
-        for value in requested
-        if value in concept_text and concept_text[value].strip()
+        value for value in requested if value in concept_text and concept_text[value].strip()
     ]
     named = [concept_text[value] for value in aligned]
     if named:

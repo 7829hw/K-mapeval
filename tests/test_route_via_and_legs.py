@@ -99,11 +99,20 @@ def test_a_waypoint_listed_among_the_inputs_is_not_also_an_end_of_the_route() ->
     built = _build(
         [
             {"id": "a", "transform": "RESOLVE_PLACES", "inputs": [], "concept_ids": ["start"]},
-            {"id": "b", "transform": "RESOLVE_PLACES", "inputs": [],
-             "concept_ids": ["intermediate"]},
+            {
+                "id": "b",
+                "transform": "RESOLVE_PLACES",
+                "inputs": [],
+                "concept_ids": ["intermediate"],
+            },
             {"id": "c", "transform": "RESOLVE_PLACES", "inputs": [], "concept_ids": ["end"]},
-            {"id": "route", "transform": "ROUTE_MEASURE", "inputs": ["a", "b", "c"],
-             "via": ["b"], "factors": {"measure": "distance"}},
+            {
+                "id": "route",
+                "transform": "ROUTE_MEASURE",
+                "inputs": ["a", "b", "c"],
+                "via": ["b"],
+                "factors": {"measure": "distance"},
+            },
         ],
         concepts=STOPS,
     )
@@ -121,8 +130,12 @@ def test_a_waypoint_may_be_a_node_of_its_own() -> None:
     built = _build(
         [
             {"id": "a", "transform": "RESOLVE_PLACES", "inputs": [], "concept_ids": ["start"]},
-            {"id": "b", "transform": "RESOLVE_PLACES", "inputs": [],
-             "concept_ids": ["intermediate"]},
+            {
+                "id": "b",
+                "transform": "RESOLVE_PLACES",
+                "inputs": [],
+                "concept_ids": ["intermediate"],
+            },
             {"id": "c", "transform": "RESOLVE_PLACES", "inputs": [], "concept_ids": ["end"]},
             {"id": "route", "transform": "ROUTE_MEASURE", "inputs": ["a", "c"], "via": ["b"]},
         ],
@@ -161,10 +174,20 @@ def test_a_turn_count_reads_the_guidance_of_the_route_that_has_the_waypoint() ->
 
     built = _build(
         [
-            {"id": "ends", "transform": "RESOLVE_PLACES", "inputs": [],
-             "concept_ids": ["start", "intermediate", "end"], "role": "extent"},
-            {"id": "route", "transform": "ROUTE_MEASURE", "inputs": ["ends"],
-             "via": ["intermediate"], "role": "support"},
+            {
+                "id": "ends",
+                "transform": "RESOLVE_PLACES",
+                "inputs": [],
+                "concept_ids": ["start", "intermediate", "end"],
+                "role": "extent",
+            },
+            {
+                "id": "route",
+                "transform": "ROUTE_MEASURE",
+                "inputs": ["ends"],
+                "via": ["intermediate"],
+                "role": "support",
+            },
             {"id": "steps", "transform": "ROUTE_STEPS", "inputs": ["route"], "role": "support"},
             {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["steps"], "role": "measure"},
         ],
@@ -172,7 +195,10 @@ def test_a_turn_count_reads_the_guidance_of_the_route_that_has_the_waypoint() ->
     )
 
     assert [step["operator"] for step in built.graph] == [
-        "batch_geocode", "directions", "steps_analysis", "match_options"
+        "batch_geocode",
+        "directions",
+        "steps_analysis",
+        "match_options",
     ]
     assert built.graph[1]["arguments"]["waypoints"] == ["$ends.1.place"]
     assert built.graph[2]["arguments"] == {"route": "$route"}
@@ -185,7 +211,7 @@ def test_the_turn_count_skeleton_names_its_via_point() -> None:
 
 
 def test_a_turn_count_question_retrieves_the_shape_that_reads_a_step_list() -> None:
-    """It ranked third of four behind Multi-Route-Compare, and the retrieval shows two."""
+    """Question wording cannot create a benchmark-shaped template."""
 
     question = (
         "인디스타에서 소설호텔을 들러 공작지까지 자동차로, 거리가 가장 짧은 경로로 이동합니다. "
@@ -202,8 +228,10 @@ def test_a_turn_count_question_retrieves_the_shape_that_reads_a_step_list() -> N
     }
 
     names = [template["name"] for template in retrieve_templates(analysis, question)]
+    paraphrase = [template["name"] for template in retrieve_templates(analysis, "무관한 문장")]
 
-    assert "Route-Step-Extract" in names
+    assert names == paraphrase
+    assert "Route-Step-Extract" not in names
 
 
 # ---------------------------------------------------------------------------------------------
@@ -219,20 +247,38 @@ def test_a_trip_total_covers_the_legs_it_drives_and_not_every_pair() -> None:
     stops = _itinerary(4)
     built = _build(
         [
-            {"id": "stops", "transform": "RESOLVE_PLACES", "inputs": [],
-             "concept_ids": [stop["id"] for stop in stops], "role": "extent"},
+            {
+                "id": "stops",
+                "transform": "RESOLVE_PLACES",
+                "inputs": [],
+                "concept_ids": [stop["id"] for stop in stops],
+                "role": "extent",
+            },
             {"id": "legs", "transform": "ROUTE_MATRIX", "inputs": ["stops"], "role": "support"},
-            {"id": "path", "transform": "SELECT_LEGS", "inputs": ["legs"],
-             "factors": {"scope": "consecutive"}, "role": "support"},
-            {"id": "total", "transform": "AGGREGATE", "inputs": ["path"],
-             "factors": {"aggregate": "sum", "measure": "distance"}, "role": "support"},
+            {
+                "id": "path",
+                "transform": "SELECT_LEGS",
+                "inputs": ["legs"],
+                "factors": {"scope": "consecutive"},
+                "role": "support",
+            },
+            {
+                "id": "total",
+                "transform": "AGGREGATE",
+                "inputs": ["path"],
+                "factors": {"aggregate": "sum", "measure": "distance"},
+                "role": "support",
+            },
             {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["total"], "role": "measure"},
         ],
         concepts=stops,
     )
 
     assert [step["operator"] for step in built.graph] == [
-        "batch_geocode", "distance_matrix", "select_legs", "sum_route_metrics",
+        "batch_geocode",
+        "distance_matrix",
+        "select_legs",
+        "sum_route_metrics",
         "match_distance_options",
     ]
     assert built.graph[2]["arguments"] == {"routes": "$legs"}
@@ -245,17 +291,28 @@ def test_totalling_a_bare_matrix_composes_the_leg_selection_it_omitted() -> None
     stops = _itinerary(4)
     built = _build(
         [
-            {"id": "stops", "transform": "RESOLVE_PLACES", "inputs": [],
-             "concept_ids": [stop["id"] for stop in stops]},
+            {
+                "id": "stops",
+                "transform": "RESOLVE_PLACES",
+                "inputs": [],
+                "concept_ids": [stop["id"] for stop in stops],
+            },
             {"id": "legs", "transform": "ROUTE_MATRIX", "inputs": ["stops"]},
-            {"id": "total", "transform": "AGGREGATE", "inputs": ["legs"],
-             "factors": {"aggregate": "sum", "scope": "groups"}},
+            {
+                "id": "total",
+                "transform": "AGGREGATE",
+                "inputs": ["legs"],
+                "factors": {"aggregate": "sum", "scope": "groups"},
+            },
         ],
         concepts=stops,
     )
 
     assert [step["operator"] for step in built.graph] == [
-        "batch_geocode", "distance_matrix", "select_legs", "sum_route_metrics"
+        "batch_geocode",
+        "distance_matrix",
+        "select_legs",
+        "sum_route_metrics",
     ]
     composed = next(row for row in built.decisions if row["operator"] == "select_legs")
     assert composed["rule"] == "composed_consecutive_legs"
@@ -267,12 +324,20 @@ def test_per_option_totals_still_group_by_the_groups_the_graph_carries() -> None
     stops = _itinerary(2)
     built = _build(
         [
-            {"id": "pairs", "transform": "RESOLVE_PLACES", "inputs": [],
-             "concept_ids": [stop["id"] for stop in stops]},
+            {
+                "id": "pairs",
+                "transform": "RESOLVE_PLACES",
+                "inputs": [],
+                "concept_ids": [stop["id"] for stop in stops],
+            },
             {"id": "legs", "transform": "ROUTE_MATRIX", "inputs": ["pairs"]},
             {"id": "groups", "transform": "MEASURE", "inputs": ["legs"]},
-            {"id": "totals", "transform": "AGGREGATE", "inputs": ["legs", "groups"],
-             "factors": {"aggregate": "sum", "scope": "groups"}},
+            {
+                "id": "totals",
+                "transform": "AGGREGATE",
+                "inputs": ["legs", "groups"],
+                "factors": {"aggregate": "sum", "scope": "groups"},
+            },
         ],
         concepts=stops,
     )
@@ -298,9 +363,7 @@ def test_select_legs_walks_the_consecutive_pairs_of_a_square_matrix() -> None:
 
 def test_select_legs_follows_a_stated_order_rather_than_the_matrix_order() -> None:
     matrix = {
-        "routes": [
-            {"pair_index": index, "distance_m": index, "status": "ok"} for index in range(9)
-        ]
+        "routes": [{"pair_index": index, "distance_m": index, "status": "ok"} for index in range(9)]
     }
 
     selected = SpatialOperatorRegistry.select_legs(matrix, order=[2, 0, 1])
@@ -321,9 +384,7 @@ def test_select_legs_refuses_a_grid_that_is_not_square() -> None:
 
 def test_select_legs_reports_a_leg_that_failed_rather_than_totalling_around_it() -> None:
     matrix = {
-        "routes": [
-            {"pair_index": index, "distance_m": 0, "status": "ok"} for index in range(4)
-        ]
+        "routes": [{"pair_index": index, "distance_m": 0, "status": "ok"} for index in range(4)]
     }
     matrix["routes"][1] = {"pair_index": 1, "status": "error", "error": "RouteNotFoundError"}
 
@@ -344,12 +405,19 @@ def test_a_matrix_over_several_resolved_stops_covers_every_one_of_them() -> None
     built = _build(
         [
             *(
-                {"id": f"r{index}", "transform": "RESOLVE_PLACES", "inputs": [],
-                 "concept_ids": [stop["id"]]}
+                {
+                    "id": f"r{index}",
+                    "transform": "RESOLVE_PLACES",
+                    "inputs": [],
+                    "concept_ids": [stop["id"]],
+                }
                 for index, stop in enumerate(stops)
             ),
-            {"id": "legs", "transform": "ROUTE_MATRIX",
-             "inputs": [f"r{index}" for index in range(4)]},
+            {
+                "id": "legs",
+                "transform": "ROUTE_MATRIX",
+                "inputs": [f"r{index}" for index in range(4)],
+            },
         ],
         concepts=stops,
     )
@@ -365,17 +433,28 @@ def test_selecting_legs_from_stops_composes_the_matrix_they_imply() -> None:
     built = _build(
         [
             *(
-                {"id": f"r{index}", "transform": "RESOLVE_PLACES", "inputs": [],
-                 "concept_ids": [stop["id"]]}
+                {
+                    "id": f"r{index}",
+                    "transform": "RESOLVE_PLACES",
+                    "inputs": [],
+                    "concept_ids": [stop["id"]],
+                }
                 for index, stop in enumerate(stops)
             ),
-            {"id": "path", "transform": "SELECT_LEGS",
-             "inputs": [f"r{index}" for index in range(3)]},
+            {
+                "id": "path",
+                "transform": "SELECT_LEGS",
+                "inputs": [f"r{index}" for index in range(3)],
+            },
         ],
         concepts=stops,
     )
 
     assert [step["operator"] for step in built.graph] == [
-        "batch_geocode", "batch_geocode", "batch_geocode", "distance_matrix", "select_legs"
+        "batch_geocode",
+        "batch_geocode",
+        "batch_geocode",
+        "distance_matrix",
+        "select_legs",
     ]
     assert built.graph[4]["arguments"] == {"routes": "$path_matrix"}

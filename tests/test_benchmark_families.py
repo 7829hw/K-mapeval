@@ -138,7 +138,6 @@ from typing import Any  # noqa: E402
 
 import pytest  # noqa: E402
 
-from src.agent.spatial import SUPPORTED_INTENTS  # noqa: E402
 from src.dataset import (  # noqa: E402
     _CLASSIFICATION_TO_MAPEVAL,
     load_dataset,
@@ -182,21 +181,7 @@ def test_every_set_the_labelled_builders_wrote_labels_every_row(path: Path) -> N
     assert all(row.get("template_id") for row in rows), path.name
 
 
-@pytest.mark.parametrize("path", DATASETS, ids=lambda path: path.name)
-def test_every_measurement_type_in_the_data_is_one_the_agent_prompt_knows(path: Path) -> None:
-    """One direction only.
-
-    A `classification` the Analysis stage has never heard of would be a question no template
-    retrieval can score. The converse is *not* asserted: `type` is a v1 label and `poi` a v2/v3
-    one, so both live in `SUPPORTED_INTENTS` with nothing in a current set to exercise them, and
-    the v6-and-later builders emit five of the eight. That is a coverage gap worth knowing about,
-    not a failure -- see the count this test records below.
-    """
-
-    assert {row["classification"] for row in _rows(path)} <= SUPPORTED_INTENTS
-
-
-def test_which_supported_intents_no_current_benchmark_exercises() -> None:
+def test_benchmark_labels_are_evaluation_metadata_only() -> None:
     current = {
         row["classification"]
         for path in DATASETS
@@ -204,8 +189,6 @@ def test_which_supported_intents_no_current_benchmark_exercises() -> None:
         for row in _rows(path)
     }
     assert current == {"nearby", "radius", "distance", "direction", "routing", "trip"}
-    # `poi` and `type` are reachable in `src/` and regression-tested nowhere in `dataset/`.
-    assert SUPPORTED_INTENTS - current == {"poi", "type"}
 
 
 @pytest.mark.parametrize("path", DATASETS, ids=lambda path: path.name)

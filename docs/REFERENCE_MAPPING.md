@@ -4,17 +4,17 @@
 |---|---|---|
 | MapEval `Evaluator2.py` structured ReAct loop | `src/agent/react.py` | Removes the localhost backend, sleeps, and remote writes. Uses user-requested 0-based `^^N^^` answers. |
 | MapEval tools/backend | `src/tools/registry.py`, `src/tools/map.py`, `src/tools/kakao.py` | Provider injection replaces the separate HTTP backend; tools expose normalized JSON. |
-| Spatial information theory analysis | `normalize_analysis`, `ConceptGraph` | Preserves all seven core-concept labels and six roles. Missing EXTENT/MEASURE concepts are made explicit and marked synthetic. Dataset classification metadata is not passed in. |
-| Concept transformation drafting | `retrieve_templates`, Spatial-Agent `compose` | All eleven Appendix E examples are G1–G5-valid and executable. Retrieval uses deterministic concept/role/attribute/measure affinity plus question-literal fallback rather than intent labels or embedding cosine similarity. |
-| Concept graph `G` | `ConceptGraph`, `ConceptNode` | Stores IDs, types, roles, attributes, and explicit Analysis dependencies. Role adjacency never fabricates edges; executable G' edges come from actual operator references. |
-| Operator-concept hypergraph `G'` | `factorize_geoflow`, `OperatorHyperedge` | Factorization is deterministic rather than learned. Each hyperedge records input concepts, supplementary literal factor parameters, and one or more output-path bindings. Radius, direction, category, and similar constants remain factors instead of being fabricated as operator outputs. Derived intermediate concepts are explicitly marked. |
-| Five GeoFlow constraints | `normalize_and_validate_graph` | Enforces G1, G3, G4, and both halves of G5 on operator and concept graphs. G2 applies only to SUBCOND→COND→SUPPORT→MEASURE; contextual roles are excluded as required by Appendix B. |
+| Spatial information theory analysis | `normalize_analysis`, `src/agent/concepts.py` | Preserves all seven core-concept labels and six roles. Runtime intent classification and dataset labels are absent; missing concepts are completed from typed facts and marked implicit/synthetic. |
+| Concept transformation drafting | `src/agent/templates.py`, `src/agent/composition.py`, Spatial-Agent `compose` | Five reusable Appendix-E-level graph fragments expose typed I/O ports. Retrieval reads typed concepts and factors, and templates are priors rather than hard constraints. |
+| Concept graph `G` | `GeoFlowGraph`, `ConceptNode`, `TransformationEdge` | Vertices are concepts with `core_concept`, `functional_role`, and `attributes`; directed hyperedges are transformations. The executable operator graph is a later representation. |
+| Factors and operator-concept hypergraph `G'` | `FactorNode`, `attach_grounding_factors`, `factorize_semantic_graph` | Radius, ordinal, direction, time budget, stays, route objective, fixed order, and return-to-start are explicit factor vertices connected to transformation/operator hyperedges. Tool selection remains deterministic from types, factors, and contracts. |
+| Five GeoFlow constraints | `src/agent/validation.py`, `normalize_and_validate_graph` | Draft and repaired graphs must pass G1–G5 strictly. No template `required_structure` rule or lenient final attempt applies; a repaired graph that remains invalid becomes `graph_validation_failure`. |
 | Core-concept execution types | `OPERATOR_CONTRACTS`, `SpatialOperatorRegistry` | LOCATION, OBJECT, FIELD, EVENT, NETWORK, AMOUNT, and PROPORTION all have executable producers. The current benchmark directly exercises only a subset. |
 | Contextual/functional roles | `factorize_geoflow`, `ROLE_PRIORITY` | EXTENT/TEXTENT are scheduled as context but do not participate in procedural precedence. |
-| Topological executor | Spatial-Agent `execute` stage | Records operator state and separately materializes concept state through output bindings, including multiple bindings from one operator. |
+| Topological executor | `src/agent/execution.py`, Spatial-Agent `execute` stage | Executes the validated order through injected registries, records operator state, and separately materializes concept state through output bindings. |
 | Lenient concept-reference resolution (`_resolve_concept_reference`, `_extract_coordinates_from_concept`, `resolve_place_name`) | `_resolve_references` / `_descend_reference` in `src/agent/spatial.py`, `_as_place` / `_as_place_list` in `src/tools/spatial.py` | An over-specified `$node.path` degrades to the closest resolvable object instead of failing the operator, and every coordinate operator unwraps the place-shaped record it was handed. Only a genuinely unresolved place raises, as an explicit `PlaceNotFoundError`. |
-| Executor evidence preprocessing (auto option distances) | `match_options`, `match_distance_options`, `match_type_options` | Candidate option texts are bound verbatim from the question at grounding time, so a planner cannot paraphrase or numerically re-type them before the Measure comparison. |
-| Evaluator answer selection | `_select_option` in `src/agent/spatial.py` | Keeps upstream's text-first reconciliation (exact candidate text, then declared index, then a single containment match) on top of the repository's 0-based `^^N^^` contract. |
+| Grounded answer generation | `src/agent/answering.py` | The spatial core produces a `GroundedAnswer` from execution evidence without seeing MCQ options. |
+| Evaluator answer selection | `MCQAdapter` in `src/mcq_adapter.py` | MCQ reconciliation is outside GeoFlow (exact grounded text, then unambiguous containment/value match) and preserves the 0-based `^^N^^` contract. An index emitted by the grounded-answer stage is ignored; `MATCH_OPTIONS` is not a core transformation. |
 | Appendix C operators | `ToolRegistry`, `SpatialOperatorRegistry` | Adds reverse/batch details, waypoint directions, instruction route filtering, extractors, pairwise extremes, place filtering, travel-time nearest, temporal operators, and step analysis with paper-level semantics. |
 | TSP-TW | `SpatialOperatorRegistry.tsp_tw` | Exhaustive optimization up to nine nodes with service times, windows, and budget; infeasible instances return the paper's nearest-unvisited partial feasible fallback. OR-Tools is not bundled. |
 | Temporal operators | `timezone`, `open_at_time`, `calculate_finish_time`, `calculate_start_time` | Handles cross-midnight/24-hour periods. Multi-stop finish time queries cached/live route durations and adds stays. Latest-departure calculation is an explicit template helper. |
@@ -26,12 +26,14 @@
 
 ## Remaining non-equivalences
 
-- Template retrieval is keyword based, not embedding based.
+- Macro-template retrieval is typed and deterministic. Question–validated-graph demonstration
+  retrieval uses embedding cosine similarity when an embedding backend is configured; exact test
+  questions and explicitly excluded example IDs cannot be returned.
 - Factorization and concept binding are deterministic, not SFT/DPO learned.
 - Evidence always comes from Kakao and is recorded as `kakao` in `metadata.provider`.
 - Kakao Mobility support is driving-only.
-- The benchmark router uses the LLM analysis intent; Korean heuristics are only a fallback when the
-  returned intent is missing or unsupported.
+- Spatial-Agent has no benchmark-label or intent router. `classification`, `mapeval_class`, and
+  `template_id` remain evaluator/reporting metadata only.
 - The MCQ trip format evaluates option-order comparison, as MapEval's does. `trip_optimal_order`
   offers four orderings whose travel totals differ by at least 180 s, and `trip_feasible_count`
   asks how many stops fit a budget; both are re-derived through `distance_matrix` + `tsp_tw` in

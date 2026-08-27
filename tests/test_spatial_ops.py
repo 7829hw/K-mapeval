@@ -502,7 +502,7 @@ def test_the_anchor_is_found_however_the_question_states_it(
 
 
 def test_steps_analysis_splits_its_counts_at_the_landmark() -> None:
-    """"How many left turns before reaching X" needs a bounded count, not the route total.
+    """ "How many left turns before reaching X" needs a bounded count, not the route total.
 
     With totals alone the only number available was the whole drive's, so the answer came back
     confidently over-counted rather than as a missing capability.
@@ -828,9 +828,7 @@ def test_grounding_edits_survive_the_generic_branch() -> None:
         },
     ]
     grounded = _ground_graph_literals(plan, question, ["1번", "2번"], extract_facts({}, question))
-    priorities = {
-        step["operator"]: step["arguments"].get("priority") for step in grounded
-    }
+    priorities = {step["operator"]: step["arguments"].get("priority") for step in grounded}
     assert priorities["directions"] == "DISTANCE"
 
 
@@ -892,7 +890,7 @@ def test_stays_are_bound_to_the_itinerary_the_plan_lists() -> None:
 
 
 def test_the_itinerary_clock_runs_both_ways() -> None:
-    """"When must I leave to arrive by six" is the same itinerary read backwards.
+    """ "When must I leave to arrive by six" is the same itinerary read backwards.
 
     With only a forward mode the reverse question had to be assembled by hand — sum the legs, add
     the stays, hand a scalar to `calculate_start_time` — and the planner under-counted the chain,
@@ -905,9 +903,7 @@ def test_the_itinerary_clock_runs_both_ways() -> None:
         "stay_durations_s": [0, 3600, 0],
         "timezone": "Asia/Seoul",
     }
-    forward = registry.invoke(
-        "calculate_finish_time", {"start_time": "오전 9시 00분", **itinerary}
-    )
+    forward = registry.invoke("calculate_finish_time", {"start_time": "오전 9시 00분", **itinerary})
     assert forward.status == "ok", forward.error
 
     backward = registry.invoke(
@@ -1000,7 +996,7 @@ def test_a_departure_time_counts_the_stops_on_the_way() -> None:
     ],
 )
 def test_a_stop_is_stated_in_either_shape(question: str, expected: list[float]) -> None:
-    """"X를 2시간" and "X에서 30분" are the same statement; reading only the first returned
+    """ "X를 2시간" and "X에서 30분" are the same statement; reading only the first returned
     nothing for a question full of errands and left the departure short by all of them."""
 
     from src.agent.spatial import _extract_trip_schedule
@@ -1017,9 +1013,7 @@ def test_a_stop_is_stated_in_either_shape(question: str, expected: list[float]) 
         ("전체 2시간 동안 이동합니다", 7200.0),
     ],
 )
-def test_a_trip_budget_accepts_equivalent_duration_forms(
-    question: str, expected: float
-) -> None:
+def test_a_trip_budget_accepts_equivalent_duration_forms(question: str, expected: float) -> None:
     from src.agent.spatial import _extract_trip_schedule
 
     _, budget = _extract_trip_schedule(question)
@@ -1088,8 +1082,7 @@ def test_every_required_argument_in_a_contract_is_one_the_operator_demands() -> 
         demanded = set(schema["function"]["parameters"].get("required") or [])
         claimed = set(contract.required_arguments)
         assert claimed <= demanded, (
-            f"{name}: contract requires {sorted(claimed - demanded)} which the tool accepts "
-            "without"
+            f"{name}: contract requires {sorted(claimed - demanded)} which the tool accepts without"
         )
 
 
@@ -1648,7 +1641,7 @@ def test_an_itinerary_is_the_whole_list_the_plan_geocoded() -> None:
 
 
 def test_a_tour_that_must_end_somewhere_is_not_free_to_end_anywhere() -> None:
-    """"An appointment at X at 7pm, with errands on the way" fixes the last stop.
+    """ "An appointment at X at 7pm, with errands on the way" fixes the last stop.
 
     Left free, the search finds a cheaper route that finishes at an errand and answers a
     departure time for a trip that never reaches the appointment.
@@ -1900,7 +1893,7 @@ def test_a_bare_tour_total_is_not_topped_up_with_stays_either() -> None:
 
 
 def test_a_stated_return_leg_is_part_of_the_itinerary() -> None:
-    """"…둘러본 뒤 X로 돌아옵니다" is a leg, and a plan that drops it arrives one drive early."""
+    """ "…둘러본 뒤 X로 돌아옵니다" is a leg, and a plan that drops it arrives one drive early."""
 
     from src.agent.spatial import _ground_graph_literals, extract_facts
 
@@ -2010,7 +2003,7 @@ def test_a_round_trip_starts_and_ends_where_the_question_says() -> None:
 
 
 def test_a_priority_word_that_names_no_objective_is_the_ordinary_route() -> None:
-    """"normal" and "traffic" are a planner filling a required field, not a fourth objective.
+    """ "normal" and "traffic" are a planner filling a required field, not a fourth objective.
 
     Refusing them failed all twenty-five legs of a distance matrix at once, which left `tsp_tw`
     nothing square to read and the generation stage guessing the answer. A word that does name a
@@ -2201,10 +2194,20 @@ def test_filter_places_reads_geocode_records_and_kakao_category_codes() -> None:
 def test_several_required_types_are_alternatives_not_a_conjunction() -> None:
     ops = SpatialOperatorRegistry()
     places = [
-        {"place_id": "1", "name": "약국", "category": "의료 > 약국",
-         "latitude": 1.0, "longitude": 1.0},
-        {"place_id": "2", "name": "카페", "category": "음식점 > 카페",
-         "latitude": 1.0, "longitude": 1.0},
+        {
+            "place_id": "1",
+            "name": "약국",
+            "category": "의료 > 약국",
+            "latitude": 1.0,
+            "longitude": 1.0,
+        },
+        {
+            "place_id": "2",
+            "name": "카페",
+            "category": "음식점 > 카페",
+            "latitude": 1.0,
+            "longitude": 1.0,
+        },
     ]
     kept = ops.filter_places(places=places, required_types=["약국", "병원"])
     assert [place["place_id"] for place in kept] == ["1"]
@@ -2215,8 +2218,13 @@ def test_a_kind_the_category_vocabulary_misses_drops_the_filter() -> None:
 
     ops = SpatialOperatorRegistry()
     places = [
-        {"place_id": "1", "name": "가게", "category": "가정,생활 > 잡화",
-         "latitude": 1.0, "longitude": 1.0}
+        {
+            "place_id": "1",
+            "name": "가게",
+            "category": "가정,생활 > 잡화",
+            "latitude": 1.0,
+            "longitude": 1.0,
+        }
     ]
     assert ops.filter_places(places=places, required_types=["우산가게"]) == places
 
@@ -2237,9 +2245,7 @@ def test_the_diagonal_of_a_matrix_costs_nothing_and_no_api_call() -> None:
     )
     assert execution.status == "ok"
     diagonal = [
-        route
-        for route in execution.output["routes"]
-        if route["origin"] == route["destination"]
+        route for route in execution.output["routes"] if route["origin"] == route["destination"]
     ]
     assert len(diagonal) == 2
     assert all(route["status"] == "ok" and route["duration_s"] == 0 for route in diagonal)
@@ -2248,7 +2254,7 @@ def test_the_diagonal_of_a_matrix_costs_nothing_and_no_api_call() -> None:
 
 
 def test_two_anchors_are_not_an_anchor() -> None:
-    """"A와 B 양쪽 모두에서 …" reads to the splitter as one long place name."""
+    """ "A와 B 양쪽 모두에서 …" reads to the splitter as one long place name."""
 
     from src.agent.spatial import _extract_anchor
 
@@ -2302,32 +2308,76 @@ def test_a_concept_ring_keeps_the_measure_the_analysis_stage_named() -> None:
     analysis = {
         "intent": "direction",
         "concepts": [
-            {"id": "anchor", "text": "로데오모텔", "concept_type": "location",
-             "role": "extent", "depends_on": []},
-            {"id": "bearing", "text": "남쪽 방향", "concept_type": "field",
-             "role": "measure", "depends_on": ["anchor"]},
-            {"id": "kind", "text": "은행", "concept_type": "object",
-             "role": "condition", "depends_on": []},
-            {"id": "answer", "text": "가장 가까운 은행", "concept_type": "location",
-             "role": "extent", "depends_on": ["anchor", "bearing", "kind"]},
+            {
+                "id": "anchor",
+                "text": "로데오모텔",
+                "concept_type": "location",
+                "role": "extent",
+                "depends_on": [],
+            },
+            {
+                "id": "bearing",
+                "text": "남쪽 방향",
+                "concept_type": "field",
+                "role": "measure",
+                "depends_on": ["anchor"],
+            },
+            {
+                "id": "kind",
+                "text": "은행",
+                "concept_type": "object",
+                "role": "condition",
+                "depends_on": [],
+            },
+            {
+                "id": "answer",
+                "text": "가장 가까운 은행",
+                "concept_type": "location",
+                "role": "extent",
+                "depends_on": ["anchor", "bearing", "kind"],
+            },
         ],
         "measure": "direction",
     }
     graph = {
         "graph": [
-            {"id": "places", "operator": "batch_geocode",
-             "arguments": {"place_names": ["로데오모텔"], "anchor": "로데오모텔"},
-             "depends_on": [], "output_type": "object", "role": "extent"},
-            {"id": "banks", "operator": "nearby_places",
-             "arguments": {"center": "$places.0.place", "category_code": "BK9",
-                           "radius_m": 20000, "limit": 45},
-             "depends_on": ["places"], "output_type": "object", "role": "condition"},
-            {"id": "south", "operator": "filter_by_direction",
-             "arguments": {"center": "$places.0.place", "places": "$banks", "direction": "남쪽"},
-             "depends_on": ["banks"], "output_type": "object", "role": "support"},
-            {"id": "nearest", "operator": "nearest",
-             "arguments": {"anchor": "$places.0.place", "candidates": "$south"},
-             "depends_on": ["south"], "output_type": "object", "role": "measure"},
+            {
+                "id": "places",
+                "operator": "batch_geocode",
+                "arguments": {"place_names": ["로데오모텔"], "anchor": "로데오모텔"},
+                "depends_on": [],
+                "output_type": "object",
+                "role": "extent",
+            },
+            {
+                "id": "banks",
+                "operator": "nearby_places",
+                "arguments": {
+                    "center": "$places.0.place",
+                    "category_code": "BK9",
+                    "radius_m": 20000,
+                    "limit": 45,
+                },
+                "depends_on": ["places"],
+                "output_type": "object",
+                "role": "condition",
+            },
+            {
+                "id": "south",
+                "operator": "filter_by_direction",
+                "arguments": {"center": "$places.0.place", "places": "$banks", "direction": "남쪽"},
+                "depends_on": ["banks"],
+                "output_type": "object",
+                "role": "support",
+            },
+            {
+                "id": "nearest",
+                "operator": "nearest",
+                "arguments": {"anchor": "$places.0.place", "candidates": "$south"},
+                "depends_on": ["south"],
+                "output_type": "object",
+                "role": "measure",
+            },
         ]
     }
     factorized = factorize_geoflow(analysis, graph).as_dict()
@@ -2402,10 +2452,20 @@ def test_a_filter_over_a_field_the_evidence_lacks_is_dropped() -> None:
 def test_the_type_filter_and_the_ranking_agree_on_what_a_kind_is() -> None:
     ops = SpatialOperatorRegistry()
     anchor = {"name": "서함숲", "latitude": 37.5700, "longitude": 126.8800}
-    cafe = {"place_id": "1", "name": "헬리어드", "category": "음식점 > 카페",
-            "latitude": 37.5702, "longitude": 126.8800}
-    restaurant = {"place_id": "2", "name": "한강르네상스", "category": "음식점 > 술집",
-                  "latitude": 37.5740, "longitude": 126.8800}
+    cafe = {
+        "place_id": "1",
+        "name": "헬리어드",
+        "category": "음식점 > 카페",
+        "latitude": 37.5702,
+        "longitude": 126.8800,
+    }
+    restaurant = {
+        "place_id": "2",
+        "name": "한강르네상스",
+        "category": "음식점 > 술집",
+        "latitude": 37.5740,
+        "longitude": 126.8800,
+    }
     kept = ops.filter_places(places=[cafe, restaurant], required_types=["FD6"])
     assert [place["place_id"] for place in kept] == ["2"]
     ranked = ops.nearest(anchor=anchor, candidates=[cafe, restaurant], required_type="음식점")
@@ -2424,7 +2484,7 @@ def test_a_null_measurement_is_skipped_rather_than_crashing_the_ranking() -> Non
 
 
 def test_a_distance_option_is_read_past_its_own_separator() -> None:
-    """"남쪽, 약 6.6km" begins with a comma, and the old pattern matched that comma.
+    """ "남쪽, 약 6.6km" begins with a comma, and the old pattern matched that comma.
 
     `[\\d,.]+` accepted the separator as the number and then called `float("")`, so every option
     of a direction-and-distance question failed to parse — the whole family's measurement step
@@ -2660,7 +2720,7 @@ def test_a_lenient_pass_skips_our_own_rules_and_keeps_every_structural_one() -> 
         normalize_and_validate_graph(no_measure, max_steps=8, strict_types=False)
 
 
-def test_the_concept_role_rule_is_skipped_leniently_like_the_node_one() -> None:
+def test_paper_mode_exposes_no_lenient_validation_parameter() -> None:
     """One rule applied to two graphs; both halves have to be skippable or neither is.
 
     Real analysis and plan from `seoul_kmapeval_v6_004`, one of three questions the first run on
@@ -2673,143 +2733,103 @@ def test_the_concept_role_rule_is_skipped_leniently_like_the_node_one() -> None:
     from src.agent.spatial import _factorize_validate_plan, extract_facts
 
     analysis = {
-            "intent": "nearby",
-            "concepts": [
-                    {
-                            "id": "anchor",
-                            "text": "노량진만나로 골목형상점가",
-                            "concept_type": "location",
-                            "role": "extent",
-                            "attributes": {},
-                            "depends_on": []
-                    },
-                    {
-                            "id": "target_type",
-                            "text": "내과",
-                            "concept_type": "object",
-                            "role": "support",
-                            "attributes": {},
-                            "depends_on": [
-                                    "anchor"
-                            ]
-                    },
-                    {
-                            "id": "candidates",
-                            "text": (
-                                "['동작고려의원', '김영내과의원', "
-                                "'이용국내과의원', '기쁨준내과의원']"
-                            ),
-                            "concept_type": "location",
-                            "role": "measure",
-                            "attributes": {
-                                    "rank": "third_nearest"
-                            },
-                            "depends_on": [
-                                    "anchor",
-                                    "target_type"
-                            ]
-                    }
-            ],
-            "measure": "nearby",
-            "target_type": None
+        "intent": "nearby",
+        "concepts": [
+            {
+                "id": "anchor",
+                "text": "노량진만나로 골목형상점가",
+                "concept_type": "location",
+                "role": "extent",
+                "attributes": {},
+                "depends_on": [],
+            },
+            {
+                "id": "target_type",
+                "text": "내과",
+                "concept_type": "object",
+                "role": "support",
+                "attributes": {},
+                "depends_on": ["anchor"],
+            },
+            {
+                "id": "candidates",
+                "text": ("['동작고려의원', '김영내과의원', '이용국내과의원', '기쁨준내과의원']"),
+                "concept_type": "location",
+                "role": "measure",
+                "attributes": {"rank": "third_nearest"},
+                "depends_on": ["anchor", "target_type"],
+            },
+        ],
+        "measure": "nearby",
+        "target_type": None,
     }
 
     graph = [
-            {
-                    "id": "all_locations",
-                    "operator": "batch_geocode",
-                    "arguments": {
-                            "place_names": [
-                                    "동작고려의원",
-                                    "김영내과의원",
-                                    "이용국내과의원",
-                                    "기쁨준내과의원"
-                            ],
-                            "anchor": "노량진만나로 골목형상점가"
-                    },
-                    "depends_on": [],
-                    "output_type": "object",
-                    "role": "extent",
-                    "concept_ids": [
-                            "anchor",
-                            "candidates"
-                    ]
+        {
+            "id": "all_locations",
+            "operator": "batch_geocode",
+            "arguments": {
+                "place_names": ["동작고려의원", "김영내과의원", "이용국내과의원", "기쁨준내과의원"],
+                "anchor": "노량진만나로 골목형상점가",
             },
-            {
-                    "id": "distances",
-                    "operator": "pairwise_distances",
-                    "arguments": {
-                            "pairs": [
-                                    {
-                                            "place_a": "$all_locations.0.place",
-                                            "place_b": "$all_locations.1.place",
-                                            "label": "동작고려의원"
-                                    },
-                                    {
-                                            "place_a": "$all_locations.0.place",
-                                            "place_b": "$all_locations.2.place",
-                                            "label": "김영내과의원"
-                                    },
-                                    {
-                                            "place_a": "$all_locations.0.place",
-                                            "place_b": "$all_locations.3.place",
-                                            "label": "이용국내과의원"
-                                    },
-                                    {
-                                            "place_a": "$all_locations.0.place",
-                                            "place_b": "$all_locations.4.place",
-                                            "label": "기쁨준내과의원"
-                                    }
-                            ]
+            "depends_on": [],
+            "output_type": "object",
+            "role": "extent",
+            "concept_ids": ["anchor", "candidates"],
+        },
+        {
+            "id": "distances",
+            "operator": "pairwise_distances",
+            "arguments": {
+                "pairs": [
+                    {
+                        "place_a": "$all_locations.0.place",
+                        "place_b": "$all_locations.1.place",
+                        "label": "동작고려의원",
                     },
-                    "depends_on": [
-                            "all_locations"
-                    ],
-                    "output_type": "field",
-                    "role": "support",
-                    "concept_ids": [
-                            "anchor",
-                            "candidates"
-                    ]
+                    {
+                        "place_a": "$all_locations.0.place",
+                        "place_b": "$all_locations.2.place",
+                        "label": "김영내과의원",
+                    },
+                    {
+                        "place_a": "$all_locations.0.place",
+                        "place_b": "$all_locations.3.place",
+                        "label": "이용국내과의원",
+                    },
+                    {
+                        "place_a": "$all_locations.0.place",
+                        "place_b": "$all_locations.4.place",
+                        "label": "기쁨준내과의원",
+                    },
+                ]
             },
-            {
-                    "id": "third_nearest",
-                    "operator": "identity_measure",
-                    "arguments": {
-                            "value": "third_nearest_candidate_by_distance"
-                    },
-                    "depends_on": [
-                            "distances"
-                    ],
-                    "output_type": "object",
-                    "role": "measure",
-                    "concept_ids": [
-                            "candidates"
-                    ]
-            }
+            "depends_on": ["all_locations"],
+            "output_type": "field",
+            "role": "support",
+            "concept_ids": ["anchor", "candidates"],
+        },
+        {
+            "id": "third_nearest",
+            "operator": "identity_measure",
+            "arguments": {"value": "third_nearest_candidate_by_distance"},
+            "depends_on": ["distances"],
+            "output_type": "object",
+            "role": "measure",
+            "concept_ids": ["candidates"],
+        },
     ]
 
     question = (
         "지금 노량진만나로 골목형상점가에 있습니다. 어제부터 배탈이 나서 계속 속이 안 좋습니다. "
         "여기서 세 번째로 가까운 내과는 다음 중 어디인가요?"
     )
-    options = ["동작고려의원", "김영내과의원", "이용국내과의원", "기쁨준내과의원"]
-
-    with pytest.raises(ValueError, match="Concept role ordering violation"):
+    with pytest.raises(ValueError, match="names no transformation"):
         _factorize_validate_plan(
-            analysis, {"graph": graph}, question, options, extract_facts({}, question), 15
+            analysis, {"graph": graph}, question, extract_facts({}, question), 15
         )
 
-    _, steps, _, _semantic = _factorize_validate_plan(
-        analysis,
-        {"graph": graph},
-        question,
-        options,
-        extract_facts({}, question),
-        15,
-        strict_types=False,
-    )
-    assert [step["id"] for step in steps] == ["all_locations", "distances", "third_nearest"]
+    assert "strict_types" not in inspect.signature(_factorize_validate_plan).parameters
 
 
 def test_a_node_that_names_no_operator_is_the_planners_failure_not_a_crash() -> None:
@@ -2853,12 +2873,11 @@ def test_a_node_that_names_no_operator_is_the_planners_failure_not_a_crash() -> 
         },
     ]
 
-    with pytest.raises(ValueError, match="names no operator"):
+    with pytest.raises(ValueError, match="names no transformation"):
         _factorize_validate_plan(
             analysis,
             {"graph": graph},
             "서울역에서 경복궁까지?",
-            ["1km", "2km"],
             extract_facts({}, "서울역에서 경복궁까지?"),
             15,
         )
@@ -3283,13 +3302,22 @@ def test_an_ordinal_is_a_factor_rather_than_a_family() -> None:
 
     def ordinal_graph(position: int) -> list[str]:
         semantic = [
-            {"id": "anchor", "transform": "RESOLVE_PLACES", "inputs": [],
-             "concept_ids": ["a"], "role": "extent"},
+            {
+                "id": "anchor",
+                "transform": "RESOLVE_PLACES",
+                "inputs": [],
+                "concept_ids": ["a"],
+                "role": "extent",
+            },
             {"id": "found", "transform": "PLACE_SEARCH", "inputs": ["anchor"], "role": "support"},
-            {"id": "ranked", "transform": "SORT", "inputs": ["anchor", "found"],
-             "role": "support"},
-            {"id": "kth", "transform": "ORDINAL_SELECT", "inputs": ["ranked"],
-             "factors": {"ordinal": position}, "role": "support"},
+            {"id": "ranked", "transform": "SORT", "inputs": ["anchor", "found"], "role": "support"},
+            {
+                "id": "kth",
+                "transform": "ORDINAL_SELECT",
+                "inputs": ["ranked"],
+                "factors": {"ordinal": position},
+                "role": "support",
+            },
             {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["kth"], "role": "measure"},
         ]
         built = factorize_semantic_graph(
@@ -3312,6 +3340,7 @@ def test_an_ordinal_is_a_factor_rather_than_a_family() -> None:
     ]
     # And the superlative is the same graph with a different factor, not a different template.
     assert ordinal_graph(1) == ordinal_graph(2)
+
 
 def test_the_ordinal_nearby_chain_lands_on_the_option_the_ranking_names() -> None:
     """Retrieve, rank, take index k-1, ground it back to an option -- on real numbers.
@@ -3374,47 +3403,19 @@ def test_template_retrieval_ignores_whichever_intent_the_analysis_guessed() -> N
     assert selections[0] == selections[1]
 
 
-def test_the_ordinal_shape_suppresses_the_shape_it_competes_with() -> None:
-    """Suppression is back, and the measurement is why.
-
-    It was removed on the argument that expressing the ordinal as a factor left no rival shape to
-    suppress. That was wrong. `Geocode-Batch-Compare`'s pattern says to resolve the anchor *and
-    the candidates* and rank them, and a "네 번째로 가까운 은행" question retrieved it as its only
-    guidance and copied it -- ranking the four answer texts, which answers a different question.
-    `nearby_kth_nearest` read 41.7% against 75.0% at `af51e93`.
-
-    They are rival shapes for one question, so the loser's worked graph is the wrong answer
-    sitting beside the right one. Suppression only runs downward: a question that is not asking
-    for a kind of place never retrieves the ordinal shape, and `Geocode-Batch-Compare` keeps its
-    place.
-    """
-
-    from src.agent.geoflow import retrieve_examples, retrieve_templates
+def test_ordinal_wording_is_a_factor_not_a_template_router() -> None:
+    from src.agent.geoflow import retrieve_templates
 
     kind = {
         "target_type": "은행",
         "concepts": [{"id": "a", "text": "독바위역", "concept_type": "location", "role": "extent"}],
     }
     names = [t["name"] for t in retrieve_templates(kind, "독바위역에서 네 번째로 가까운 은행은?")]
-    assert names[0] == "Search-Rank-Ordinal"
-    assert "Geocode-Batch-Compare" not in names
+    nearest = [t["name"] for t in retrieve_templates(kind, "독바위역에서 가장 가까운 은행은?")]
 
-    named_places = {
-        "concepts": [
-            {"id": "a", "text": "A", "concept_type": "location", "role": "extent"},
-            {"id": "b", "text": "B", "concept_type": "location", "role": "extent"},
-        ]
-    }
-    compare = [t["name"] for t in retrieve_templates(named_places, "A와 B 중 가장 먼 곳은?")]
-    assert compare[0] == "Geocode-Batch-Compare"
+    assert names == nearest
+    assert all("ORDINAL" not in name for name in names)
 
-    # And the skeleton shown is the skeleton of the template shown. Ranking the two separately
-    # let a trip question see one pattern beside another shape's worked graph.
-    for analysis, question in ((kind, "독바위역에서 네 번째로 가까운 은행은?"),
-                              (named_places, "A와 B 중 가장 먼 곳은?")):
-        assert [t["name"] for t in retrieve_templates(analysis, question)] == [
-            e["name"] for e in retrieve_examples(analysis, question)
-        ]
 
 def test_a_value_check_informs_the_repair_round_and_then_steps_aside() -> None:
     """The lenient pass is the last thing tried, so a one-argument miss must not end the question.
@@ -3489,9 +3490,7 @@ def test_a_value_check_informs_the_repair_round_and_then_steps_aside() -> None:
     }
     with pytest.raises(ValueError, match="service_times"):
         normalize_and_validate_graph(short_service_times, max_steps=8)
-    steps, _ = normalize_and_validate_graph(
-        short_service_times, max_steps=8, strict_types=False
-    )
+    steps, _ = normalize_and_validate_graph(short_service_times, max_steps=8, strict_types=False)
     assert [step["id"] for step in steps] == ["stops", "legs", "trip"]
 
 
@@ -3528,9 +3527,7 @@ def test_a_structural_rule_still_refuses_on_the_lenient_pass() -> None:
     }
     for strict in (True, False):
         with pytest.raises(ValueError, match="repeats whole batch_geocode reference"):
-            normalize_and_validate_graph(
-                repeated_whole_list, max_steps=8, strict_types=strict
-            )
+            normalize_and_validate_graph(repeated_whole_list, max_steps=8, strict_types=strict)
 
     out_of_range = {
         "graph": [

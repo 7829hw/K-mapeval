@@ -11,9 +11,8 @@ candidate list emitted as a single concept, so `batch_geocode` looked up
 that follows had a single item with no category to narrow. The narrowing was correct, enforced
 and useless, because it was handed nothing to enforce it on.
 
-Repairs are keyed on evidence the pipeline already has -- the candidate texts and the facts the
-deterministic extractors read -- never on a fresh interpretation of the question, and every
-concept created or altered says so in `attributes["source"]`.
+Repairs are keyed on facts the spatial question itself states. MCQ candidate texts are handled
+after GroundedAnswer generation and cannot rewrite the concept graph.
 """
 
 from __future__ import annotations
@@ -47,47 +46,46 @@ def _by_id(analysis: dict) -> dict[str, dict]:
 # ---------------------------------------------------------------------------------------------
 
 
-def test_a_candidate_list_emitted_as_one_concept_becomes_one_concept_per_candidate() -> None:
+def test_mcq_candidate_texts_are_not_used_to_rewrite_spatial_concepts() -> None:
     raw = {
         "intent": "nearby",
         "concepts": [
-            {"id": "anchor", "text": "용산아트홀 소극장가람", "concept_type": "location",
-             "role": "extent"},
-            {"id": "candidates", "text": ", ".join(CUISINE_OPTIONS),
-             "concept_type": "location", "role": "support"},
+            {
+                "id": "anchor",
+                "text": "용산아트홀 소극장가람",
+                "concept_type": "location",
+                "role": "extent",
+            },
+            {
+                "id": "candidates",
+                "text": ", ".join(CUISINE_OPTIONS),
+                "concept_type": "location",
+                "role": "support",
+            },
         ],
         "measure": "nearest",
         "target_type": "양식 음식점",
     }
 
     analysis = normalize_analysis(
-        raw, CUISINE_QUESTION, "nearby",
-        facts=extract_facts(raw, CUISINE_QUESTION), options=CUISINE_OPTIONS,
+        raw,
+        CUISINE_QUESTION,
+        facts=extract_facts(raw, CUISINE_QUESTION),
     )
 
-    assert ", ".join(CUISINE_OPTIONS) not in _texts(analysis)
-    for option in CUISINE_OPTIONS:
-        assert option in _texts(analysis)
-    split = [
-        concept
-        for concept in analysis["concepts"]
-        if str(concept["id"]).startswith("candidates_")
+    assert ", ".join(CUISINE_OPTIONS) in _texts(analysis)
+    assert not [
+        concept for concept in analysis["concepts"] if str(concept["id"]).startswith("candidates_")
     ]
-    assert len(split) == len(CUISINE_OPTIONS)
-    assert all(concept["attributes"]["source"] == "fact_completion" for concept in split)
-    # The valid concept beside it is untouched, provenance included.
     assert _by_id(analysis)["anchor"]["attributes"] == {}
 
 
-def test_the_other_two_spellings_of_a_joined_candidate_list_split_the_same_way() -> None:
-    """Recorded across three passes: plain, a list repr rendered as a string, and labelled."""
+def test_joined_candidate_spellings_remain_one_analysis_concept() -> None:
 
     spellings = [
         ", ".join(CUISINE_OPTIONS),
         str(CUISINE_OPTIONS),
-        ", ".join(
-            f"Option {index}: {option}" for index, option in enumerate(CUISINE_OPTIONS)
-        ),
+        ", ".join(f"Option {index}: {option}" for index, option in enumerate(CUISINE_OPTIONS)),
     ]
     for spelling in spellings:
         raw = {
@@ -97,15 +95,9 @@ def test_the_other_two_spellings_of_a_joined_candidate_list_split_the_same_way()
             "measure": "nearest",
         }
 
-        analysis = normalize_analysis(
-            raw, CUISINE_QUESTION, "nearby", options=CUISINE_OPTIONS
-        )
+        analysis = normalize_analysis(raw, CUISINE_QUESTION)
 
-        assert [
-            concept["text"]
-            for concept in analysis["concepts"]
-            if str(concept["id"]).startswith("c_")
-        ] == CUISINE_OPTIONS, spelling
+        assert _by_id(analysis)["c"]["text"] == spelling
 
 
 def test_a_comma_inside_one_name_is_not_a_list() -> None:
@@ -119,7 +111,7 @@ def test_a_comma_inside_one_name_is_not_a_list() -> None:
         "measure": "nearest",
     }
 
-    analysis = normalize_analysis(raw, "서울역 근처 빵집", "nearby", options=["가", "나"])
+    analysis = normalize_analysis(raw, "서울역 근처 빵집")
 
     assert "제과,베이커리" in _texts(analysis)
 
@@ -129,15 +121,17 @@ def test_a_joined_string_only_splits_where_every_piece_is_a_known_entity() -> No
 
     raw = {
         "concepts": [
-            {"id": "c", "text": "이태원 농담, 어딘가 다른 곳", "concept_type": "location",
-             "role": "extent"},
+            {
+                "id": "c",
+                "text": "이태원 농담, 어딘가 다른 곳",
+                "concept_type": "location",
+                "role": "extent",
+            },
         ],
         "measure": "nearest",
     }
 
-    analysis = normalize_analysis(
-        raw, CUISINE_QUESTION, "nearby", options=CUISINE_OPTIONS
-    )
+    analysis = normalize_analysis(raw, CUISINE_QUESTION)
 
     assert "이태원 농담, 어딘가 다른 곳" in _texts(analysis)
 
@@ -151,15 +145,20 @@ def test_a_clause_of_the_question_is_never_a_geocodable_entity() -> None:
     facts = extract_facts({}, RADIUS_QUESTION)
     raw = {
         "concepts": [
-            {"id": "c1", "text": RADIUS_QUESTION[:60], "concept_type": "location",
-             "role": "extent"},
+            {
+                "id": "c1",
+                "text": RADIUS_QUESTION[:60],
+                "concept_type": "location",
+                "role": "extent",
+            },
         ],
         "measure": "count",
     }
 
     analysis = normalize_analysis(
-        raw, RADIUS_QUESTION, "nearby", facts=facts,
-        options=["한 곳", "두 곳", "세 곳", "네 곳"],
+        raw,
+        RADIUS_QUESTION,
+        facts=facts,
     )
 
     clause = _by_id(analysis)["c1"]
@@ -172,15 +171,17 @@ def test_a_clause_of_the_question_is_never_a_geocodable_entity() -> None:
 def test_a_real_place_name_is_not_mistaken_for_a_clause() -> None:
     raw = {
         "concepts": [
-            {"id": "a", "text": "남파김삼준 문화복지기념관", "concept_type": "location",
-             "role": "extent"},
+            {
+                "id": "a",
+                "text": "남파김삼준 문화복지기념관",
+                "concept_type": "location",
+                "role": "extent",
+            },
         ],
         "measure": "nearest",
     }
 
-    analysis = normalize_analysis(
-        raw, "남파김삼준 문화복지기념관에서 가장 가까운 약국은?", "nearby"
-    )
+    analysis = normalize_analysis(raw, "남파김삼준 문화복지기념관에서 가장 가까운 약국은?")
 
     assert not _by_id(analysis)["a"]["attributes"].get("synthetic")
 
@@ -194,15 +195,20 @@ def test_listed_candidates_the_facts_read_are_added_when_no_concept_names_them()
     facts = extract_facts({}, RADIUS_QUESTION)
     raw = {
         "concepts": [
-            {"id": "anchor", "text": "왕십리곱창거리", "concept_type": "location",
-             "role": "extent"},
+            {
+                "id": "anchor",
+                "text": "왕십리곱창거리",
+                "concept_type": "location",
+                "role": "extent",
+            },
         ],
         "measure": "count",
     }
 
     analysis = normalize_analysis(
-        raw, RADIUS_QUESTION, "nearby", facts=facts,
-        options=["한 곳", "두 곳", "세 곳", "네 곳"],
+        raw,
+        RADIUS_QUESTION,
+        facts=facts,
     )
 
     for name in facts.listed_places:
@@ -226,7 +232,7 @@ def test_listed_candidates_already_named_are_not_added_twice() -> None:
         "measure": "count",
     }
 
-    analysis = normalize_analysis(raw, "질문", "nearby", facts=facts)
+    analysis = normalize_analysis(raw, "질문", facts=facts)
 
     assert len([text for text in _texts(analysis) if text.startswith("가게")]) == 2
 
@@ -236,7 +242,7 @@ def test_the_fallback_graph_also_carries_the_candidates_the_question_lists() -> 
 
     facts = extract_facts({}, RADIUS_QUESTION)
 
-    analysis = normalize_analysis({}, RADIUS_QUESTION, "nearby", facts=facts)
+    analysis = normalize_analysis({}, RADIUS_QUESTION, facts=facts)
 
     for name in facts.listed_places:
         assert name in _texts(analysis)

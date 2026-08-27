@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import math
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
-from src.agent.semantics import lift_to_semantic
 from src.spatial_contracts import MATRIX_METRICS, normalize_tsp_metric
-from src.tools.spatial import split_place_type
 
 CORE_CONCEPTS = frozenset(
     {"location", "object", "field", "event", "network", "amount", "proportion"}
@@ -104,9 +101,7 @@ class FactorizedGeoFlow:
 
 
 OPERATOR_CONTRACTS: dict[str, OperatorContract] = {
-    "identity_measure": OperatorContract(
-        "object", ("value",), reference_arguments=("value",)
-    ),
+    "identity_measure": OperatorContract("object", ("value",), reference_arguments=("value",)),
     "place_search": OperatorContract(
         "object",
         optional_arguments=(
@@ -130,9 +125,7 @@ OPERATOR_CONTRACTS: dict[str, OperatorContract] = {
     "reverse_geocode": OperatorContract(
         "location", ("latitude", "longitude"), ("limit",), ("latitude", "longitude")
     ),
-    "place_details": OperatorContract(
-        "object", ("place_id",), reference_arguments=("place_id",)
-    ),
+    "place_details": OperatorContract("object", ("place_id",), reference_arguments=("place_id",)),
     "batch_place_details": OperatorContract(
         "object", ("place_ids",), reference_arguments=("place_ids",)
     ),
@@ -187,9 +180,7 @@ OPERATOR_CONTRACTS: dict[str, OperatorContract] = {
         ),
         reference_arguments=("place_a", "place_b"),
     ),
-    "pairwise_distances": OperatorContract(
-        "field", ("pairs",), reference_arguments=("pairs",)
-    ),
+    "pairwise_distances": OperatorContract("field", ("pairs",), reference_arguments=("pairs",)),
     "pairwise_extremes": OperatorContract(
         "amount", ("locations",), reference_arguments=("locations",)
     ),
@@ -229,66 +220,40 @@ OPERATOR_CONTRACTS: dict[str, OperatorContract] = {
         ("center", "candidates", "radius_m"),
         reference_arguments=("center", "candidates"),
     ),
-    "select_min": OperatorContract(
-        "object", ("items",), ("key",), ("items",)
-    ),
-    "select_max": OperatorContract(
-        "object", ("items",), ("key",), ("items",)
-    ),
-    "sort_by": OperatorContract(
-        "object", ("items", "key"), ("descending",), ("items",)
-    ),
+    "select_min": OperatorContract("object", ("items",), ("key",), ("items",)),
+    "select_max": OperatorContract("object", ("items",), ("key",), ("items",)),
+    "sort_by": OperatorContract("object", ("items", "key"), ("descending",), ("items",)),
     "select_by_index": OperatorContract(
         "object", ("items", "index"), ("key", "descending"), ("items", "index")
     ),
-    "compare_routes": OperatorContract(
-        "object", ("routes",), ("metric",), ("routes",)
-    ),
-    "filter_routes": OperatorContract(
-        "field", ("routes", "keyword"), ("include",), ("routes",)
-    ),
-    "extract_distance": OperatorContract(
-        "amount", ("route",), reference_arguments=("route",)
-    ),
-    "extract_duration": OperatorContract(
-        "amount", ("route",), reference_arguments=("route",)
-    ),
+    "compare_routes": OperatorContract("object", ("routes",), ("metric",), ("routes",)),
+    "filter_routes": OperatorContract("field", ("routes", "keyword"), ("include",), ("routes",)),
+    "extract_distance": OperatorContract("amount", ("route",), reference_arguments=("route",)),
+    "extract_duration": OperatorContract("amount", ("route",), reference_arguments=("route",)),
     "filter_places": OperatorContract(
         "object",
         ("places",),
         ("min_rating", "price_levels", "required_types", "open_now", "types_are_required"),
         ("places",),
     ),
-    "steps_analysis": OperatorContract(
-        "field", ("route",), ("landmark",), ("route",)
-    ),
-    "sum_route_metrics": OperatorContract(
-        "amount", ("routes",), ("metric",), ("routes",)
-    ),
-    "sum_amounts": OperatorContract(
-        "amount", ("amounts",), ("key",), ("amounts",)
-    ),
+    "steps_analysis": OperatorContract("field", ("route",), ("landmark",), ("route",)),
+    "sum_route_metrics": OperatorContract("amount", ("routes",), ("metric",), ("routes",)),
+    "sum_amounts": OperatorContract("amount", ("amounts",), ("key",), ("amounts",)),
     "difference": OperatorContract(
         "amount", ("minuend", "subtrahend"), ("key",), ("minuend", "subtrahend")
     ),
     "aggregate_route_groups": OperatorContract(
         "amount", ("routes", "groups"), reference_arguments=("routes", "groups")
     ),
-    "select_legs": OperatorContract(
-        "field", ("routes",), ("order",), ("routes",)
-    ),
+    "select_legs": OperatorContract("field", ("routes",), ("order",), ("routes",)),
     "filter_by_distance": OperatorContract(
         "object", ("items", "max_distance_m"), ("key",), ("items",)
     ),
-    "count_items": OperatorContract(
-        "amount", ("items",), reference_arguments=("items",)
-    ),
+    "count_items": OperatorContract("amount", ("items",), reference_arguments=("items",)),
     "match_count_options": OperatorContract(
         "object", ("count", "options"), reference_arguments=("count",)
     ),
-    "merge_places": OperatorContract(
-        "object", ("items",), reference_arguments=("items",)
-    ),
+    "merge_places": OperatorContract("object", ("items",), reference_arguments=("items",)),
     "match_options": OperatorContract(
         "object",
         ("options", "places"),
@@ -543,9 +508,7 @@ OPERATOR_INPUT_TYPES: dict[str, dict[str, frozenset[str]]] = {
     # number like a distance is, and `select_max` over three haversine results returns the winning
     # *record*, not its metres -- a correct plan that this line refused on four of v6's rows
     # before it was widened, and a brand-share plan before that.
-    "match_distance_options": {
-        "distance": frozenset({"amount", "proportion", "object", "field"})
-    },
+    "match_distance_options": {"distance": frozenset({"amount", "proportion", "object", "field"})},
     "match_type_options": {"place": frozenset({"object", "location"})},
     "events_from_objects": {"objects": frozenset({"object"})},
     "filter_events": {"events": frozenset({"event"})},
@@ -573,6 +536,11 @@ OPERATOR_INPUT_TYPES: dict[str, dict[str, frozenset[str]]] = {
 }
 
 
+# Historical operator examples retained only for offline replay/regression compatibility. The
+# Spatial-Agent runtime never retrieves this catalogue; its only construction priors are the five
+# port-typed fragments in ``src.agent.templates.MACRO_TEMPLATES``. Keeping recorded graphs
+# readable lets the deterministic tail be compared across revisions without spending LLM/Kakao
+# quota, but none of the names or literal hints below enters a planner prompt or routing decision.
 TEMPLATES = {
     "object_field_measure": {
         "name": "Object-Field-Measure",
@@ -777,7 +745,7 @@ TEMPLATES = {
                     "depends_on": ["center"],
                     "output_type": "object",
                     "role": "measure",
-                }
+                },
             ]
         },
     },
@@ -857,9 +825,7 @@ TEMPLATES = {
         "affinity": {"trip", "itinerary", "total_distance", "total_duration"},
         "trip_literal": True,
         "keywords": ("일정", "차례", "경유", "여행", "trip", "itinerary"),
-        "pattern": (
-            "ROUTE_MATRIX -> SELECT_LEGS (the consecutive legs) -> AGGREGATE -> MEASURE"
-        ),
+        "pattern": ("ROUTE_MATRIX -> SELECT_LEGS (the consecutive legs) -> AGGREGATE -> MEASURE"),
         "example": {
             "graph": [
                 {
@@ -901,7 +867,7 @@ TEMPLATES = {
         },
         "trip_literal": True,
         "keywords": ("최적 순서", "시간창", "방문 순서", "몇 곳", "tsp"),
-"pattern": "RESOLVE_PLACES -> ROUTE_MATRIX -> ROUTE_OPTIMIZE -> MEASURE",
+        "pattern": "RESOLVE_PLACES -> ROUTE_MATRIX -> ROUTE_OPTIMIZE -> MEASURE",
         "example": {
             "graph": [
                 {
@@ -1010,6 +976,12 @@ TEMPLATES = {
     },
 }
 
+# Macro templates are construction priors. Historical catalogue entries carried a local
+# ``requires`` contract; discard it at load time so selecting a template cannot add validation
+# rules beyond G1–G5.
+for _template_prior in TEMPLATES.values():
+    _template_prior.pop("requires", None)
+
 
 # ---------------------------------------------------------------------------------------------
 # Semantic skeletons
@@ -1026,122 +998,229 @@ TEMPLATES = {
 # composition with the factors that make it the shape it is.
 # ---------------------------------------------------------------------------------------------
 
+# Historical semantic examples retained under the same compatibility boundary as ``TEMPLATES``.
+# They are regression inputs, not runtime skeleton selection.
 SKELETONS: dict[str, list[dict[str, Any]]] = {
     # A kind of place around one anchor, ranked, and the k-th taken. `ordinal` is the whole
     # difference between "가장 가까운" (1) and "네 번째로 가까운" (4) -- one factor, not a family.
     # Only the anchor is resolved: the candidate texts are answers, and resolving them makes the
     # ranking a ranking of the answers.
     "search_rank_ordinal": [
-        {"id": "anchor", "transform": "RESOLVE_PLACES", "inputs": [],
-         "concept_ids": ["<the anchor concept>"], "role": "extent"},
+        {
+            "id": "anchor",
+            "transform": "RESOLVE_PLACES",
+            "inputs": [],
+            "concept_ids": ["<the anchor concept>"],
+            "role": "extent",
+        },
         {"id": "found", "transform": "PLACE_SEARCH", "inputs": ["anchor"], "role": "support"},
-        {"id": "ranked", "transform": "DISTANCE_MEASURE", "inputs": ["anchor", "found"],
-         "role": "support"},
-        {"id": "kth", "transform": "ORDINAL_SELECT", "inputs": ["ranked"],
-         "factors": {"ordinal": 4}, "role": "support"},
+        {
+            "id": "ranked",
+            "transform": "DISTANCE_MEASURE",
+            "inputs": ["anchor", "found"],
+            "role": "support",
+        },
+        {
+            "id": "kth",
+            "transform": "ORDINAL_SELECT",
+            "inputs": ["ranked"],
+            "factors": {"ordinal": 4},
+            "role": "support",
+        },
         {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["kth"], "role": "measure"},
     ],
     # A count or a set inside a stated radius. The radius is a fact the analysis extracted; the
     # skeleton only says where it applies.
     "radius": [
-        {"id": "anchor", "transform": "RESOLVE_PLACES", "inputs": [],
-         "concept_ids": ["<the anchor concept>"], "role": "extent"},
+        {
+            "id": "anchor",
+            "transform": "RESOLVE_PLACES",
+            "inputs": [],
+            "concept_ids": ["<the anchor concept>"],
+            "role": "extent",
+        },
         # The candidates: the ones the question lists if it lists any, otherwise a retrieval of
         # the kind it asks for. A question that names its candidates is asking about those.
-        {"id": "candidates", "transform": "PLACE_SEARCH", "inputs": ["anchor"],
-         "role": "support"},
-        {"id": "measured", "transform": "DISTANCE_MEASURE", "inputs": ["anchor", "candidates"],
-         "role": "support"},
+        {"id": "candidates", "transform": "PLACE_SEARCH", "inputs": ["anchor"], "role": "support"},
+        {
+            "id": "measured",
+            "transform": "DISTANCE_MEASURE",
+            "inputs": ["anchor", "candidates"],
+            "role": "support",
+        },
         {"id": "inside", "transform": "FILTER", "inputs": ["measured"], "role": "support"},
-        {"id": "count", "transform": "AGGREGATE", "inputs": ["inside"],
-         "factors": {"aggregate": "count"}, "role": "support"},
+        {
+            "id": "count",
+            "transform": "AGGREGATE",
+            "inputs": ["inside"],
+            "factors": {"aggregate": "count"},
+            "role": "support",
+        },
         {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["count"], "role": "measure"},
     ],
     # A question that lists its own candidates: resolve those, measure each from the anchor,
     # keep the ones the stated radius admits, and count them. The radius is a fact the analysis
     # extracted; the skeleton only says where it applies.
     "listed_candidates_count": [
-        {"id": "anchor", "transform": "RESOLVE_PLACES", "inputs": [],
-         "concept_ids": ["<the anchor concept>"], "role": "extent"},
-        {"id": "listed", "transform": "RESOLVE_PLACES", "inputs": [],
-         "factors": {"scope": "listed"}, "role": "extent"},
-        {"id": "measured", "transform": "DISTANCE_MEASURE", "inputs": ["anchor", "listed"],
-         "role": "support"},
+        {
+            "id": "anchor",
+            "transform": "RESOLVE_PLACES",
+            "inputs": [],
+            "concept_ids": ["<the anchor concept>"],
+            "role": "extent",
+        },
+        {
+            "id": "listed",
+            "transform": "RESOLVE_PLACES",
+            "inputs": [],
+            "factors": {"scope": "listed"},
+            "role": "extent",
+        },
+        {
+            "id": "measured",
+            "transform": "DISTANCE_MEASURE",
+            "inputs": ["anchor", "listed"],
+            "role": "support",
+        },
         {"id": "inside", "transform": "FILTER", "inputs": ["measured"], "role": "support"},
-        {"id": "count", "transform": "AGGREGATE", "inputs": ["inside"],
-         "factors": {"aggregate": "count"}, "role": "support"},
+        {
+            "id": "count",
+            "transform": "AGGREGATE",
+            "inputs": ["inside"],
+            "factors": {"aggregate": "count"},
+            "role": "support",
+        },
         {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["count"], "role": "measure"},
     ],
     # A kind of place narrowed by an attribute of it -- 중식 of "중식 음식점". Retrieve the broad
     # kind, narrow to the attribute, then rank: a ranking that skips the narrowing answers with
     # the nearest place of any kind, and the closer options are exactly the other kinds.
     "search_narrow_rank": [
-        {"id": "anchor", "transform": "RESOLVE_PLACES", "inputs": [],
-         "concept_ids": ["<the anchor concept>"], "role": "extent"},
+        {
+            "id": "anchor",
+            "transform": "RESOLVE_PLACES",
+            "inputs": [],
+            "concept_ids": ["<the anchor concept>"],
+            "role": "extent",
+        },
         {"id": "found", "transform": "PLACE_SEARCH", "inputs": ["anchor"], "role": "support"},
         # The kind concept may be named beside the candidates -- inputs ["found", "<the kind>"]
         # -- which is how the graph says where the restriction applies. Left out of the skeleton
         # itself because a placeholder in `inputs` is a reference to nothing, and references are
         # checked; the prompt says it in prose instead.
-        {"id": "narrowed", "transform": "FILTER", "inputs": ["found"],
-         "factors": {"scope": "attribute"}, "role": "support"},
-        {"id": "ranked", "transform": "DISTANCE_MEASURE", "inputs": ["anchor", "narrowed"],
-         "role": "support"},
-        {"id": "kth", "transform": "ORDINAL_SELECT", "inputs": ["ranked"],
-         "factors": {"ordinal": 1}, "role": "support"},
+        {
+            "id": "narrowed",
+            "transform": "FILTER",
+            "inputs": ["found"],
+            "factors": {"scope": "attribute"},
+            "role": "support",
+        },
+        {
+            "id": "ranked",
+            "transform": "DISTANCE_MEASURE",
+            "inputs": ["anchor", "narrowed"],
+            "role": "support",
+        },
+        {
+            "id": "kth",
+            "transform": "ORDINAL_SELECT",
+            "inputs": ["ranked"],
+            "factors": {"ordinal": 1},
+            "role": "support",
+        },
         {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["kth"], "role": "measure"},
     ],
     # A compass sector narrows the candidates before the ranking does. Filtering after the rank
     # answers with whichever place was nearest regardless of where it lies.
     "bearing": [
-        {"id": "anchor", "transform": "RESOLVE_PLACES", "inputs": [],
-         "concept_ids": ["<the anchor concept>"], "role": "extent"},
+        {
+            "id": "anchor",
+            "transform": "RESOLVE_PLACES",
+            "inputs": [],
+            "concept_ids": ["<the anchor concept>"],
+            "role": "extent",
+        },
         {"id": "found", "transform": "PLACE_SEARCH", "inputs": ["anchor"], "role": "support"},
-        {"id": "sector", "transform": "FILTER", "inputs": ["anchor", "found"],
-         "role": "support"},
-        {"id": "ranked", "transform": "DISTANCE_MEASURE", "inputs": ["anchor", "sector"],
-         "role": "support"},
+        {"id": "sector", "transform": "FILTER", "inputs": ["anchor", "found"], "role": "support"},
+        {
+            "id": "ranked",
+            "transform": "DISTANCE_MEASURE",
+            "inputs": ["anchor", "sector"],
+            "role": "support",
+        },
         {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["ranked"], "role": "measure"},
     ],
     # Places the question itself names, compared against each other. This is the shape for
     # "which pair is farthest", "which of A and B is nearer to C" -- questions whose candidates
     # *are* the things being measured. It is not the shape for a question that asks for a kind.
     "geocode_compare": [
-        {"id": "places", "transform": "RESOLVE_PLACES", "inputs": [],
-         "concept_ids": ["<every place the question names>"], "role": "extent"},
+        {
+            "id": "places",
+            "transform": "RESOLVE_PLACES",
+            "inputs": [],
+            "concept_ids": ["<every place the question names>"],
+            "role": "extent",
+        },
         {"id": "spans", "transform": "DISTANCE_MEASURE", "inputs": ["places"], "role": "support"},
-        {"id": "pick", "transform": "EXTREME_SELECT", "inputs": ["spans"],
-         "factors": {"extreme": "max"}, "role": "support"},
+        {
+            "id": "pick",
+            "transform": "EXTREME_SELECT",
+            "inputs": ["spans"],
+            "factors": {"extreme": "max"},
+            "role": "support",
+        },
         {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["pick"], "role": "measure"},
     ],
     # Two separations and the gap between them: three places, two measures, one difference.
     "distance_difference": [
-        {"id": "places", "transform": "RESOLVE_PLACES", "inputs": [],
-         "concept_ids": ["<the anchor and both destinations>"], "role": "extent"},
+        {
+            "id": "places",
+            "transform": "RESOLVE_PLACES",
+            "inputs": [],
+            "concept_ids": ["<the anchor and both destinations>"],
+            "role": "extent",
+        },
         {"id": "first", "transform": "DISTANCE_MEASURE", "inputs": ["places"], "role": "support"},
-        {"id": "second", "transform": "DISTANCE_MEASURE", "inputs": ["places"],
-         "role": "support"},
-        {"id": "gap", "transform": "AGGREGATE", "inputs": ["first", "second"],
-         "factors": {"aggregate": "difference"}, "role": "support"},
+        {"id": "second", "transform": "DISTANCE_MEASURE", "inputs": ["places"], "role": "support"},
+        {
+            "id": "gap",
+            "transform": "AGGREGATE",
+            "inputs": ["first", "second"],
+            "factors": {"aggregate": "difference"},
+            "role": "support",
+        },
         {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["gap"], "role": "measure"},
     ],
     # One road route and something read off its guidance: a turn count, the n-th turn, the road
     # a turn happens on. A via-point is part of the route, not a second route.
     "route_step_extract": [
-        {"id": "ends", "transform": "RESOLVE_PLACES", "inputs": [],
-         "concept_ids": ["<origin, any via point, destination, in that order>"],
-         "role": "extent"},
-        {"id": "route", "transform": "ROUTE_MEASURE", "inputs": ["ends"],
-         "via": ["<the concept the route passes through, omit when it passes through nothing>"],
-         "role": "support"},
+        {
+            "id": "ends",
+            "transform": "RESOLVE_PLACES",
+            "inputs": [],
+            "concept_ids": ["<origin, any via point, destination, in that order>"],
+            "role": "extent",
+        },
+        {
+            "id": "route",
+            "transform": "ROUTE_MEASURE",
+            "inputs": ["ends"],
+            "via": ["<the concept the route passes through, omit when it passes through nothing>"],
+            "role": "support",
+        },
         {"id": "steps", "transform": "ROUTE_STEPS", "inputs": ["route"], "role": "support"},
         {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["steps"], "role": "measure"},
     ],
     # Road routes compared against each other -- which detour is cheapest, which option lies on
     # the way. Every candidate route is measured before any of them is chosen.
     "routes": [
-        {"id": "places", "transform": "RESOLVE_PLACES", "inputs": [],
-         "concept_ids": ["<the endpoints and every candidate>"], "role": "extent"},
+        {
+            "id": "places",
+            "transform": "RESOLVE_PLACES",
+            "inputs": [],
+            "concept_ids": ["<the endpoints and every candidate>"],
+            "role": "extent",
+        },
         {"id": "legs", "transform": "ROUTE_MATRIX", "inputs": ["places"], "role": "support"},
         {"id": "pick", "transform": "ROUTE_COMPARE", "inputs": ["legs"], "role": "support"},
         {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["pick"], "role": "measure"},
@@ -1149,52 +1228,100 @@ SKELETONS: dict[str, list[dict[str, Any]]] = {
     # The whole distance or duration of an itinerary the question already orders. Every leg is
     # looked up in one matrix and totalled; the measure the question names decides the unit.
     "trip": [
-        {"id": "stops", "transform": "RESOLVE_PLACES", "inputs": [],
-         "concept_ids": ["<the start and every stop, in the order stated>"], "role": "extent"},
+        {
+            "id": "stops",
+            "transform": "RESOLVE_PLACES",
+            "inputs": [],
+            "concept_ids": ["<the start and every stop, in the order stated>"],
+            "role": "extent",
+        },
         {"id": "legs", "transform": "ROUTE_MATRIX", "inputs": ["stops"], "role": "support"},
-        {"id": "path", "transform": "SELECT_LEGS", "inputs": ["legs"],
-         "factors": {"scope": "consecutive"}, "role": "support"},
-        {"id": "total", "transform": "AGGREGATE", "inputs": ["path"],
-         "factors": {"aggregate": "sum", "measure": "distance"},
-         "role": "support"},
+        {
+            "id": "path",
+            "transform": "SELECT_LEGS",
+            "inputs": ["legs"],
+            "factors": {"scope": "consecutive"},
+            "role": "support",
+        },
+        {
+            "id": "total",
+            "transform": "AGGREGATE",
+            "inputs": ["path"],
+            "factors": {"aggregate": "sum", "measure": "distance"},
+            "role": "support",
+        },
         {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["total"], "role": "measure"},
     ],
     # An itinerary the question does *not* order: which sequence is shortest, or how many stops
     # fit the time. The stays, the budget, the closure and the stated order are facts the
     # analysis extracted and the factorizer binds -- the skeleton only asks for the ordering.
     "route_optimize": [
-        {"id": "stops", "transform": "RESOLVE_PLACES", "inputs": [],
-         "concept_ids": ["<the start and every stop>"], "role": "extent"},
+        {
+            "id": "stops",
+            "transform": "RESOLVE_PLACES",
+            "inputs": [],
+            "concept_ids": ["<the start and every stop>"],
+            "role": "extent",
+        },
         {"id": "legs", "transform": "ROUTE_MATRIX", "inputs": ["stops"], "role": "support"},
-        {"id": "tour", "transform": "ROUTE_OPTIMIZE", "inputs": ["stops", "legs"],
-         "factors": {"measure": "distance"}, "role": "support"},
+        {
+            "id": "tour",
+            "transform": "ROUTE_OPTIMIZE",
+            "inputs": ["stops", "legs"],
+            "factors": {"measure": "distance"},
+            "role": "support",
+        },
         {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["tour"], "role": "measure"},
     ],
     # When a clock is involved: how long the drive takes, then what time that makes it.
     "time_window_reverse": [
-        {"id": "ends", "transform": "RESOLVE_PLACES", "inputs": [],
-         "concept_ids": ["<origin and destination>"], "role": "extent"},
-        {"id": "drive", "transform": "ROUTE_MEASURE", "inputs": ["ends"],
-         "factors": {"measure": "duration"}, "role": "support"},
+        {
+            "id": "ends",
+            "transform": "RESOLVE_PLACES",
+            "inputs": [],
+            "concept_ids": ["<origin and destination>"],
+            "role": "extent",
+        },
+        {
+            "id": "drive",
+            "transform": "ROUTE_MEASURE",
+            "inputs": ["ends"],
+            "factors": {"measure": "duration"},
+            "role": "support",
+        },
         {"id": "clock", "transform": "SCHEDULE", "inputs": ["drive"], "role": "support"},
         {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["clock"], "role": "measure"},
     ],
     # A property of one named place, read off the record rather than computed.
     "place_attribute": [
-        {"id": "place", "transform": "RESOLVE_PLACES", "inputs": [],
-         "concept_ids": ["<the named place>"], "role": "extent"},
+        {
+            "id": "place",
+            "transform": "RESOLVE_PLACES",
+            "inputs": [],
+            "concept_ids": ["<the named place>"],
+            "role": "extent",
+        },
         {"id": "detail", "transform": "PLACE_DETAILS", "inputs": ["place"], "role": "support"},
         {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["detail"], "role": "measure"},
     ],
     # A share or a count over a neighbourhood.
     "object_field_measure": [
-        {"id": "anchor", "transform": "RESOLVE_PLACES", "inputs": [],
-         "concept_ids": ["<the anchor concept>"], "role": "extent"},
+        {
+            "id": "anchor",
+            "transform": "RESOLVE_PLACES",
+            "inputs": [],
+            "concept_ids": ["<the anchor concept>"],
+            "role": "extent",
+        },
         {"id": "found", "transform": "PLACE_SEARCH", "inputs": ["anchor"], "role": "support"},
-        {"id": "matching", "transform": "FILTER", "inputs": ["anchor", "found"],
-         "role": "support"},
-        {"id": "share", "transform": "AGGREGATE", "inputs": ["matching", "found"],
-         "factors": {"aggregate": "proportion"}, "role": "support"},
+        {"id": "matching", "transform": "FILTER", "inputs": ["anchor", "found"], "role": "support"},
+        {
+            "id": "share",
+            "transform": "AGGREGATE",
+            "inputs": ["matching", "found"],
+            "factors": {"aggregate": "proportion"},
+            "role": "support",
+        },
         {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["share"], "role": "measure"},
     ],
 }
@@ -1203,156 +1330,24 @@ SKELETONS: dict[str, list[dict[str, Any]]] = {
 def retrieve_templates(
     analysis: dict[str, Any], question: str, *, limit: int = 2
 ) -> list[dict[str, Any]]:
-    """Retrieve templates from concept/role content and the question's literal wording.
+    """Compatibility wrapper over typed, benchmark-label-free macro retrieval."""
 
-    The Analysis stage still predicts an ``intent`` for reporting, but that label is deliberately
-    excluded here. A template is relevant because the concept graph names its measure,
-    constraints, attributes, or target object, not because a classifier put the question in one
-    bucket. Question keywords remain the exact-literal fallback for a graph that omitted a hint.
-    """
+    from src.agent.concepts import ConceptNode, factor_nodes_from_concepts
+    from src.agent.retrieval import retrieve_macro_templates
 
-    return [
-        {
-            "name": template["name"],
-            "pattern": template["pattern"],
-            **({"requires": template["requires"]} if template.get("requires") else {}),
-        }
-        for _key, template in _rank_templates(analysis, question, limit=limit)
+    del question
+    concepts = [
+        ConceptNode.from_dict(value, fallback_id=f"c{index + 1}")
+        for index, value in enumerate(analysis.get("concepts") or ())
+        if isinstance(value, dict)
     ]
-
-
-#: Which shapes declare required structure. Only the three whose omission has been measured:
-#: `Search-Narrow-Rank`, where eight recorded graphs dropped the narrowing, and the two counting
-#: shapes, whose aggregate is the whole question. A requirement on every shape would be a
-#: constraint asserted rather than evidenced, and it turns a graph that would have executed into
-#: a refusal -- so each entry earns its place from a measurement.
-#:
-#: How a planner says a shape's required step does not apply here. Declared on the graph, not
-#: left implicit: a shape is retrieved because the question has that structure, so omitting a
-#: step it requires is either a mistake or a judgement, and only the planner can say which.
-_WAIVER_KEYS = ("not_applicable", "inapplicable", "omitted")
-
-
-def conformance_violations(
-    plan: dict[str, Any], requires: dict[str, Any] | None
-) -> list[str]:
-    """Where a semantic graph departs from the structure its retrieved shape requires.
-
-    A skeleton is retrieved because the question has that structure. Eight of the recorded
-    `nearby_cuisine_subtype` graphs were composed with `Search-Narrow-Rank` in front of the
-    planner and no narrowing step in them at all -- five copied the rival shape that was
-    retrieved beside it, two stopped after the retrieval, one wrote a `FILTER` whose inputs named
-    concepts rather than nodes. Every one of them then ranked restaurants of every kind and
-    answered with the nearest.
-
-    Prose in the prompt did not carry it, so the requirement is checked instead. A planner may
-    still decline a step -- `"not_applicable": ["FILTER"]` on the graph -- which is a judgement it
-    has to make explicitly rather than by omission.
-    """
-
-    if not requires:
-        return []
-    steps = plan.get("graph") if plan.get("graph") is not None else plan.get("steps")
-    if not isinstance(steps, list):
-        return []
-    waived = {
-        str(name).upper()
-        for key in _WAIVER_KEYS
-        for name in (plan.get(key) or [])
-    }
-    present: dict[str, set[str]] = {}
-    for step in steps:
-        if not isinstance(step, dict):
-            continue
-        name = str(step.get("transform") or "").strip().upper()
-        if name:
-            present.setdefault(name, set()).add(str(step.get("id") or ""))
-    violations: list[str] = []
-    for transform in requires.get("transforms", ()):
-        if transform.upper() not in present and transform.upper() not in waived:
-            violations.append(
-                f"the retrieved shape requires a {transform} step and the graph has none; "
-                f'add it, or declare "not_applicable": ["{transform}"] on the graph'
-            )
-    if violations:
-        return violations
-    reaches = _transform_reachability(steps)
-    for producer, consumer in requires.get("dependencies", ()):
-        if producer.upper() in waived or consumer.upper() in waived:
-            continue
-        if not any(
-            consumer.upper() in reaches.get(node, set())
-            for node in present.get(producer.upper(), set())
-        ):
-            violations.append(
-                f"the retrieved shape requires the {consumer} step to consume what "
-                f"{producer} produced, directly or through the nodes between them"
-            )
-    return violations
-
-
-def _transform_reachability(steps: Sequence[Any]) -> dict[str, set[str]]:
-    """Which transformations each node's output eventually feeds."""
-
-    transform_of: dict[str, str] = {}
-    consumers: dict[str, list[str]] = {}
-    for step in steps:
-        if not isinstance(step, dict):
-            continue
-        node = str(step.get("id") or "")
-        transform_of[node] = str(step.get("transform") or "").strip().upper()
-        for value in step.get("inputs") or step.get("depends_on") or []:
-            consumers.setdefault(str(value).lstrip("$").split(".", 1)[0], []).append(node)
-    reaches: dict[str, set[str]] = {}
-
-    def walk(node: str, seen: set[str]) -> set[str]:
-        if node in reaches:
-            return reaches[node]
-        found: set[str] = set()
-        for consumer in consumers.get(node, ()):
-            if consumer in seen:
-                continue
-            found.add(transform_of.get(consumer, ""))
-            found |= walk(consumer, seen | {consumer})
-        reaches[node] = found
-        return found
-
-    for node in transform_of:
-        walk(node, {node})
-    return reaches
-
-
-def _rank_templates(
-    analysis: dict[str, Any], question: str, *, limit: int
-) -> list[tuple[str, dict[str, Any]]]:
-    """Score every template on concept/role structure, then on the question's literal wording."""
-
-    lowered = question.casefold()
-    concept_hints = _analysis_retrieval_hints(analysis)
-    ranked: list[tuple[int, str, dict[str, Any]]] = []
-    for key, template in TEMPLATES.items():
-        score = 4 * sum(
-            1 for hint in template.get("affinity", ()) if hint.casefold() in concept_hints
+    factors = factor_nodes_from_concepts(concepts)
+    return [
+        template.as_dict()
+        for template in retrieve_macro_templates(
+            analysis.get("concepts") or [], factors, limit=limit
         )
-        score += _template_shape_score(template, analysis, lowered)
-        score += sum(1 for keyword in template["keywords"] if keyword.casefold() in lowered)
-        if score:
-            ranked.append((score, key, template))
-    ranked.sort(key=lambda item: (-item[0], item[1]))
-    chosen: list[tuple[str, dict[str, Any]]] = []
-    blocked: set[str] = set()
-    for _, key, template in ranked:
-        if key in blocked:
-            continue
-        chosen.append((key, template))
-        # Only a template that already outranked it can supersede one, since `ranked` is sorted.
-        # `Search-Rank-Ordinal` supersedes `Geocode-Batch-Compare` for exactly the reason the
-        # measurement gave: they are rival shapes for one question, and the loser's worked
-        # example is the wrong answer sitting beside the right one.
-        blocked |= set(template.get("supersedes", ()))
-        if len(chosen) >= limit:
-            break
-    return chosen
+    ]
 
 
 #: Turn texts into vectors. Supplied by the caller so the retrieval policy is a configuration
@@ -1369,201 +1364,23 @@ def retrieve_examples(
     limit: int = 2,
     embed: ExampleEmbedder | None = None,
 ) -> list[dict[str, Any]]:
-    """Top-k few-shot example graphs, retrieved separately from the macro-templates.
+    """Compatibility wrapper for embedding Question–validated-Graph retrieval."""
 
-    The two retrievals answer different questions and had been answering them with one score.
-    *Which macro-template* a question needs is a structural fact -- the concept graph names a
-    measure over a network, or a field restricted by a sub-condition -- and `retrieve_templates`
-    reads it off the concepts and roles. *Which worked example* helps most is a similarity
-    question, and similarity over prose is what an embedding is for.
+    from src.agent.retrieval import default_example_store
 
-    `embed` is the seam. With one, examples are ranked by cosine similarity between the question
-    and each example's description. Without one, they are ranked by the same deterministic
-    concept overlap as before, so behaviour is unchanged where no embedding service exists.
-    """
-
-    if embed is not None:
-        ranked = _embedding_ranking(_example_bank(), question, embed)
-        return [{"name": e["name"], "example": e["example"]} for e in ranked[:limit]]
-    # Structural retrieval, and the *same* structural retrieval the templates got. Ranking the
-    # two independently let them disagree -- a trip question was shown `Route-Optimize`'s pattern
-    # beside `Geocode-Batch-Compare`'s worked graph, and a planner copies the graph.
-    bank = {entry["key"]: entry for entry in _example_bank()}
+    del analysis
+    if embed is None:
+        return []
     return [
-        {"name": bank[key]["name"], "example": bank[key]["example"]}
-        for key, _template in _rank_templates(analysis, question, limit=limit)
-        if key in bank
+        {"name": example.example_id, "example": example.graph.as_dict()}
+        for example in default_example_store().retrieve(question, embed=embed, limit=limit)
     ]
-
-
-def _example_bank() -> list[dict[str, Any]]:
-    """The examples available for few-shot retrieval.
-
-    Today this is one worked graph per macro-template, which is where they already lived. Keeping
-    the bank behind a function is what lets it grow into recorded successful graphs without the
-    retrieval policy or its callers changing.
-    """
-
-    return [
-        {
-            "key": key,
-            "name": template["name"],
-            # The authored skeleton when there is one -- that is where the question-shape
-            # knowledge lives. Otherwise the worked operator graph lifted into the vocabulary,
-            # which is also what makes the round-trip test possible.
-            "example": {
-                "graph": SKELETONS.get(key)
-                or lift_to_semantic(template["example"]["graph"])
-            },
-            "pattern": template["pattern"],
-            "affinity": tuple(template.get("affinity", ())),
-            "keywords": tuple(template.get("keywords", ())),
-        }
-        for key, template in TEMPLATES.items()
-    ]
-
-
-def _embedding_ranking(
-    bank: list[dict[str, Any]], question: str, embed: ExampleEmbedder
-) -> list[dict[str, Any]]:
-    """Cosine similarity between the question and each example's own description."""
-
-    descriptions = [f"{entry['name']}: {entry['pattern']}" for entry in bank]
-    vectors = embed([question, *descriptions])
-    if len(vectors) != len(descriptions) + 1:
-        raise ValueError("embedder returned one vector per input, and did not")
-    asked, rest = vectors[0], vectors[1:]
-    scored = sorted(
-        zip(rest, bank, strict=True),
-        key=lambda pair: (-_cosine(asked, pair[0]), pair[1]["name"]),
-    )
-    return [entry for _, entry in scored]
-
-
-def _cosine(left: list[float], right: list[float]) -> float:
-    dot = sum(a * b for a, b in zip(left, right, strict=True))
-    scale = math.sqrt(sum(a * a for a in left)) * math.sqrt(sum(b * b for b in right))
-    return dot / scale if scale else 0.0
-
-
-def _analysis_retrieval_hints(analysis: dict[str, Any]) -> str:
-    """Flatten only concept-graph evidence used for deterministic template affinity.
-
-    Top-level ``intent`` is intentionally not traversed. Keeping this projection explicit makes
-    it impossible for arbitrary analysis metadata to become another hidden router.
-    """
-
-    values: list[str] = []
-    for key in ("measure", "target_type"):
-        value = analysis.get(key)
-        if value not in (None, ""):
-            values.append(str(value))
-    for concept in analysis.get("concepts") or []:
-        if not isinstance(concept, dict):
-            continue
-        # Location names and generic types such as ``object``/``amount`` say nothing about which
-        # macro should run. Restrict free text to the roles that state a requested measure or a
-        # narrowing condition; extent names remain available through the question fallback.
-        if concept.get("role") in {"measure", "condition", "sub_condition"}:
-            values.append(str(concept.get("text") or ""))
-        attributes = concept.get("attributes")
-        if isinstance(attributes, dict):
-            for key, value in attributes.items():
-                values.extend((str(key), str(value)))
-    return " ".join(values).casefold()
-
-
-def _template_shape_score(
-    template: dict[str, Any], analysis: dict[str, Any], lowered_question: str
-) -> int:
-    """Score declared graph shapes before falling back to literal keyword overlap."""
-
-    concepts = [value for value in (analysis.get("concepts") or []) if isinstance(value, dict)]
-    spatial_count = sum(
-        concept.get("concept_type") in {"location", "object"}
-        and concept.get("role") != "measure"
-        for concept in concepts
-    )
-    score = 0
-    if (
-        template.get("trip_literal")
-        and spatial_count >= 3
-        and re.search(
-            r"(→.*→|(?:\d+(?:\.\d+)?\s*(?:시간|분)).*(?:\d+(?:\.\d+)?\s*(?:시간|분))"
-            r"|방문\s*순서|몇\s*곳|일정|차례|순서로|순서대로|둘러|itinerary|trip)",
-            lowered_question,
-        )
-    ):
-        score += 16
-    if template.get("target_literal") and (
-        analysis.get("target_type")
-        or any(
-            concept.get("concept_type") == "object" and concept.get("role") != "measure"
-            for concept in concepts
-        )
-    ):
-        # The question asks for a *kind* of place, which is what separates "the nearest bank"
-        # from "which of these two is nearer". Structural: it reads the concept graph, not the
-        # question's wording, and `target_type` is what the Analysis stage is for.
-        score += 16
-    if template.get("radius_literal") and re.search(
-        r"(반경|이내|안에|내에)\s*|[\d,.]+\s*(?:km|m)\s*(?:이내|안|이하)", lowered_question
-    ):
-        # A stated radius is a sub-condition, and it decides the shape: the candidates are
-        # everything inside it, not the k nearest. Without this a radius question asking for a
-        # kind of place retrieved the ordinal shape, which ranks instead of counting.
-        score += 16
-    if template.get("network_literal") and re.search(
-        r"(자동차|차량|운전|주행|도로|경로|route|driv)", lowered_question
-    ):
-        score += 8
-    if template.get("listed_literal") and _lists_its_candidates(lowered_question):
-        # The question names the candidates it is asking about, so the graph resolves those
-        # rather than retrieving a neighbourhood. The two answer different questions: "how many
-        # of these four are within 300 m" and "how many banks are within 300 m".
-        score += 16
-    if template.get("subtype_literal") and _states_a_narrowed_kind(analysis, lowered_question):
-        # A kind written as a modifier plus a broad category -- 중식 음식점 -- needs the
-        # narrowing step between the retrieval and the ranking. Without it the ranking answers
-        # with the nearest place of the broad kind, which is what the other options are.
-        score += 16
-    if template.get("guidance_literal") and re.search(
-        r"(안내에\s*따르|주행\s*안내|회전|turn|manoeuvr|maneuver)", lowered_question
-    ):
-        # The answer is read off the driving guidance rather than off the route's totals, which
-        # is a different shape from "which route is shorter". Structural in the same way a
-        # stated radius is: without it a turn-count question retrieved Multi-Route-Compare and
-        # Filter-Aggregate-Measure, and never saw the shape that reads a step list at all.
-        score += 16
-    return score
-
-
-def _lists_its_candidates(question: str) -> bool:
-    """Does the question offer its own candidate list?  Structural, and read from the question."""
-
-    from src.agent.spatial import _extract_listed_places
-
-    return bool(_extract_listed_places(question))
-
-
-def _states_a_narrowed_kind(analysis: dict[str, Any], question: str) -> bool:
-    """Is the kind of place asked for a broad category with a narrowing modifier on it?"""
-
-    from src.agent.spatial import _extract_target_type
-
-    stated = _extract_target_type(question) or analysis.get("target_type")
-    if not stated:
-        return False
-    _broad, attribute = split_place_type(str(stated))
-    return bool(attribute)
 
 
 def normalize_analysis(
     payload: dict[str, Any],
     question: str,
-    fallback_intent: str,
     facts: Any = None,
-    options: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Normalize the Analysis stage's reply, completing it from `facts` where it came up short.
 
@@ -1579,7 +1396,6 @@ def normalize_analysis(
     it is evidence this pipeline had already gathered and was throwing away.
     """
 
-    intent = str(payload.get("intent", "")).strip().lower() or fallback_intent
     raw_measure = payload.get("measure")
     measure = str(raw_measure).strip() if raw_measure not in (None, "") else None
     raw_concepts = payload.get("concepts") or payload.get("concept_entities") or []
@@ -1588,7 +1404,9 @@ def normalize_analysis(
         for index, item in enumerate(raw_concepts):
             if not isinstance(item, dict):
                 continue
-            concept_type = str(item.get("concept_type") or item.get("type") or "object").lower()
+            concept_type = str(
+                item.get("core_concept") or item.get("concept_type") or item.get("type") or "object"
+            ).lower()
             role = str(item.get("role") or item.get("functional_role") or "support").lower()
             concepts.append(
                 {
@@ -1604,7 +1422,7 @@ def normalize_analysis(
             )
     if not concepts:
         concepts = _concepts_from_facts(facts, measure)
-    concepts = _repair_place_concepts(concepts, question, facts, options)
+    concepts = _repair_place_concepts(concepts, question, facts)
     if measure is None:
         measure = next(
             (
@@ -1627,7 +1445,6 @@ def normalize_analysis(
         stated = getattr(facts, "target_type", None)
         target_type = str(stated).strip() if isinstance(stated, str) and stated.strip() else None
     return {
-        "intent": intent,
         "concepts": concepts,
         "measure": measure,
         "target_type": target_type,
@@ -1639,10 +1456,10 @@ def normalize_analysis(
 _LONGEST_PLACE_NAME = 25
 
 
-def _known_names(facts: Any, options: Sequence[str]) -> list[str]:
-    """Every entity this question is already known to name, from the facts and the candidates."""
+def _known_names(facts: Any) -> list[str]:
+    """Every entity the spatial question itself is already known to name."""
 
-    known: list[str] = [str(option).strip() for option in options]
+    known: list[str] = []
     if facts is not None:
         known.extend(str(name).strip() for name in (getattr(facts, "listed_places", ()) or ()))
         stated = getattr(facts, "stated_places", None)
@@ -1700,7 +1517,7 @@ def _is_question_text(text: str, question: str) -> bool:
 
 
 def _repair_place_concepts(
-    concepts: list[dict[str, Any]], question: str, facts: Any, options: Sequence[str]
+    concepts: list[dict[str, Any]], question: str, facts: Any
 ) -> list[dict[str, Any]]:
     """Reconcile the Analysis stage's concepts with what the question was read to state.
 
@@ -1715,7 +1532,7 @@ def _repair_place_concepts(
     carries ``attributes["source"] = "fact_completion"`` so a report can count them.
     """
 
-    known = _known_names(facts, options)
+    known = _known_names(facts)
     repaired: list[dict[str, Any]] = []
     for concept in concepts:
         text = str(concept.get("text") or "")
@@ -1756,9 +1573,7 @@ def _repair_place_concepts(
         if str(name).strip()
     ]
     if listed:
-        present = {
-            "".join(str(concept.get("text") or "").split()) for concept in repaired
-        }
+        present = {"".join(str(concept.get("text") or "").split()) for concept in repaired}
         missing = [name for name in listed if "".join(name.split()) not in present]
         anchor = next(
             (concept["id"] for concept in repaired if concept.get("role") == "extent"), None
@@ -1801,8 +1616,7 @@ def _concepts_from_facts(facts: Any, measure: str | None) -> list[dict[str, Any]
     target = getattr(facts, "target_type", None) if facts is not None else None
     if isinstance(target, str) and target.strip():
         built.append(
-            concept("target_type", target.strip(), "object", "support",
-                    ["anchor"] if built else [])
+            concept("target_type", target.strip(), "object", "support", ["anchor"] if built else [])
         )
     for index, stay in enumerate(getattr(facts, "stays", ()) or ()):
         name = stay[0]
@@ -1816,8 +1630,13 @@ def _concepts_from_facts(facts: Any, measure: str | None) -> list[dict[str, Any]
     for index, name in enumerate(listed or ()):
         if str(name).strip():
             built.append(
-                concept(f"listed_{index}", str(name).strip(), "location", "support",
-                        ["anchor"] if built else [])
+                concept(
+                    f"listed_{index}",
+                    str(name).strip(),
+                    "location",
+                    "support",
+                    ["anchor"] if built else [],
+                )
             )
     if not built:
         # Nothing stated that any extractor could find. A measure alone is still a valid graph:
@@ -2074,8 +1893,7 @@ def factorize_geoflow(
         valid_bindings = {
             str(binding.get("concept_id")): dict(binding)
             for binding in bindings or []
-            if isinstance(binding, dict)
-            and str(binding.get("concept_id")) in step["concept_ids"]
+            if isinstance(binding, dict) and str(binding.get("concept_id")) in step["concept_ids"]
         }
         bindings = [
             valid_bindings.get(concept_id, {"concept_id": concept_id, "path": "$"})
@@ -2101,9 +1919,7 @@ def factorize_geoflow(
     # EXTENT. Add a single, local anchoring edge rather than the old role-adjacency complete
     # bipartite fallback.
     contextual = [
-        concept_id
-        for concept_id, concept in concepts.items()
-        if concept.role in CONTEXTUAL_ROLES
+        concept_id for concept_id, concept in concepts.items() if concept.role in CONTEXTUAL_ROLES
     ]
     incoming = {concept_id: set() for concept_id in concepts}
     for source, target in concept_edges:
@@ -2204,11 +2020,7 @@ def _complete_analysis_roles(
 ) -> list[dict[str, Any]]:
     completed = [dict(concept) for concept in concepts]
     known_ids = {str(concept["id"]) for concept in completed}
-    extents = [
-        concept
-        for concept in completed
-        if concept["role"] in {"extent", "temporal_extent"}
-    ]
+    extents = [concept for concept in completed if concept["role"] in {"extent", "temporal_extent"}]
     if not extents:
         extent_id = _unique_id("question_context", known_ids)
         completed.insert(
@@ -2373,9 +2185,7 @@ def _normalize_statically_known_argument_values(
     return normalized
 
 
-def _statically_known_collection_length(
-    value: Any, by_id: dict[str, dict[str, Any]]
-) -> int | None:
+def _statically_known_collection_length(value: Any, by_id: dict[str, dict[str, Any]]) -> int | None:
     """Collection cardinality when literals or a literal batch_geocode node make it knowable."""
 
     if isinstance(value, list):
@@ -2514,11 +2324,7 @@ def _validate_statically_known_argument_values(
 
         start = _static_int(arguments.get("start_index", 0), name="tsp_tw.start_index")
         end_value = arguments.get("end_index")
-        end = (
-            _static_int(end_value, name="tsp_tw.end_index")
-            if end_value is not None
-            else None
-        )
+        end = _static_int(end_value, name="tsp_tw.end_index") if end_value is not None else None
         fixed_order = _static_flag(arguments.get("fixed_order", False))
         if fixed_order and end is not None:
             raise ValueError(
@@ -2533,8 +2339,7 @@ def _validate_statically_known_argument_values(
                     "start while return_to_start is true; omit end_index"
                 )
             raise ValueError(
-                f"GeoFlow node {step['id']} cannot both return to the start and end at "
-                "another node"
+                f"GeoFlow node {step['id']} cannot both return to the start and end at another node"
             )
 
 
@@ -2758,10 +2563,7 @@ def normalize_and_validate_graph(
             raise ValueError(f"GeoFlow node {step_id} is missing arguments: {', '.join(missing)}")
         if operator == "place_search" and not (
             "query" in arguments
-            or (
-                "center" in arguments
-                and ({"query", "category_code"} & arguments.keys())
-            )
+            or ("center" in arguments and ({"query", "category_code"} & arguments.keys()))
         ):
             raise ValueError("place_search requires query, or center with query/category_code")
         if operator == "nearby_places" and not ({"query", "category_code"} & arguments.keys()):
@@ -2819,10 +2621,7 @@ def normalize_and_validate_graph(
         # does not have.
         _validate_statically_known_argument_values(steps, by_id)
     consumed = {
-        dependency
-        for step in steps
-        for dependency in step["depends_on"]
-        if dependency in by_id
+        dependency for step in steps for dependency in step["depends_on"] if dependency in by_id
     }
     for step in steps:
         if step["role"] == "measure" and step["id"] in consumed:
@@ -2845,9 +2644,7 @@ def normalize_and_validate_graph(
         if len(resolvable) != len(step["depends_on"]):
             if not resolvable and step["role"] not in CONTEXTUAL_ROLES:
                 unknown = [name for name in step["depends_on"] if name not in by_id]
-                raise ValueError(
-                    f"Unknown dependency {unknown[0]!r} on GeoFlow node {step['id']}"
-                )
+                raise ValueError(f"Unknown dependency {unknown[0]!r} on GeoFlow node {step['id']}")
             step["depends_on"] = resolvable
         for dependency in step["depends_on"]:
             # G2 on the executable graph, and never skipped. This is the paper's constraint: the
@@ -2886,11 +2683,7 @@ def normalize_and_validate_graph(
                     )
 
     ordered = _topological_sort(steps)
-    extents = {
-        step["id"]
-        for step in steps
-        if step["role"] in {"extent", "temporal_extent"}
-    }
+    extents = {step["id"] for step in steps if step["role"] in {"extent", "temporal_extent"}}
     if not extents:
         raise ValueError("GeoFlow graph has no EXTENT or TEXTENT contextual node")
     measures = {step["id"] for step in steps if step["role"] == "measure"}
@@ -2967,20 +2760,14 @@ def normalize_and_validate_graph(
                 if isinstance(binding, dict)
             }
             if not set(step["concept_ids"]) <= binding_ids:
-                raise ValueError(
-                    f"GeoFlow operator output bindings are incomplete: {step['id']}"
-                )
+                raise ValueError(f"GeoFlow operator output bindings are incomplete: {step['id']}")
         concept_by_id = {
             str(node["id"]): node
             for node in concept_nodes
             if isinstance(node, dict) and node.get("id")
         }
-        concept_outgoing: dict[str, set[str]] = {
-            concept_id: set() for concept_id in concept_by_id
-        }
-        concept_incoming: dict[str, set[str]] = {
-            concept_id: set() for concept_id in concept_by_id
-        }
+        concept_outgoing: dict[str, set[str]] = {concept_id: set() for concept_id in concept_by_id}
+        concept_incoming: dict[str, set[str]] = {concept_id: set() for concept_id in concept_by_id}
         concept_edges: list[tuple[str, str]] = []
         for edge in concept_graph_payload.get("edges") or []:
             if not isinstance(edge, dict):
@@ -3012,9 +2799,7 @@ def normalize_and_validate_graph(
                 for concept_id, node in concept_by_id.items()
                 if concept_id not in concept_consumed
             ]
-            promoted = [
-                node for _, node in terminals if node.get("role") not in CONTEXTUAL_ROLES
-            ]
+            promoted = [node for _, node in terminals if node.get("role") not in CONTEXTUAL_ROLES]
             if not promoted:
                 # Every terminal is labelled with a contextual role. The Analysis stage does that
                 # for an answer it thinks of as a place — "the nearest bank" is a location.
@@ -3059,9 +2844,7 @@ def normalize_and_validate_graph(
             raise ValueError("Concept graph requires contextual and Measure concepts")
         for concept_id in concept_by_id:
             if not _reachable_in_graph(concept_id, concept_incoming, concept_extents):
-                raise ValueError(
-                    f"Concept is not reachable from EXTENT/TEXTENT: {concept_id}"
-                )
+                raise ValueError(f"Concept is not reachable from EXTENT/TEXTENT: {concept_id}")
             if not _reachable_in_graph(concept_id, concept_outgoing, concept_measures):
                 raise ValueError(f"Concept does not contribute to a Measure: {concept_id}")
 
@@ -3302,11 +3085,7 @@ def _rewrite_placeholder_references(
     if not isinstance(value, str):
         return value
     stripped = value.strip()
-    if (
-        allow_bare_reference
-        and stripped in known_ids
-        and stripped in declared_dependencies
-    ):
+    if allow_bare_reference and stripped in known_ids and stripped in declared_dependencies:
         return f"${stripped}"
     reference = canonical_reference(value)
     if not reference.startswith("$"):

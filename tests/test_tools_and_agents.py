@@ -21,7 +21,6 @@ from src.agent.spatial import (
     _bind_named_places,
     _compact_evaluation_evidence,
     _ground_graph_literals,
-    _heuristic_intent,
     _resolve_output_binding,
     _resolve_references,
     extract_facts,
@@ -119,6 +118,46 @@ class QueuedLLM:
         return self.responses.pop(0)
 
 
+PAPER_PLAN = json.dumps(
+    {
+        "concept_nodes": [
+            {
+                "id": "anchor",
+                "text": "경복궁",
+                "core_concept": "location",
+                "functional_role": "extent",
+                "attributes": {},
+            },
+            {
+                "id": "answer",
+                "text": "grounded place",
+                "core_concept": "object",
+                "functional_role": "measure",
+                "attributes": {},
+            },
+        ],
+        "factor_nodes": [],
+        "transformation_edges": [
+            {
+                "id": "resolve",
+                "transformation": "RESOLVE_PLACES",
+                "input_concepts": [],
+                "output_concepts": ["anchor"],
+                "factor_nodes": [],
+            },
+            {
+                "id": "measure",
+                "transformation": "MEASURE",
+                "input_concepts": ["anchor"],
+                "output_concepts": ["answer"],
+                "factor_nodes": [],
+            },
+        ],
+    },
+    ensure_ascii=False,
+)
+
+
 def test_react_executes_common_tool_then_parses_answer() -> None:
     llm = QueuedLLM(
         [
@@ -142,9 +181,7 @@ def test_react_preserves_a_tool_error_even_when_it_recovers_an_answer() -> None:
         ]
     )
 
-    result = ReactAgent(llm, ToolRegistry(FakeProvider()), max_steps=3).answer(
-        "질문", ["A", "B"]
-    )
+    result = ReactAgent(llm, ToolRegistry(FakeProvider()), max_steps=3).answer("질문", ["A", "B"])
 
     assert result.predicted_answer == 1
     assert result.failure_type is None
@@ -344,9 +381,7 @@ def test_the_native_loop_stays_available_as_the_ablation_it_is() -> None:
             LLMResponse("^^1^^"),
         ]
     )
-    agent = ReactAgent(
-        llm, ToolRegistry(FakeProvider()), max_steps=5, single_action=False
-    )
+    agent = ReactAgent(llm, ToolRegistry(FakeProvider()), max_steps=5, single_action=False)
     result = agent.answer("질문", ["A", "B", "C", "D"])
     assert result.tool_calls == 2
     assert result.predicted_answer == 1
@@ -355,12 +390,9 @@ def test_the_native_loop_stays_available_as_the_ablation_it_is() -> None:
 def test_spatial_agent_runs_paper_aligned_pipeline() -> None:
     llm = QueuedLLM(
         [
-            LLMResponse('{"intent":"poi"}'),
-            LLMResponse(
-                '{"steps":[{"id":"s1","operator":"place_search",'
-                '"arguments":{"query":"경복궁","limit":1}}]}'
-            ),
-            LLMResponse('{"predicted_option":1,"confidence":0.9,"reason":"evidence"}'),
+            LLMResponse("{}"),
+            LLMResponse(PAPER_PLAN),
+            LLMResponse('{"value":"B","text":"B","confidence":0.9,"reason":"evidence"}'),
         ]
     )
     agent = SpatialAgent(llm, ToolRegistry(FakeProvider()), max_steps=3)
@@ -374,25 +406,26 @@ def test_spatial_agent_runs_paper_aligned_pipeline() -> None:
         "analyze",
         "retrieve_templates",
         "compose",
+        "construct_geoflow",
         "transform",
         "factorize",
         "validate",
         "execute",
-        "evaluate",
+        "grounded_answer",
+        "mcq_adapt",
         "generate",
     ]
     assert result.tool_calls == 1
     assert result.api_calls == 1
-    assert result.predicted_intent == "poi"
-    # The first call predicts the reporting label. Planner and evaluator calls never receive it.
+    assert result.predicted_intent is None
     assert '"intent"' not in llm.messages[1][1]["content"]
     assert "Intent:" not in llm.messages[-1][1]["content"]
 
 
 def test_normalized_measure_does_not_fall_back_to_predicted_intent() -> None:
-    analysis = normalize_analysis({"intent": "trip"}, "질문", "poi")
+    analysis = normalize_analysis({"intent": "trip"}, "질문")
 
-    assert analysis["intent"] == "trip"
+    assert "intent" not in analysis
     assert analysis["measure"] == "answer choice"
     assert analysis["concepts"][-1]["text"] == "answer choice"
 
@@ -463,9 +496,10 @@ def test_spatial_evaluation_prompt_compacts_repeated_large_operator_state() -> N
     assert "장소 44" not in encoded
     assert '"phone": "02-0000-0000"' in encoded
     # Prompt projection must not mutate the full trace that reports and per-query logs retain.
-    assert json.dumps(
-        {"steps": execution_log, "final_state": concept_state}, ensure_ascii=False
-    ) == original
+    assert (
+        json.dumps({"steps": execution_log, "final_state": concept_state}, ensure_ascii=False)
+        == original
+    )
 
 
 def test_a_plan_only_our_own_rules_reject_still_gets_executed() -> None:
@@ -496,29 +530,13 @@ def test_a_plan_only_our_own_rules_reject_still_gets_executed() -> None:
         ]
     )
 
-    result = SpatialAgent(llm, ToolRegistry(FakeProvider()), max_steps=4).answer(
-        "질문", ["A", "B"]
-    )
+    result = SpatialAgent(llm, ToolRegistry(FakeProvider()), max_steps=4).answer("질문", ["A", "B"])
 
-    assert result.failure_type is None
-    assert result.predicted_answer == 1
+    assert result.failure_type == "graph_validation_failure"
+    assert result.predicted_answer is None
     stages = [entry["stage"] for entry in result.trace]
-    assert "repair" in stages and "execute" in stages
-    lenient = [
-        entry
-        for entry in result.trace
-        if entry["stage"] == "validate" and entry.get("status") == "lenient"
-    ]
-    assert lenient and "Type compatibility" in lenient[0]["error"]
-    assert lenient[0]["plan_source"] == "original"
-    rejected_repair = next(
-        entry
-        for entry in result.trace
-        if entry["stage"] == "validate"
-        and entry.get("mode") == "lenient"
-        and entry.get("plan_source") == "repaired"
-    )
-    assert rejected_repair["status"] == "invalid"
+    assert "repair" in stages and "execute" not in stages
+    assert all(entry.get("status") != "lenient" for entry in result.trace)
 
 
 def test_lenient_validation_executes_a_structurally_repaired_graph_first() -> None:
@@ -549,23 +567,11 @@ def test_lenient_validation_executes_a_structurally_repaired_graph_first() -> No
         ]
     )
 
-    result = SpatialAgent(llm, ToolRegistry(FakeProvider()), max_steps=4).answer(
-        "질문", ["A", "B"]
-    )
+    result = SpatialAgent(llm, ToolRegistry(FakeProvider()), max_steps=4).answer("질문", ["A", "B"])
 
-    assert result.failure_type is None
-    assert result.predicted_answer == 1
-    execute = next(entry for entry in result.trace if entry["stage"] == "execute")
-    assert [step["id"] for step in execute["steps"]] == [
-        "repaired_place",
-        "repaired_measure",
-    ]
-    lenient = next(
-        entry
-        for entry in result.trace
-        if entry["stage"] == "validate" and entry.get("status") == "lenient"
-    )
-    assert lenient["plan_source"] == "repaired"
+    assert result.failure_type == "graph_validation_failure"
+    assert result.predicted_answer is None
+    assert not any(entry["stage"] == "execute" for entry in result.trace)
 
 
 def test_spatial_agent_preserves_recovered_operator_errors() -> None:
@@ -580,18 +586,11 @@ def test_spatial_agent_preserves_recovered_operator_errors() -> None:
         ]
     )
 
-    result = SpatialAgent(llm, ToolRegistry(FakeProvider()), max_steps=4).answer(
-        "질문", ["A", "B"]
-    )
+    result = SpatialAgent(llm, ToolRegistry(FakeProvider()), max_steps=4).answer("질문", ["A", "B"])
 
-    assert result.predicted_answer == 0
-    assert result.failure_type is None
-    assert len(result.execution_errors) == 2
-    assert result.execution_errors[0]["step_id"] == "empty_rank"
-    assert result.execution_errors[0]["operator"] == "select_by_index"
-    assert "empty collection" in result.execution_errors[0]["error"]
-    assert result.execution_errors[1]["operator"] == "identity_measure"
-    assert "depends on failed step" in result.execution_errors[1]["error"]
+    assert result.predicted_answer is None
+    assert result.failure_type == "graph_validation_failure"
+    assert result.execution_errors == []
 
 
 def test_registry_returns_error_observation_instead_of_raising() -> None:
@@ -623,9 +622,7 @@ def test_registry_clamps_llm_generated_kakao_limits() -> None:
 def test_registry_infers_exact_kakao_category_for_station_search() -> None:
     registry = ToolRegistry(FakeProvider())
     centre = registry.invoke("place_search", {"query": "경복궁"}).output[0]["place_id"]
-    execution = registry.invoke(
-        "nearby_places", {"center": centre, "query": "역", "radius_m": 300}
-    )
+    execution = registry.invoke("nearby_places", {"center": centre, "query": "역", "radius_m": 300})
     assert execution.status == "ok"
     assert execution.arguments["category_code"] == "SW8"
 
@@ -975,9 +972,7 @@ def test_geoflow_validation_rejects_out_of_range_batch_geocode_reference(
     }
 
     with pytest.raises(ValueError, match="has 3 place_names"):
-        normalize_and_validate_graph(
-            graph, max_steps=8, strict_types=strict_types
-        )
+        normalize_and_validate_graph(graph, max_steps=8, strict_types=strict_types)
 
 
 def test_geoflow_validation_rejects_a_field_projection_from_batch_geocode_list() -> None:
@@ -1115,7 +1110,7 @@ def test_factorization_binds_every_analysis_concept_and_validates() -> None:
             ],
         },
         "서울역에서 가장 가까운 카페는?",
-        extract_facts({}, "서울역에서 가장 가까운 카페는?"),
+        facts=extract_facts({}, "서울역에서 가장 가까운 카페는?"),
     )
     factorized = factorize_geoflow(
         analysis,
@@ -1248,9 +1243,7 @@ def test_each_appendix_e_template_is_executable(template_key: str) -> None:
 
     provider_tools = ToolRegistry(FakeProvider())
     operators = SpatialOperatorRegistry()
-    provider_names = {
-        schema["function"]["name"] for schema in provider_tools.schemas()
-    }
+    provider_names = {schema["function"]["name"] for schema in provider_tools.schemas()}
     ordered, constraints = normalize_and_validate_graph(
         TEMPLATES[template_key]["example"], max_steps=20
     )
@@ -1309,7 +1302,7 @@ def test_concept_edges_are_not_inferred_from_role_levels() -> None:
             ],
         },
         "질문",
-        extract_facts({}, "질문"),
+        facts=extract_facts({}, "질문"),
     )
     assert build_concept_graph(analysis).edges == ()
 
@@ -1424,16 +1417,9 @@ def test_contextual_roles_are_not_part_of_g2_precedence() -> None:
 def test_llm_generation_is_not_overwritten_by_rule_matcher() -> None:
     llm = QueuedLLM(
         [
-            LLMResponse('{"intent":"type"}'),
-            LLMResponse(
-                '{"graph":['
-                '{"id":"place","operator":"place_search",'
-                '"arguments":{"query":"경복궁","limit":1},"role":"extent"},'
-                '{"id":"match","operator":"match_type_options",'
-                '"arguments":{"place":"$place.0","options":["관광명소","은행"]},'
-                '"role":"measure"}]}'
-            ),
-            LLMResponse('{"predicted_option":1,"confidence":0.2,"reason":"generated"}'),
+            LLMResponse("{}"),
+            LLMResponse(PAPER_PLAN),
+            LLMResponse('{"value":"은행","text":"은행","confidence":0.2,"reason":"generated"}'),
         ]
     )
     result = SpatialAgent(llm, ToolRegistry(FakeProvider()), max_steps=4).answer(
@@ -1757,7 +1743,7 @@ def test_factorization_keeps_radius_and_category_as_operator_factors() -> None:
             ],
         },
         "기준점 반경 500m 안에 있는 카페 목록은 무엇인가요?",
-        extract_facts({}, "기준점 반경 500m 안에 있는 카페 목록은 무엇인가요?"),
+        facts=extract_facts({}, "기준점 반경 500m 안에 있는 카페 목록은 무엇인가요?"),
     )
     factorized = factorize_geoflow(
         analysis,
@@ -1958,10 +1944,8 @@ def test_spatial_agent_handles_google_style_references_without_aborting() -> Non
     )
     agent = SpatialAgent(llm, ToolRegistry(FakeProvider()), max_steps=3)
     result = agent.answer("질문", ["A", "B"])
-    execute = next(stage for stage in result.trace if stage["stage"] == "execute")
-    assert [step["status"] for step in execute["steps"]] == ["ok", "ok", "ok"]
-    assert result.predicted_answer == 1
-    assert result.failure_type is None
+    assert result.failure_type == "graph_validation_failure"
+    assert not any(stage["stage"] == "execute" for stage in result.trace)
 
 
 def test_overspecified_plan_reference_degrades_to_the_closest_resolvable_object() -> None:
@@ -1980,11 +1964,8 @@ def test_overspecified_plan_reference_degrades_to_the_closest_resolvable_object(
         ]
     )
     result = SpatialAgent(llm, ToolRegistry(FakeProvider()), max_steps=2).answer("질문", ["A", "B"])
-    execute = next(stage for stage in result.trace if stage["stage"] == "execute")
-    assert [step["status"] for step in execute["steps"]] == ["ok", "ok"]
-    assert execute["steps"][1]["result"]["distance_m"] == 0.0
-    assert result.predicted_answer == 1
-    assert result.failure_type is None
+    assert result.failure_type == "graph_validation_failure"
+    assert result.predicted_answer is None
 
 
 def test_unresolvable_plan_reference_is_isolated_and_evaluation_still_runs() -> None:
@@ -2003,21 +1984,15 @@ def test_unresolvable_plan_reference_is_isolated_and_evaluation_still_runs() -> 
         ]
     )
     result = SpatialAgent(llm, ToolRegistry(FakeProvider()), max_steps=2).answer("질문", ["A", "B"])
-    execute = next(stage for stage in result.trace if stage["stage"] == "execute")
-    assert execute["steps"][1]["status"] == "error"
-    assert "PlaceNotFoundError" in execute["steps"][1]["error"]
-    assert result.predicted_answer == 1
-    assert result.failure_type is None
+    assert result.failure_type == "graph_validation_failure"
+    assert result.predicted_answer is None
 
 
 def test_generation_prefers_exact_answer_text_over_a_miscounted_index() -> None:
     llm = QueuedLLM(
         [
-            LLMResponse('{"intent":"poi"}'),
-            LLMResponse(
-                '{"steps":[{"id":"s1","operator":"place_search",'
-                '"arguments":{"query":"경복궁","limit":1}}]}'
-            ),
+            LLMResponse("{}"),
+            LLMResponse(PAPER_PLAN),
             LLMResponse(
                 '{"predicted_answer":"경복궁","predicted_option":0,'
                 '"confidence":0.9,"reason":"category evidence"}'
@@ -2029,20 +2004,17 @@ def test_generation_prefers_exact_answer_text_over_a_miscounted_index() -> None:
         "질문", ["창덕궁", "경복궁"]
     )
 
-    evaluate = next(stage for stage in result.trace if stage["stage"] == "evaluate")
+    evaluate = next(stage for stage in result.trace if stage["stage"] == "mcq_adapt")
     assert result.predicted_answer == 1
-    assert evaluate["selection_method"] == "exact_answer_text"
+    assert evaluate["selection_method"] == "exact_grounded_text"
     assert result.response == "^^1^^"
 
 
-def test_generation_falls_back_to_the_declared_index_without_matching_text() -> None:
+def test_generation_does_not_accept_a_declared_index_without_matching_text() -> None:
     llm = QueuedLLM(
         [
-            LLMResponse('{"intent":"poi"}'),
-            LLMResponse(
-                '{"steps":[{"id":"s1","operator":"place_search",'
-                '"arguments":{"query":"경복궁","limit":1}}]}'
-            ),
+            LLMResponse("{}"),
+            LLMResponse(PAPER_PLAN),
             LLMResponse(
                 '{"predicted_answer":"알 수 없음","predicted_option":1,'
                 '"confidence":0.4,"reason":"weak evidence"}'
@@ -2054,32 +2026,10 @@ def test_generation_falls_back_to_the_declared_index_without_matching_text() -> 
         "질문", ["창덕궁", "경복궁"]
     )
 
-    evaluate = next(stage for stage in result.trace if stage["stage"] == "evaluate")
-    assert result.predicted_answer == 1
-    assert evaluate["selection_method"] == "predicted_option"
-
-
-def test_spatial_router_heuristics_cover_extended_intents() -> None:
-    questions = {
-        "type": "농협은행 불암지점의 장소 유형은 무엇인가요?",
-        "direction": "GS25 언주제일에서 북쪽에 있는 가장 가까운 카페는?",
-        "distance": "서울역과 숭례문 사이의 직선거리는 약 얼마인가요?",
-        "radius": "서울역 반경 500m 안에 있는 편의점 목록은 무엇인가요?",
-    }
-    assert {intent: _heuristic_intent(question) for intent, question in questions.items()} == {
-        intent: intent for intent in questions
-    }
-
-
-def test_spatial_router_prioritizes_trip_and_routing_over_nearest_wording() -> None:
-    assert (
-        _heuristic_intent(
-            "에슬로우서울역점에서 출발해 두 곳을 차례로 방문할 때 "
-            "총 자동차 이동거리가 가장 짧은 일정은?"
-        )
-        == "trip"
-    )
-    assert _heuristic_intent("서울역에서 자동차 최단거리 경로로 가장 가까운 목적지는?") == "routing"
+    evaluate = next(stage for stage in result.trace if stage["stage"] == "mcq_adapt")
+    assert result.predicted_answer is None
+    assert result.failure_type == "answer_parse_failure"
+    assert evaluate["selection_method"] == "unresolved"
 
 
 def test_batch_geocode_prefers_the_right_brand_over_an_unrelated_namesake() -> None:
@@ -2121,16 +2071,25 @@ def test_batch_reconciliation_leaves_a_multi_name_anchor_where_it_resolved() -> 
     """Scattered option brands must not out-vote the anchor and move the whole batch."""
 
     anchor = Place(
-        place_id="anchor", name="GS25 오류행복점", address="서울 구로구",
-        latitude=37.4940, longitude=126.8420,
+        place_id="anchor",
+        name="GS25 오류행복점",
+        address="서울 구로구",
+        latitude=37.4940,
+        longitude=126.8420,
     )
     near = Place(
-        place_id="near", name="파리바게뜨 오류역점", address="서울 구로구",
-        latitude=37.4960, longitude=126.8450,
+        place_id="near",
+        name="파리바게뜨 오류역점",
+        address="서울 구로구",
+        latitude=37.4960,
+        longitude=126.8450,
     )
     far = Place(
-        place_id="far", name="뚜레쥬르 영등포도림점", address="서울 영등포구",
-        latitude=37.5100, longitude=126.9000,
+        place_id="far",
+        name="뚜레쥬르 영등포도림점",
+        address="서울 영등포구",
+        latitude=37.5100,
+        longitude=126.9000,
     )
 
     class ScatteredProvider(FakeProvider):
@@ -2163,12 +2122,19 @@ def test_batch_reconciliation_leaves_a_multi_name_anchor_where_it_resolved() -> 
 
 def test_option_recovery_excludes_the_anchor_and_honours_the_asked_for_category() -> None:
     anchor = Place(
-        place_id="bookstore", name="교보문고 목동점", address="서울 양천구",
-        latitude=37.5280, longitude=126.8750,
+        place_id="bookstore",
+        name="교보문고 목동점",
+        address="서울 양천구",
+        latitude=37.5280,
+        longitude=126.8750,
     )
     station = Place(
-        place_id="station", name="오목교역 5호선", address="서울 양천구",
-        latitude=37.5245, longitude=126.8752, category="교통,수송 > 지하철 > 수도권",
+        place_id="station",
+        name="오목교역 5호선",
+        address="서울 양천구",
+        latitude=37.5245,
+        longitude=126.8752,
+        category="교통,수송 > 지하철 > 수도권",
     )
 
     class StationProvider(FakeProvider):
@@ -2282,8 +2248,11 @@ def test_option_recovery_drops_a_namesake_outside_the_asked_radius() -> None:
     """The nationwide fallback answers "anywhere", which a proximity question never asks."""
 
     anchor = Place(
-        place_id="anchor", name="먹골", address="서울 중랑구",
-        latitude=37.6100, longitude=127.0770,
+        place_id="anchor",
+        name="먹골",
+        address="서울 중랑구",
+        latitude=37.6100,
+        longitude=127.0770,
     )
 
     class NationwideProvider(FakeProvider):
@@ -2295,8 +2264,11 @@ def test_option_recovery_drops_a_namesake_outside_the_asked_radius() -> None:
             self._api_calls += 1
             return [
                 Place(
-                    place_id="faraway", name="꽃담공방", address="전남 순천시",
-                    latitude=34.9500, longitude=127.4870,
+                    place_id="faraway",
+                    name="꽃담공방",
+                    address="전남 순천시",
+                    latitude=34.9500,
+                    longitude=127.4870,
                 )
             ]
 
@@ -2769,9 +2741,7 @@ def test_place_names_a_geocode_answered_under_another_spelling_still_bind() -> N
             }
         ]
     }
-    bound = _bind_named_places(
-        {"anchor": "이마트 미아점 - 서울특별시 성북구 도봉로 17"}, results
-    )
+    bound = _bind_named_places({"anchor": "이마트 미아점 - 서울특별시 성북구 도봉로 17"}, results)
     assert bound["anchor"]["place_id"] == "2"
 
 
@@ -2874,10 +2844,14 @@ def test_pair_endpoints_written_as_names_bind_like_any_other_place() -> None:
 
     results = {
         "geo": [
-            {"query": "보라믹", "place": {"place_id": "1", "name": "보라믹",
-                                          "latitude": 37.5, "longitude": 127.0}},
-            {"query": "봉제산", "place": {"place_id": "2", "name": "봉제산",
-                                          "latitude": 37.6, "longitude": 126.9}},
+            {
+                "query": "보라믹",
+                "place": {"place_id": "1", "name": "보라믹", "latitude": 37.5, "longitude": 127.0},
+            },
+            {
+                "query": "봉제산",
+                "place": {"place_id": "2", "name": "봉제산", "latitude": 37.6, "longitude": 126.9},
+            },
         ]
     }
     bound = _bind_named_pairs(
@@ -3075,9 +3049,7 @@ def test_a_geocode_node_written_where_its_places_belong_is_flattened() -> None:
         }
         for index, name in enumerate(["출발지", "첫째", "둘째", "출발지"])
     ]
-    args = CalculateFinishTimeArgs.model_validate(
-        {"start_time": "10:00", "locations": [records]}
-    )
+    args = CalculateFinishTimeArgs.model_validate({"start_time": "10:00", "locations": [records]})
     assert [place.name for place in args.locations] == ["출발지", "첫째", "둘째", "출발지"]
 
 

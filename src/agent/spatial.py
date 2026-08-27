@@ -8,30 +8,35 @@ from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from typing import Any
 
+from src.agent.answering import grounded_answer_from_payload
 from src.agent.base import (
     AgentResult,
     BenchmarkAgent,
     find_provider_failure,
-    format_question,
+)
+from src.agent.concepts import ConceptNode, factor_nodes_from_concepts
+from src.agent.factorization import (
+    attach_grounding_factors,
+    factorize_plan,
+    plan_to_geoflow,
 )
 from src.agent.geoflow import (
     OPERATOR_CONTRACTS,
-    ExampleEmbedder,
     OperatorContract,
     canonical_reference,
-    conformance_violations,
     factorize_geoflow,
     normalize_analysis,
     normalize_and_validate_graph,
     reference_expression,
-    retrieve_examples,
-    retrieve_templates,
     split_reference_arithmetic,
 )
-from src.agent.semantics import (
-    factorize_semantic_graph,
-    transform_catalogue,
+from src.agent.retrieval import (
+    ExampleEmbedder,
+    QuestionGraphExampleStore,
+    default_example_store,
+    retrieve_macro_templates,
 )
+from src.agent.semantics import transform_catalogue
 from src.llm import (
     ChatClient,
     LLMContextOverflowError,
@@ -39,17 +44,14 @@ from src.llm import (
     LLMUnavailableError,
     TokenUsage,
 )
-from src.parsing import parse_answer, parse_json_object
+from src.mcq_adapter import MCQAdapter
+from src.parsing import parse_json_object
 from src.tools import SpatialOperatorRegistry, ToolRegistry
 from src.tools.map import canonical_retrieval_specs
 from src.tools.spatial import (
     parse_coordinate_literal,
     split_place_type,
     strip_location_qualifier,
-)
-
-SUPPORTED_INTENTS = frozenset(
-    {"nearby", "poi", "routing", "trip", "type", "direction", "distance", "radius"}
 )
 
 # Retrieval budget for grounded nearby searches. Nearby results come back nearest-first, so a
@@ -62,21 +64,6 @@ ANALYSIS_PROMPT = """You are Spatial-Agent's Spatial Information Theory Analysis
 Extract the spatial entities and assign one scientific core concept and one functional role.
 Core concepts: location, object, field, event, network, amount, proportion.
 Functional roles: extent, temporal_extent, sub_condition, condition, support, measure.
-Classify intent as nearby, poi, routing, trip, type, direction, distance, or radius.
-Use distance only for straight-line/geodesic distance, routing for road-network routes, and radius
-when an explicit search radius is given. A question that names a cardinal direction (동/서/남/북쪽,
-북동/남동/남서/북서쪽) is direction even when it also asks for the nearest one: the direction is
-the constraint that decides the answer. A question asking which place is nearest is nearby, not
-distance; distance is for a numeric separation.
-A question that names a place to start from plus two or more places to visit — with how long to
-spend at each, or a total time available, or both — is trip, and asks either for the visiting order
-or for how many places fit. Trip wins over routing whenever there is more than one stop to arrange:
-routing is one origin to one destination and the properties of that single road route (its
-duration, its distance, its turns, its guidance, or which detour through it is fastest).
-A question that compares places against each other or relates two named anchors — which pair is
-farthest apart, which candidate lies between two places, which one is close to both — is poi. It is
-not distance, which reports one numeric separation, and not radius, which searches around a single
-anchor with a stated radius.
 Also return "target_type": the kind of place that answers the question, as the ordinary Korean
 noun for it (편의점, 약국, 주유소, 카페, 은행, 병원, 주차장, 지하철역, 대형마트, 음식점, 학교 …).
 When the question only describes a need rather than naming a kind, infer the kind of place that
@@ -85,132 +72,52 @@ the granularity the need implies: a neighbouring kind will usually be closer, an
 answers a different question. Use null when the question is not asking for a kind of place at
 all.
 Include all named places and spatial/temporal constraints.
-The intent label is evaluation metadata only. Later stages use the concepts, roles, attributes,
-measure, and question text, so make those fields complete without relying on the label.
 When the question states a search radius or a compass sector, put the value on the concept that
 carries it, as "attributes": {"radius_m": 600} in metres and {"direction": "북동쪽"}. Grounding
 reads these only when it cannot find the literal in the question itself, so a phrasing you had to
 interpret is exactly the case worth recording; do not restate one the sentence spells out and do
 not invent one the question does not give.
 Return JSON only:
-{"intent":"direction","concepts":[{"id":"anchor","text":"서울역","concept_type":"location","role":"extent","attributes":{},"depends_on":[]},{"id":"sector","text":"북동쪽","concept_type":"field","role":"sub_condition","attributes":{"direction":"북동쪽"},"depends_on":["anchor"]},{"id":"answer","text":"direction","concept_type":"field","role":"measure","attributes":{},"depends_on":["anchor"]}],"measure":"direction"}
+{"concepts":[{"id":"anchor","text":"서울역","core_concept":"location","functional_role":"extent","attributes":{},"depends_on":[]},{"id":"sector","text":"북동쪽","core_concept":"field","functional_role":"sub_condition","attributes":{"direction":"북동쪽"},"depends_on":["anchor"]},{"id":"answer","text":"direction","core_concept":"field","functional_role":"measure","attributes":{},"depends_on":["anchor"]}],"measure":"direction"}
 Do not answer the multiple-choice question and do not invent coordinates."""
 
-GRAPH_PROMPT = """You are Spatial-Agent's Concept Transformation stage. Read the spatial concept
-analysis and say which transformations the question needs, in what order. You are not choosing
-tools: which operator performs a transformation is decided afterwards, deterministically, from the
-concept types and the transformation you name. Name the relation, not the implementation.
+GRAPH_PROMPT = """You are Spatial-Agent's GeoFlow Graph Construction stage. Construct a spatial
+concept graph, not an operator program and not a multiple-choice solution.
 
-Transformations:
+Available spatial transformations:
 {transform_catalogue}
 
-Every node is {"id", "transform", "inputs", "role"} and may carry "concept_ids", "factors" and
-"via".
-- inputs are the ids of the nodes this one consumes, in order. The first input of a search, a
-  filter, a sort or a route is the place it is measured from.
-- via, on a ROUTE_MEASURE, lists what the route passes through on the way -- concept ids, in the
-  order the route reaches them. A route stated as "A에서 B를 들러 C까지" is one route from A to C
-  with B in via, never two routes. Leave it out when the route passes through nothing.
-- concept_ids are the analysis concepts this node is about. A RESOLVE_PLACES node lists the
-  concepts whose places it resolves, and the names come from those concepts -- do not retype a
-  place name, and do not translate or shorten one.
-- role is one of extent, temporal_extent, sub_condition, condition, support, measure.
-- factors are semantic parameters only: ordinal (1-based: second nearest is 2), measure
-  ("distance" or "duration"), key, extreme ("min"/"max"), aggregate ("sum"/"difference"/
-  "proportion"/"count"), scope ("options" to resolve the candidate texts, "listed" to resolve the
-  ones the question itself lists, "attribute" to narrow by the stated kind's modifier, "one" for
-  a single place).
-  Never put a radius, a compass sector, a stay, a time budget or a place name in factors: the
-  analysis already extracted those and they are bound for you.
+Return JSON with:
+- concept_nodes: ConceptNode objects with id, text, core_concept, functional_role, attributes;
+- factor_nodes: explicit FactorNode objects for every radius, ordinal, direction, time budget,
+  stay duration, metric, fixed order, and return-to-start constraint;
+- transformation_edges: TransformationEdge objects with id, transformation, input_concepts,
+  output_concepts, factor_nodes, and optional attributes.
 
-The graph must satisfy all five paper constraints:
-1. acyclicity; 2. role ordering
-   (sub_condition < condition < support < measure; contextual roles are unordered);
-3. output type compatibility; 4. every transformation reachable; 5. connectivity from contextual
-   input through every node to a measure. Keep it within {max_steps} nodes.
+Concepts are graph nodes and transformations are directed hyperedges. Add implicit concepts needed
+for reasoning, including NETWORK and route FIELD concepts for driving-time or road-distance work.
+Use retrieved macro-templates only as graph-construction priors. Adapt or ignore them when the
+typed concepts require it; template selection never makes a transformation mandatory.
 
-Return JSON only:
-{"graph":[{"id":"anchor","transform":"RESOLVE_PLACES","inputs":[],"concept_ids":["anchor"],"role":"extent"},{"id":"found","transform":"PLACE_SEARCH","inputs":["anchor"],"concept_ids":["target"],"role":"support"},{"id":"ranked","transform":"SORT","inputs":["anchor","found"],"role":"support"},{"id":"kth","transform":"ORDINAL_SELECT","inputs":["ranked"],"factors":{"ordinal":2},"role":"support"},{"id":"answer","transform":"MATCH_OPTIONS","inputs":["kth"],"role":"measure"}]}
+The graph must pass exactly G1–G5: acyclicity, functional-role ordering, output-type compatibility,
+data availability, and connectivity from contextual inputs to a measure. It must stay within
+{max_steps} transformation edges. Do not name tools/operators. Do not use MATCH_OPTIONS, option
+indices, benchmark labels, task-family names, or the gold answer."""
 
-What the question is about, not what the tools are:
-- The candidate options are answer texts, not a candidate set, and the analysis lists them as
-  concepts only so you can see them. Whenever the question asks for a *kind* of place -- a bank,
-  a pharmacy, a cafe, the nearest or k-th nearest of something -- the graph is
-  RESOLVE_PLACES (the anchor only) -> PLACE_SEARCH -> SORT -> ORDINAL_SELECT -> MATCH_OPTIONS.
-  Do not resolve the option texts as the candidates. The gold answer is the k-th of the whole
-  neighbourhood, and the options are a handful of places drawn from various ranks, so a graph
-  that resolves the four options and ranks them answers "which of these four is closest" -- a
-  different question, with a different answer. Resolve the options only when the question names
-  them as the things to compare against each other.
-- When the question describes a *need* rather than naming a kind of place, the analysis has
-  already worked out which kind satisfies it. PLACE_SEARCH will use it.
-- A question that ranks by 주행거리/이동거리 is decided in metres and one that ranks by time in
-  seconds. Say which with factors.measure; the orders a trip question offers sit about 2% apart,
-  so the wrong measure answers a different question.
-- The whole distance or duration of an itinerary the question already orders is ROUTE_MATRIX ->
-  SELECT_LEGS -> AGGREGATE. The matrix holds every pair of stops; the trip drives only the
-  consecutive ones, and SELECT_LEGS is how the graph says which those are.
-- When the options are counts of places, the answer is how many stops fit the stated time, so let
-  ROUTE_OPTIMIZE decide feasibility rather than counting the places the question mentions.
-- Two anchors bound some questions -- "A와 B 양쪽 모두에서", "A에서 B까지 이동하는 경로 위에" --
-  and every option has to be tested against both. Resolve both anchors and compose two
-  transformations over them; a single neighbourhood search around one anchor cannot see the other.
-- An ordinal is a factor, not a shape: "두 번째로 가까운" is SORT then ORDINAL_SELECT with
-  ordinal=2, over the same graph the nearest question uses with ordinal=1.
-- A question that lists its own candidates -- "… 아래 목록 중 몇 곳인가요? (A, B, C, D)" -- is
-  asking about those and not about the neighbourhood. Resolve them with RESOLVE_PLACES and
-  scope="listed", measure each from the anchor, FILTER, then AGGREGATE with aggregate="count".
-  A retrieval answers "how many are there", which is a different number.
-- A kind of place written as a modifier and a broad kind -- 중식 음식점, 양식 음식점 -- needs the
-  narrowing between the retrieval and the ranking: PLACE_SEARCH the broad kind, FILTER with
-  scope="attribute", then rank. The analysis extracted both halves and the filter is bound for
-  you. Ranking straight off the retrieval answers with the nearest place of the broad kind, and
-  the other options are exactly that.
-- A retrieved shape's steps are required, not suggested. If the shape you were shown narrows,
-  ranks, aggregates or routes, your graph does that too. Where a step genuinely does not apply,
-  say so on the graph -- {"graph":[...],"not_applicable":["FILTER"]} -- rather than leaving it
-  out; a shape was retrieved because the question has that structure, so an omission is either a
-  mistake or a judgement and only you can say which.
-- A measure between two places has to say which two. Give DISTANCE_MEASURE the two nodes that
-  resolved them, or name the two concepts in concept_ids. Two measures over one resolved list
-  are the same measure twice, and their difference is zero.
-- A measure of a whole candidate set against one anchor takes the anchor first and the set
-  second, and it is where a restriction on that set lives. Measuring the candidates one pair at
-  a time leaves a stated kind or radius nowhere to sit and the answer comes back unrestricted.
-- A restriction the analysis extracted is a concept, and the node that applies it names it as an
-  input: FILTER with inputs ["candidates", "constraint"]. The literal is bound for you; naming
-  the concept is how the graph says where the restriction applies.
+REPAIR_PROMPT = """Repair the supplied GeoFlow graph so it passes the listed G1–G5 validation
+error. Preserve the question's typed concepts and factors, but do not treat a retrieved template
+as a constraint. Use the same ConceptNode, FactorNode, and TransformationEdge wire format; choose
+transformations rather than operators and stay within {max_steps} transformation edges. Return
+JSON only, with concept_nodes, factor_nodes, and transformation_edges."""
 
-Do not select an option and do not use the gold answer."""
+EVALUATOR_PROMPT = """You are Spatial-Agent's Grounded Answer Generation stage. Read the validated
+GeoFlow's topological execution evidence and state the spatial answer it supports. Operator output
+is primary evidence; a failed operator contributes none. Preserve units and distinguish road,
+straight-line, temporal, directional, categorical, and set-valued results.
 
-REPAIR_PROMPT = """Repair the supplied transformation graph so it passes the listed validation
-error. Keep the question's semantics and the retrieved template, answer in the same
-transformation vocabulary as before -- the error names operators because that is what the
-transformations were mapped onto, but you choose transformations, not operators -- and stay within
-{max_steps} nodes. Return only {"graph":[...]} JSON."""
-
-EVALUATOR_PROMPT = """You are Spatial-Agent's grounded response generation stage. Select exactly
-one candidate using the final GeoFlow state and topological execution evidence. Large collections
-are losslessly counted but represented by bounded samples; `_omitted_items` states how many
-records were left out of a sample. Computed
-distance, direction, category, route, and option_totals evidence has priority over prior knowledge.
-Exact candidate-text matches beat semantic matches, and semantic matches beat inference.
-Respect candidate-index to candidate-text mapping. Numbering is 0-based. Return JSON only:
-{"predicted_answer":"exact candidate text","predicted_option":1,"confidence":0.8,
-"reason":"brief evidence-based reason"}
-predicted_answer must be copied verbatim from the candidate list, and predicted_option must be the
-0-based index of that same candidate.
-Treat deterministic operator output as the primary evidence: the graph was built to compute this
-answer, and its Measure node is where the answer is read from. Fields such as best_option, ranked,
-option_totals and present_option_members are computed, not guessed, so prefer them over anything
-you would otherwise infer -- but make the selection here, after checking them against the complete
-final state and the trace.
-An operator that reports an error contributed no evidence; fall back to the surviving steps rather
-than to the failed step's intended purpose.
-Read every quantity in the unit the question asks for and the operator reports it in. Do not
-substitute one measure for another -- a road distance is not a straight-line distance, seconds are
-not metres, and an option that lists more items is not thereby a larger set.
-Never return an option outside the supplied candidates."""
+Return JSON only: {"value": <grounded value>, "text": "grounded answer text",
+"confidence": 0.8, "reason": "brief evidence-based reason"}.
+Do not inspect or select multiple-choice options and do not return an option index."""
 
 # Execution traces are retained in full for auditability, but copying every resolved Place through
 # every downstream argument and concept binding into the final LLM prompt grows quadratically with
@@ -222,6 +129,7 @@ EVALUATION_RESULT_LIST_LIMIT = 10
 EVALUATION_STATE_LIST_LIMIT = 6
 EVALUATION_MAX_DEPTH = 6
 EVALUATION_STRING_LIMIT = 512
+
 
 class SpatialAgent(BenchmarkAgent):
     """Concept-graph grounding, constrained factorization, execution, and generation."""
@@ -235,13 +143,15 @@ class SpatialAgent(BenchmarkAgent):
         *,
         max_steps: int = 15,
         example_embedder: ExampleEmbedder | None = None,
+        example_store: QuestionGraphExampleStore | None = None,
     ) -> None:
         self.llm = llm
         self.tools = tools
-        #: Optional embedding backend for few-shot example retrieval. `None` uses the
-        #: deterministic concept-overlap scorer, which is what runs here: the deployment these
-        #: benchmarks use serves one chat model and answers `/v1/embeddings` with 404.
+        #: Optional embedding backend for Question–validated-Graph retrieval. With no backend the
+        #: macro-template prior still runs, but no prose-similarity demonstration is injected.
         self.example_embedder = example_embedder
+        self.example_store = example_store or default_example_store()
+        self.mcq_adapter = MCQAdapter()
         self.operators = SpatialOperatorRegistry()
         self.max_steps = max_steps
         available = {
@@ -264,7 +174,7 @@ class SpatialAgent(BenchmarkAgent):
         """
 
         return GRAPH_PROMPT.replace(
-            "{transform_catalogue}", transform_catalogue()
+            "{transform_catalogue}", transform_catalogue(include_mcq=False)
         ).replace("{max_steps}", str(self.max_steps))
 
     def answer(self, question: str, options: list[str]) -> AgentResult:
@@ -278,7 +188,6 @@ class SpatialAgent(BenchmarkAgent):
         failure_message: str | None = None
         response_text = ""
         predicted: int | None = None
-        predicted_intent: str | None = None
         reasoning_steps = 0
         usage = TokenUsage()
         execution_errors: list[dict[str, str]] = []
@@ -289,28 +198,19 @@ class SpatialAgent(BenchmarkAgent):
             analysis_response = self.llm.chat(
                 [
                     {"role": "system", "content": ANALYSIS_PROMPT},
-                    {"role": "user", "content": format_question(question, options)},
+                    {"role": "user", "content": f"Question:\n{question}"},
                 ]
             )
             reasoning_steps += 1
             usage += analysis_response.usage
             raw_analysis = parse_json_object(analysis_response.content)
-            fallback_intent = _heuristic_intent(question)
             # Read the question's stated factors from the raw reply first, so Concept Analysis
             # can be completed from them when the stage came up short. Nothing here is new
             # evidence -- it is what the deterministic extractors already found in the same
             # question, which the fallback used to discard in favour of the question text.
             stated = extract_facts(raw_analysis, question)
-            analysis = normalize_analysis(
-                raw_analysis, question, fallback_intent, facts=stated, options=options
-            )
-            predicted_intent = str(analysis.pop("intent")).lower()
-            if predicted_intent not in SUPPORTED_INTENTS:
-                predicted_intent = fallback_intent
-            trace.append({"stage": "analyze", "intent": predicted_intent, **analysis})
-            # The label remains in the trace/report, but every executable stage receives a view
-            # that cannot inspect it. Popping it makes the label reporting metadata rather than a
-            # hidden template, grounding, validation, repair, or evaluation router.
+            analysis = normalize_analysis(raw_analysis, question, facts=stated)
+            trace.append({"stage": "analyze", **analysis})
             runtime_analysis = analysis
             facts = extract_facts(runtime_analysis, question)
 
@@ -318,20 +218,29 @@ class SpatialAgent(BenchmarkAgent):
             # structural -- a measure over a network, a field narrowed by a sub-condition -- and
             # is read off the concepts and roles. Which worked example resembles this question is
             # a similarity judgement, and that is what an embedding is for.
-            templates = retrieve_templates(runtime_analysis, question)
-            # Only the top shape's structure is enforced: that is the one the retrieval says the
-            # question is, and requiring every retrieved shape's steps would demand a graph that
-            # is two shapes at once.
-            required_structure = templates[0].get("requires") if templates else None
-            examples = retrieve_examples(
-                runtime_analysis, question, embed=self.example_embedder
+            typed_concepts = [
+                ConceptNode.from_dict(value, fallback_id=f"c{index + 1}")
+                for index, value in enumerate(runtime_analysis.get("concepts") or ())
+            ]
+            typed_factors = factor_nodes_from_concepts(typed_concepts)
+            retrieved_templates = retrieve_macro_templates(
+                runtime_analysis.get("concepts") or [], typed_factors
+            )
+            templates = [template.as_dict() for template in retrieved_templates]
+            examples = (
+                self.example_store.retrieve(question, embed=self.example_embedder, limit=2)
+                if self.example_embedder is not None
+                else []
             )
             trace.append(
                 {
                     "stage": "retrieve_templates",
                     "templates": [template["name"] for template in templates],
-                    "examples": [example["name"] for example in examples],
+                    "examples": [example.example_id for example in examples],
                 }
+            )
+            rendered_examples = json.dumps(
+                [example.as_dict() for example in examples], ensure_ascii=False
             )
 
             plan_response = self.llm.chat(
@@ -343,11 +252,13 @@ class SpatialAgent(BenchmarkAgent):
                     {
                         "role": "user",
                         "content": (
-                            f"{format_question(question, options)}\n\n"
+                            f"Question:\n{question}\n\n"
                             "Spatial concept analysis:\n"
                             f"{json.dumps(runtime_analysis, ensure_ascii=False)}\n\n"
-                            "Retrieved pre-validated templates and examples:\n"
-                            f"{json.dumps(templates, ensure_ascii=False)}"
+                            "Retrieved macro-template priors:\n"
+                            f"{json.dumps(templates, ensure_ascii=False)}\n\n"
+                            "Retrieved question–validated-graph demonstrations:\n"
+                            f"{rendered_examples}"
                         ),
                     },
                 ]
@@ -355,23 +266,22 @@ class SpatialAgent(BenchmarkAgent):
             reasoning_steps += 1
             usage += plan_response.usage
             plan = parse_json_object(plan_response.content)
+            accepted_plan = plan
             trace.append({"stage": "compose", "graph": plan.get("graph") or plan.get("steps")})
             try:
-                factorized, steps, constraints, semantic = _factorize_validate_plan(
-                    runtime_analysis,
-                    plan,
-                    question,
-                    options,
-                    facts,
-                    self.max_steps,
-                    retrieval_specs=self.tools.retrieval_specs,
-                    available_operators=self.executable_operators,
-                    requires=required_structure,
+                factorized, steps, constraints, semantic, operator_hyperedges = (
+                    _factorize_validate_plan(
+                        runtime_analysis,
+                        plan,
+                        question,
+                        facts,
+                        self.max_steps,
+                        retrieval_specs=self.tools.retrieval_specs,
+                        available_operators=self.executable_operators,
+                    )
                 )
             except ValueError as graph_error:
-                trace.append(
-                    {"stage": "validate", "status": "invalid", "error": str(graph_error)}
-                )
+                trace.append({"stage": "validate", "status": "invalid", "error": str(graph_error)})
                 repair_response = self.llm.chat(
                     [
                         {
@@ -386,10 +296,8 @@ class SpatialAgent(BenchmarkAgent):
                             "role": "user",
                             "content": (
                                 f"Validation error: {graph_error}\n"
-                                "Question and options:\n"
-                                f"{format_question(question, options)}\n"
+                                f"Question:\n{question}\n"
                                 f"Analysis: {json.dumps(runtime_analysis, ensure_ascii=False)}\n"
-                                f"Templates: {json.dumps(templates, ensure_ascii=False)}\n"
                                 f"Invalid graph: {json.dumps(plan, ensure_ascii=False)}"
                             ),
                         },
@@ -405,97 +313,27 @@ class SpatialAgent(BenchmarkAgent):
                     }
                 )
                 try:
-                    factorized, steps, constraints, semantic = _factorize_validate_plan(
-                        runtime_analysis,
-                        repaired_plan,
-                        question,
-                        options,
-                        facts,
-                        self.max_steps,
-                        retrieval_specs=self.tools.retrieval_specs,
-                        available_operators=self.executable_operators,
-                        requires=required_structure,
-                    )
-                except ValueError as repair_error:
-                    # Upstream has no type or role check to fail in the first place. The repair
-                    # may already have fixed the structural error and be rejected only by one of
-                    # those local checks, so relax the *repaired* graph first. Going straight back
-                    # to the original discarded a valid repair and retried the very structural
-                    # error the repair had removed. The original remains the final fallback when
-                    # the repair is structurally invalid too; this order is identical for every
-                    # intent and introduces no family-specific solver.
-                    try:
-                        factorized, steps, constraints, semantic = _factorize_validate_plan(
+                    factorized, steps, constraints, semantic, operator_hyperedges = (
+                        _factorize_validate_plan(
                             runtime_analysis,
                             repaired_plan,
                             question,
-                            options,
                             facts,
                             self.max_steps,
                             retrieval_specs=self.tools.retrieval_specs,
                             available_operators=self.executable_operators,
-                            strict_types=False,
-                            # `strict_types=False` relaxes this port's own type, role and
-                            # argument-value checks on the last attempt. Conformance is not one
-                            # of those: it says the graph does the reasoning its shape calls for,
-                            # and a graph that skips it answers a different question rather than
-                            # answering this one imperfectly. Relaxing it here would be the
-                            # deterministic stage waving through missing semantics.
-                            requires=required_structure,
                         )
-                    except ValueError as repaired_lenient_error:
-                        trace.append(
-                            {
-                                "stage": "validate",
-                                "status": "invalid",
-                                "mode": "lenient",
-                                "plan_source": "repaired",
-                                "error": str(repaired_lenient_error),
-                            }
-                        )
-                        try:
-                            factorized, steps, constraints, semantic = _factorize_validate_plan(
-                                runtime_analysis,
-                                plan,
-                                question,
-                                options,
-                                facts,
-                                self.max_steps,
-                                retrieval_specs=self.tools.retrieval_specs,
-                                available_operators=self.executable_operators,
-                                strict_types=False,
-                                requires=required_structure,
-                            )
-                        except ValueError as original_lenient_error:
-                            trace.append(
-                                {
-                                    "stage": "validate",
-                                    "status": "invalid",
-                                    "mode": "lenient",
-                                    "plan_source": "original",
-                                    "error": str(original_lenient_error),
-                                }
-                            )
-                            raise GraphValidationError(
-                                str(original_lenient_error)
-                            ) from original_lenient_error
-                        trace.append(
-                            {
-                                "stage": "validate",
-                                "status": "lenient",
-                                "plan_source": "original",
-                                "error": str(graph_error),
-                            }
-                        )
-                    else:
-                        trace.append(
-                            {
-                                "stage": "validate",
-                                "status": "lenient",
-                                "plan_source": "repaired",
-                                "error": str(repair_error),
-                            }
-                        )
+                    )
+                    accepted_plan = repaired_plan
+                except ValueError as repair_error:
+                    trace.append(
+                        {
+                            "stage": "validate",
+                            "status": "invalid_after_repair",
+                            "error": str(repair_error),
+                        }
+                    )
+                    raise GraphValidationError(str(repair_error)) from repair_error
             # G -> G' as this run performed it: which transformation each node asked for, which
             # operator answered, and which precedence rule decided. `concrete_nodes` counts the
             # nodes the planner named an operator for anyway, which is the measure of whether
@@ -503,8 +341,25 @@ class SpatialAgent(BenchmarkAgent):
             semantic_nodes = len(semantic.graph)
             concrete_nodes = len(semantic.concrete_nodes)
             semantic_diagnostics = [dict(row) for row in semantic.diagnostics]
+            trace.append(
+                {
+                    "stage": "construct_geoflow",
+                    **attach_grounding_factors(
+                        plan_to_geoflow(runtime_analysis, accepted_plan), facts
+                    ).as_dict(),
+                }
+            )
             trace.append({"stage": "transform", **semantic.as_dict()})
-            trace.append({"stage": "factorize", **factorized.as_dict()})
+            trace.append(
+                {
+                    "stage": "factorize",
+                    **factorized.as_dict(),
+                    "factor_nodes": attach_grounding_factors(
+                        plan_to_geoflow(runtime_analysis, accepted_plan), facts
+                    ).as_dict()["factor_nodes"],
+                    "operator_hyperedges": list(operator_hyperedges),
+                }
+            )
             trace.append(
                 {
                     "stage": "validate",
@@ -532,9 +387,7 @@ class SpatialAgent(BenchmarkAgent):
                     # resolving names behind the tool call, the same now holds for a `directions`
                     # or `nearby_places` node. Binding grants no evidence the run had not already
                     # gathered; a name the plan never resolved is left alone and still fails.
-                    arguments = _bind_named_pairs(
-                        _bind_named_places(arguments, results), results
-                    )
+                    arguments = _bind_named_pairs(_bind_named_places(arguments, results), results)
                     if operator not in tool_names:
                         arguments = _bind_step_references(arguments, results)
                     if operator in tool_names:
@@ -601,16 +454,14 @@ class SpatialAgent(BenchmarkAgent):
                 }
             )
 
-            evaluation_evidence = _compact_evaluation_evidence(
-                execution_log, concept_state
-            )
+            evaluation_evidence = _compact_evaluation_evidence(execution_log, concept_state)
             evaluation = self.llm.chat(
                 [
                     {"role": "system", "content": EVALUATOR_PROMPT},
                     {
                         "role": "user",
                         "content": (
-                            f"{format_question(question, options)}\n\n"
+                            f"Question:\n{question}\n\n"
                             "Compacted GeoFlow topological execution evidence:\n"
                             f"{json.dumps(evaluation_evidence, ensure_ascii=False)}"
                         ),
@@ -620,15 +471,15 @@ class SpatialAgent(BenchmarkAgent):
             reasoning_steps += 1
             usage += evaluation.usage
             evaluation_json = parse_json_object(evaluation.content)
-            predicted, selection = _select_option(evaluation_json, options)
-            if predicted is None:
-                predicted = parse_answer(evaluation.content, option_count=len(options))
-                selection = "answer_marker" if predicted is not None else "unresolved"
+            grounded_answer = grounded_answer_from_payload(evaluation_json)
+            trace.append({"stage": "grounded_answer", **grounded_answer.as_dict()})
+            adapted = self.mcq_adapter.select(grounded_answer, options)
+            predicted, selection = adapted.index, adapted.method
             trace.append(
                 {
-                    "stage": "evaluate",
+                    "stage": "mcq_adapt",
                     "predicted_option": predicted,
-                    "predicted_answer": evaluation_json.get("predicted_answer"),
+                    "grounded_answer": grounded_answer.text,
                     "selection_method": selection,
                     "confidence": evaluation_json.get("confidence"),
                     "reason": evaluation_json.get("reason", ""),
@@ -666,7 +517,7 @@ class SpatialAgent(BenchmarkAgent):
                 failure_message = "No valid 0-based option found during evaluation"
         return AgentResult(
             agent_type=self.agent_type,
-            predicted_intent=predicted_intent,
+            predicted_intent=None,
             predicted_answer=predicted,
             response=response_text,
             tool_calls=self.tools.tool_call_count - tools_before,
@@ -712,55 +563,41 @@ def _factorize_validate_plan(
     analysis: dict[str, Any],
     plan: dict[str, Any],
     question: str,
-    options: list[str],
     facts: GroundingFacts,
     max_steps: int,
     *,
-    strict_types: bool = True,
     retrieval_specs: RetrievalSpecs = canonical_retrieval_specs,
     available_operators: frozenset[str] = frozenset(OPERATOR_CONTRACTS),
-    requires: dict[str, Any] | None = None,
 ):
-    raw_steps = plan.get("graph") if plan.get("graph") is not None else plan.get("steps")
-    if not isinstance(raw_steps, list):
-        raise ValueError("GeoFlow response does not contain a graph")
-    # Conformance before factorization. A shape is retrieved because the question has that
-    # structure, and a graph that drops one of its steps is answering a different question --
-    # eight recorded `nearby_cuisine_subtype` graphs had `Search-Narrow-Rank` in front of the
-    # planner and no narrowing in them, and each one ranked restaurants of every kind. The
-    # factorizer must not make this good: synthesising a missing step would be deterministic
-    # code inventing spatial reasoning the planner did not do.
-    departures = conformance_violations(plan, requires)
-    if departures:
-        raise ValueError("; ".join(departures))
-    if len(raw_steps) > max_steps:
+    geoflow = attach_grounding_factors(plan_to_geoflow(analysis, plan), facts)
+    if len(geoflow.transformation_edges) > max_steps:
         raise ValueError(
-            f"GeoFlow graph has {len(raw_steps)} operators, exceeding "
+            f"GeoFlow graph has {len(geoflow.transformation_edges)} transformations, exceeding "
             f"MAX_REASONING_STEPS={max_steps}"
         )
-    # G -> G'. The planner answered in transformations; which operator performs each is decided
-    # here, deterministically, from the concept types and the transformation alone. A planner
-    # that named operators anyway is carried through as already-factorized and counted, because
-    # losing a graph that would have executed to a vocabulary preference is a worse trade than
-    # knowing how often it happens.
-    semantic = factorize_semantic_graph(
-        raw_steps,
-        concepts=analysis.get("concepts") or [],
-        options=options,
+    paper_factorized = factorize_plan(
+        analysis,
+        geoflow.as_dict(),
+        options=[],
         facts=facts,
         available=available_operators,
     )
+    # G -> G'. The planner answered in transformations; which operator performs each is decided
+    # here, deterministically, from concept types, explicit factors, and operator contracts.
+    # A planner-authored operator is rejected by `plan_to_geoflow`: tool choice is not part of G.
+    semantic = paper_factorized.semantic
     grounded = _ground_graph_literals(
-        semantic.graph, question, options, facts, retrieval_specs=retrieval_specs
+        semantic.graph, question, [], facts, retrieval_specs=retrieval_specs
     )
-    factorized = factorize_geoflow(analysis, {"graph": grounded}, strict_types=strict_types)
+    factorized = factorize_geoflow(analysis, {"graph": grounded}, strict_types=True)
     # The planner budget above governs what the planner authored. Retrieval fan-out added
     # during grounding is deterministic and gets its own allowance on top of it.
     steps, constraints = normalize_and_validate_graph(
         factorized.as_dict(),
         max_steps=max(max_steps, len(grounded)),
-        strict_types=strict_types,
+        strict_types=True,
     )
+    constraints = {**paper_factorized.validation.constraints, **constraints}
     # Counted after the graph is otherwise accepted, and deliberately not a G1-G5 constraint: as
     # a refusal this blocked graphs that go on to answer correctly, and the evidence does not
     # support calling an unpreserved restriction unexecutable. It is an architectural
@@ -769,7 +606,7 @@ def _factorize_validate_plan(
         semantic,
         diagnostics=(*semantic.diagnostics, *_unpreserved_constraints(grounded, facts)),
     )
-    return factorized, steps, constraints, semantic
+    return factorized, steps, constraints, semantic, paper_factorized.operator_hyperedges
 
 
 #: The argument each stated restriction becomes once grounding has bound it. Preservation is
@@ -900,9 +737,7 @@ def _compact_evaluation_evidence(
     }
 
 
-def _compact_evaluation_value(
-    value: Any, *, list_limit: int, depth: int = 0
-) -> Any:
+def _compact_evaluation_value(value: Any, *, list_limit: int, depth: int = 0) -> Any:
     """Recursively bound repeated collections while preserving answer-bearing scalar fields."""
 
     if value is None:
@@ -916,9 +751,7 @@ def _compact_evaluation_value(
         if depth >= EVALUATION_MAX_DEPTH:
             return {"_omitted_fields": len(value)}
         return {
-            str(key): _compact_evaluation_value(
-                item, list_limit=list_limit, depth=depth + 1
-            )
+            str(key): _compact_evaluation_value(item, list_limit=list_limit, depth=depth + 1)
             for key, item in value.items()
             if item is not None
         }
@@ -1128,9 +961,7 @@ def _bind_named_pairs(arguments: dict[str, Any], results: dict[str, Any]) -> dic
         **arguments,
         "pairs": [
             {
-                key: (
-                    _named_place(value, index) if key in PLACE_VALUED_PAIR_KEYS else value
-                )
+                key: (_named_place(value, index) if key in PLACE_VALUED_PAIR_KEYS else value)
                 for key, value in pair.items()
             }
             if isinstance(pair, dict)
@@ -1226,7 +1057,6 @@ def _index_of_name(names: list[str], wanted: str) -> int | None:
 
 def _name_key_for_match(value: str) -> str:
     return "".join(character for character in value.casefold() if character.isalnum())
-
 
 
 def _closed_itinerary(
@@ -1587,11 +1417,7 @@ def _ground_graph_literals(
         [],
     )
     # Which node ids produce a tour whose cost already carries the stays.
-    tour_totals = {
-        str(step.get("id"))
-        for step in steps
-        if step.get("operator") == "tsp_tw"
-    }
+    tour_totals = {str(step.get("id")) for step in steps if step.get("operator") == "tsp_tw"}
     # The place names the question states outright, for repairing one a plan copied short: a plan
     # that geocoded `문래` where the question says `빈칸 문래` routed from another place entirely
     # and counted another route's turns, with every stage reporting success.
@@ -1612,9 +1438,7 @@ def _ground_graph_literals(
             # failed to plan, and saying so is the whole fix. Left alone it reached a set lookup as
             # an unhashable list and came back as `TypeError: unhashable type: 'list'` -- a crash
             # in this file, recorded against the agent as if it had reasoned its way there.
-            raise ValueError(
-                f"GeoFlow node {step.get('id')!r} names no operator: {operator!r}"
-            )
+            raise ValueError(f"GeoFlow node {step.get('id')!r} names no operator: {operator!r}")
         raw_arguments = step.get("arguments")
         if raw_arguments is None:
             raw_arguments = step.get("params")
@@ -1644,9 +1468,7 @@ def _ground_graph_literals(
             arguments.pop("category_code", None)
             arguments["radius_m"] = radius_m if radius_m is not None else RETRIEVAL_RADIUS_M
             arguments["limit"] = RETRIEVAL_LIMIT
-            grounded.extend(
-                _retrieval_steps(step, arguments, specifications)
-            )
+            grounded.extend(_retrieval_steps(step, arguments, specifications))
             continue
         if route_priority and operator in _PRIORITY_OPERATORS:
             arguments["priority"] = route_priority
@@ -1692,8 +1514,10 @@ def _ground_graph_literals(
             # is exactly what the trip's `batch_geocode` node lists, and the operator resolves the
             # reference to that same list. Without this the planner's own stays were left to
             # mismatch the resolved length, and the args model rejected the call outright.
-            if isinstance(locations, list) and len(locations) == 1 and isinstance(
-                locations[0], list
+            if (
+                isinstance(locations, list)
+                and len(locations) == 1
+                and isinstance(locations[0], list)
             ):
                 # `locations: ["$places"]` resolves to one list holding the whole itinerary. The
                 # tool flattens it; the stays are bound here, so they have to be counted against
@@ -1777,8 +1601,7 @@ def _ground_graph_literals(
             if names and stays:
                 # service_times must line up with the node list, and the start is not a visit.
                 arguments["service_times"] = [
-                    0.0 if index == 0 else facts.stay_for(name)
-                    for index, name in enumerate(names)
+                    0.0 if index == 0 else facts.stay_for(name) for index, name in enumerate(names)
                 ]
             grounded.append({**step, "arguments": arguments})
             continue
@@ -1901,7 +1724,10 @@ def _ground_graph_literals(
             if (
                 names
                 and highest_index >= len(names)
-                and all(_option_key(name) != _option_key(batch_anchor) for name in names)
+                and all(
+                    _normalized_text_key(name) != _normalized_text_key(batch_anchor)
+                    for name in names
+                )
             ):
                 names.insert(0, batch_anchor)
         if (
@@ -2059,9 +1885,7 @@ def _retrieval_steps(
 
 
 _COMPARED_PLACE_PATTERNS = (
-    re.compile(
-        r"^(.+?)\s*(?:및|와|과)\s+(.+?)\s+(?:사이|간)(?:의)?\s+직선\s*거리"
-    ),
+    re.compile(r"^(.+?)\s*(?:및|와|과)\s+(.+?)\s+(?:사이|간)(?:의)?\s+직선\s*거리"),
     re.compile(r"^(.+?)에서\s+(.+?)까지(?:의)?\s+직선\s*거리"),
 )
 
@@ -2118,9 +1942,7 @@ _TARGET_TYPE_LEADS: dict[str, tuple[str, ...]] = {
 # in `dataset/` trying all three finds a type in exactly the `nearby`, `radius`, `direction` and
 # legacy `poi` rows and in no `trip` or `routing` row.
 _TARGET_TYPE_PATTERNS: tuple[str, ...] = tuple(
-    lead + r"(.+?)" + _TARGET_TYPE_TAIL
-    for leads in _TARGET_TYPE_LEADS.values()
-    for lead in leads
+    lead + r"(.+?)" + _TARGET_TYPE_TAIL for leads in _TARGET_TYPE_LEADS.values() for lead in leads
 )
 
 
@@ -2252,8 +2074,10 @@ def _asks_for_distance(question: str) -> bool:
 # `dataset/`, so deleting the unreachable one changed no answer — but nothing in the suite said so,
 # which is why the round-trip cases below now pin it. `ruff`'s F811 is on so a second definition is
 # a lint error rather than a silent shadow.
-_RETURNS_TO_START = re.compile(r"(다시\s*\S+(?:으)?로\s*돌아|돌아옵니다|돌아온다|돌아와|출발지로"
-                               r"|return(?:ing)?\s+to\s+(?:the\s+)?start)")
+_RETURNS_TO_START = re.compile(
+    r"(다시\s*\S+(?:으)?로\s*돌아|돌아옵니다|돌아온다|돌아와|출발지로"
+    r"|return(?:ing)?\s+to\s+(?:the\s+)?start)"
+)
 
 
 def _returns_to_start(question: str) -> bool:
@@ -2557,85 +2381,5 @@ def _is_shortened_name(candidate: Any, expected: Any) -> bool:
     return bool(candidate_key and candidate_key != expected_key and candidate_key in expected_key)
 
 
-def _select_option(
-    payload: dict[str, Any],
-    options: list[str],
-) -> tuple[int | None, str]:
-    """Reconcile the generated answer text with the generated index.
-
-    Upstream Spatial-Agent selects on the answer *text* and derives the index from it, because
-    a model that names the right candidate can still miscount its position. Exact text wins,
-    the declared index is the next authority, and a single containment match is the last
-    resort.
-
-    Operator state is evidence supplied to the generation stage, not a second answer channel in
-    the harness. Keeping selection here limited to the model's declared answer makes every intent
-    follow the same rule; deterministic clock values no longer receive a family-specific override.
-    """
-    text = payload.get("predicted_answer")
-    exact = _match_option_text(text, options, strict=True) if isinstance(text, str) else None
-    if exact is not None:
-        return exact, "exact_answer_text"
-    index = _coerce_option(payload.get("predicted_option"), len(options))
-    if index is not None:
-        return index, "predicted_option"
-    contained = _match_option_text(text, options, strict=False) if isinstance(text, str) else None
-    if contained is not None:
-        return contained, "answer_text_containment"
-    return None, "unresolved"
-
-
-def _match_option_text(value: str, options: list[str], *, strict: bool) -> int | None:
-    key = _option_key(value)
-    if not key:
-        return None
-    matches = [
-        index
-        for index, option in enumerate(options)
-        if (option_key := _option_key(option))
-        and (
-            option_key == key
-            or (not strict and (key in option_key or option_key in key))
-        )
-    ]
-    return matches[0] if len(matches) == 1 else None
-
-
-def _option_key(value: str) -> str:
+def _normalized_text_key(value: Any) -> str:
     return "".join(str(value).split()).casefold()
-
-
-def _coerce_option(value: Any, option_count: int) -> int | None:
-    try:
-        option = int(value)
-    except (TypeError, ValueError):
-        return None
-    return option if 0 <= option < option_count else None
-
-
-def _heuristic_intent(question: str) -> str:
-    return _explicit_intent(question) or "poi"
-
-
-def _explicit_intent(question: str) -> str | None:
-    lowered = question.lower()
-    if any(word in lowered for word in ("반경", "이내", "radius", "within")) or re.search(
-        r"[\d,.]+\s*(?:km|m)\s*(?:내|안)(?:에|의)", lowered
-    ):
-        return "radius"
-    if any(word in lowered for word in ("장소 유형", "유형은", "카테고리", "종류", "type")):
-        return "type"
-    if any(word in lowered for word in ("직선거리", "직선 거리", "직선 거리는", "geodesic")):
-        return "distance"
-    if any(
-        word in lowered
-        for word in ("어느 방향", "방향에", "동쪽", "서쪽", "남쪽", "북쪽", "direction")
-    ):
-        return "direction"
-    if any(word in lowered for word in ("일정", "여행", "순서", "경유", "둘러", "itinerary")):
-        return "trip"
-    if any(word in lowered for word in ("경로", "운전", "자동차", "주행", "route", "driving")):
-        return "routing"
-    if any(word in lowered for word in ("가까운", "인접한", "근처", "nearest", "nearby")):
-        return "nearby"
-    return None

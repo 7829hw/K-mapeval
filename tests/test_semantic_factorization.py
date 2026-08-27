@@ -51,9 +51,7 @@ def test_every_macro_template_round_trips_through_the_vocabulary(key: str) -> No
     original = TEMPLATES[key]["example"]["graph"]
     rebuilt = _build(lift_to_semantic(original))
 
-    assert [step["operator"] for step in rebuilt.graph] == [
-        step["operator"] for step in original
-    ]
+    assert [step["operator"] for step in rebuilt.graph] == [step["operator"] for step in original]
 
 
 def test_the_same_graph_always_factorizes_the_same_way() -> None:
@@ -70,8 +68,12 @@ def test_an_ordinal_is_a_factor_and_the_superlative_is_the_same_graph() -> None:
             {"id": "a", "transform": "RESOLVE_PLACES", "inputs": [], "concept_ids": ["c"]},
             {"id": "f", "transform": "PLACE_SEARCH", "inputs": ["a"]},
             {"id": "s", "transform": "SORT", "inputs": ["a", "f"]},
-            {"id": "k", "transform": "ORDINAL_SELECT", "inputs": ["s"],
-             "factors": {"ordinal": position}},
+            {
+                "id": "k",
+                "transform": "ORDINAL_SELECT",
+                "inputs": ["s"],
+                "factors": {"ordinal": position},
+            },
             {"id": "m", "transform": "MATCH_OPTIONS", "inputs": ["k"], "role": "measure"},
         ]
 
@@ -90,8 +92,13 @@ def test_place_names_come_from_the_concept_graph_not_the_planner() -> None:
     """A planner that retypes a name truncates one. The analysis already extracted them."""
 
     graph = [
-        {"id": "a", "transform": "RESOLVE_PLACES", "inputs": [],
-         "concept_ids": ["one", "two"], "place_names": ["틀린 이름"]},
+        {
+            "id": "a",
+            "transform": "RESOLVE_PLACES",
+            "inputs": [],
+            "concept_ids": ["one", "two"],
+            "place_names": ["틀린 이름"],
+        },
     ]
     concepts = [
         {"id": "one", "text": "백련산꿈마을숲정이"},
@@ -157,19 +164,28 @@ def test_a_stated_radius_and_a_stated_sector_choose_the_filter() -> None:
     sector = GroundingFacts(direction="북동쪽")
     plain = GroundingFacts()
 
-    assert resolve_operator("FILTER", {}, input_types=["object"], facts=radius,
-                            available=ALL)[0] == "within_radius"
-    assert resolve_operator("FILTER", {}, input_types=["object"], facts=sector,
-                            available=ALL)[0] == "filter_by_direction"
-    assert resolve_operator("FILTER", {}, input_types=["object"], facts=plain,
-                            available=ALL)[0] == "filter_places"
+    assert (
+        resolve_operator("FILTER", {}, input_types=["object"], facts=radius, available=ALL)[0]
+        == "within_radius"
+    )
+    assert (
+        resolve_operator("FILTER", {}, input_types=["object"], facts=sector, available=ALL)[0]
+        == "filter_by_direction"
+    )
+    assert (
+        resolve_operator("FILTER", {}, input_types=["object"], facts=plain, available=ALL)[0]
+        == "filter_places"
+    )
 
 
 def test_an_operator_the_registry_cannot_run_is_not_chosen() -> None:
     without = ALL - {"travel_time"}
     operator, rule = resolve_operator(
-        "ROUTE_MEASURE", {"measure": "duration"}, input_types=["object", "object"],
-        facts=None, available=without
+        "ROUTE_MEASURE",
+        {"measure": "duration"},
+        input_types=["object", "object"],
+        facts=None,
+        available=without,
     )
 
     assert operator == "directions"
@@ -178,8 +194,13 @@ def test_an_operator_the_registry_cannot_run_is_not_chosen() -> None:
 
 def test_a_transformation_no_operator_can_perform_is_a_graph_failure() -> None:
     with pytest.raises(ValueError, match="No executable operator"):
-        resolve_operator("ROUTE_OPTIMIZE", {}, input_types=[], facts=None,
-                         available=frozenset({"identity_measure"}))
+        resolve_operator(
+            "ROUTE_OPTIMIZE",
+            {},
+            input_types=[],
+            facts=None,
+            available=frozenset({"identity_measure"}),
+        )
 
 
 def test_an_unknown_transformation_says_what_the_vocabulary_is() -> None:
@@ -243,22 +264,37 @@ def test_a_geocode_always_gets_names_to_resolve() -> None:
     concepts = [{"id": "anchor", "text": "서울역", "concept_type": "location", "role": "extent"}]
 
     invented_options = _build(
-        [{"id": "a", "transform": "RESOLVE_PLACES", "inputs": [],
-          "concept_ids": ["Option 0", "Option 1"]}],
-        concepts=concepts, options=["가게 A", "가게 B"],
+        [
+            {
+                "id": "a",
+                "transform": "RESOLVE_PLACES",
+                "inputs": [],
+                "concept_ids": ["Option 0", "Option 1"],
+            }
+        ],
+        concepts=concepts,
+        options=["가게 A", "가게 B"],
     )
     assert invented_options.graph[0]["arguments"]["place_names"] == ["가게 A", "가게 B"]
 
     invented_anchor = _build(
-        [{"id": "a", "transform": "RESOLVE_PLACES", "inputs": [],
-          "concept_ids": ["seoul_station_slug"]}],
-        concepts=concepts, options=["가게 A"],
+        [
+            {
+                "id": "a",
+                "transform": "RESOLVE_PLACES",
+                "inputs": [],
+                "concept_ids": ["seoul_station_slug"],
+            }
+        ],
+        concepts=concepts,
+        options=["가게 A"],
     )
     assert invented_anchor.graph[0]["arguments"]["place_names"] == ["서울역"]
 
     nothing = _build(
         [{"id": "a", "transform": "RESOLVE_PLACES", "inputs": [], "concept_ids": ["x"]}],
-        concepts=[], options=["가게 A", "가게 B"],
+        concepts=[],
+        options=["가게 A", "가게 B"],
     )
     assert nothing.graph[0]["arguments"]["place_names"] == ["가게 A", "가게 B"]
 
@@ -278,10 +314,18 @@ def test_one_place_against_many_is_a_ranking_not_a_pair() -> None:
     ]
     built = _build(
         [
-            {"id": "anchor", "transform": "RESOLVE_PLACES", "inputs": [],
-             "concept_ids": ["anchor"]},
-            {"id": "cands", "transform": "RESOLVE_PLACES", "inputs": [],
-             "concept_ids": ["c1", "c2"]},
+            {
+                "id": "anchor",
+                "transform": "RESOLVE_PLACES",
+                "inputs": [],
+                "concept_ids": ["anchor"],
+            },
+            {
+                "id": "cands",
+                "transform": "RESOLVE_PLACES",
+                "inputs": [],
+                "concept_ids": ["c1", "c2"],
+            },
             {"id": "d", "transform": "DISTANCE_MEASURE", "inputs": ["anchor", "cands"]},
         ],
         concepts=concepts,
@@ -313,8 +357,7 @@ def test_a_sort_over_an_existing_ordering_is_folded_away() -> None:
             {"id": "c", "transform": "PLACE_SEARCH", "inputs": ["a"]},
             {"id": "d", "transform": "DISTANCE_MEASURE", "inputs": ["a", "c"]},
             {"id": "s", "transform": "SORT", "inputs": ["d"]},
-            {"id": "k", "transform": "ORDINAL_SELECT", "inputs": ["s"],
-             "factors": {"ordinal": 2}},
+            {"id": "k", "transform": "ORDINAL_SELECT", "inputs": ["s"], "factors": {"ordinal": 2}},
         ],
         concepts=[{"id": "x", "text": "서울역"}],
     )
@@ -330,8 +373,7 @@ def test_a_tour_gets_the_cost_matrix_it_needs() -> None:
 
     built = _build(
         [
-            {"id": "stops", "transform": "RESOLVE_PLACES", "inputs": [],
-             "concept_ids": ["a", "b"]},
+            {"id": "stops", "transform": "RESOLVE_PLACES", "inputs": [], "concept_ids": ["a", "b"]},
             {"id": "tour", "transform": "ROUTE_OPTIMIZE", "inputs": ["stops"], "role": "measure"},
         ],
         concepts=[{"id": "a", "text": "가"}, {"id": "b", "text": "나"}],
@@ -371,8 +413,12 @@ def test_a_total_over_a_matrix_is_not_an_extract_from_a_route() -> None:
         [
             {"id": "p", "transform": "RESOLVE_PLACES", "inputs": [], "concept_ids": ["a", "b"]},
             {"id": "m", "transform": "ROUTE_MATRIX", "inputs": ["p"]},
-            {"id": "e", "transform": "ROUTE_EXTRACT", "inputs": ["m"],
-             "factors": {"measure": "distance"}},
+            {
+                "id": "e",
+                "transform": "ROUTE_EXTRACT",
+                "inputs": ["m"],
+                "factors": {"measure": "distance"},
+            },
         ],
         concepts=[{"id": "a", "text": "가"}, {"id": "b", "text": "나"}],
     )
@@ -449,9 +495,7 @@ def test_the_ordinal_skeleton_searches_rather_than_ranking_the_answers() -> None
     assert sum(t == "RESOLVE_PLACES" for t in shape) == 1
     # k is a factor on the selection, which is the whole difference from the superlative.
     ordinal = next(
-        node
-        for node in SKELETONS["search_rank_ordinal"]
-        if node["transform"] == "ORDINAL_SELECT"
+        node for node in SKELETONS["search_rank_ordinal"] if node["transform"] == "ORDINAL_SELECT"
     )
     assert "ordinal" in ordinal["factors"]
 
@@ -476,13 +520,9 @@ def test_a_stated_radius_reaches_the_filter_that_applies_it() -> None:
     # one that reads a measurement rather than the one that recomputes it. The literal is bound
     # the same way either way, which is the property under test.
     filtering = next(
-        step
-        for step in grounded
-        if step["operator"] in {"within_radius", "filter_by_distance"}
+        step for step in grounded if step["operator"] in {"within_radius", "filter_by_distance"}
     )
-    stated = filtering["arguments"].get("radius_m") or filtering["arguments"].get(
-        "max_distance_m"
-    )
+    stated = filtering["arguments"].get("radius_m") or filtering["arguments"].get("max_distance_m")
     assert stated == 600
 
 
@@ -509,7 +549,7 @@ def test_the_fallback_concept_graph_is_built_from_what_the_question_states() -> 
         "여기서 두 번째로 가까운 정형외과는 다음 중 어디인가요?"
     )
     empty = {"intent": "nearby", "concepts": [], "measure": "ranking"}
-    analysis = normalize_analysis(empty, question, "nearby", facts=extract_facts(empty, question))
+    analysis = normalize_analysis(empty, question, facts=extract_facts(empty, question))
 
     texts = [concept["text"] for concept in analysis["concepts"]]
     assert "세라존" in texts
@@ -537,8 +577,14 @@ def test_a_synthetic_placeholder_is_never_geocoded() -> None:
         {"id": "real", "text": "서울역", "concept_type": "location", "role": "extent"},
     ]
     built = _build(
-        [{"id": "a", "transform": "RESOLVE_PLACES", "inputs": [],
-          "concept_ids": ["question_context", "real"]}],
+        [
+            {
+                "id": "a",
+                "transform": "RESOLVE_PLACES",
+                "inputs": [],
+                "concept_ids": ["question_context", "real"],
+            }
+        ],
         concepts=concepts,
         options=["가", "나"],
     )
@@ -552,9 +598,7 @@ def test_a_question_stating_nothing_resolvable_falls_back_to_a_measure_alone() -
     from src.agent.geoflow import normalize_analysis
     from src.agent.spatial import GroundingFacts
 
-    analysis = normalize_analysis(
-        {"concepts": []}, "무엇이 가장 좋은가요?", "poi", facts=GroundingFacts()
-    )
+    analysis = normalize_analysis({"concepts": []}, "무엇이 가장 좋은가요?", facts=GroundingFacts())
     places = [c for c in analysis["concepts"] if c["concept_type"] in {"location", "object"}]
 
     assert all((c.get("attributes") or {}).get("synthetic") for c in places)

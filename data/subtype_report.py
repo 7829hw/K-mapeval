@@ -57,6 +57,22 @@ def _carries_category(value) -> bool:
     return False
 
 
+def _all_qualify(step: dict, kept: list) -> bool:
+    """Does everything the filter returned actually meet the kind it was asked for?"""
+
+    from src.tools.spatial import matches_required_type
+
+    arguments = step.get("arguments") or {}
+    wanted = arguments.get("required_types") or [arguments.get("required_type")]
+    wanted = [term for term in wanted if term]
+    places = [item for item in kept if isinstance(item, dict)]
+    if not wanted or not places:
+        return False
+    return all(
+        any(matches_required_type(place, term) for term in wanted) for place in places
+    )
+
+
 def _candidate_count(step: dict, steps: list[dict]) -> int | None:
     """How many candidates the narrowing step was handed, from the node that produced them."""
 
@@ -106,7 +122,13 @@ def _outcome(steps: list[dict]) -> str:
         # lexicon fallback hands the whole list back, and a filter whose output is its input has
         # not filtered. That reads as success from outside, which is why it is named separately.
         given = _candidate_count(step, steps)
-        if given is not None and len(kept) >= given:
+        if given is not None and len(kept) >= given and not _all_qualify(step, kept):
+            # It returned everything it was given *and* some of what it returned does not meet
+            # the constraint: the lexicon fallback handed the list back and the ranking after it
+            # answered from the broad kind. Keeping everything is only a drop when keeping
+            # everything was wrong -- a filter over three candidates that are all 중식 has
+            # constrained the set, vacuously but correctly, and calling that a failure would
+            # score the diagnostic rather than the pipeline.
             return "narrowing_dropped"
         return "applied"
     inputs = [

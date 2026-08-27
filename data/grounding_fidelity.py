@@ -113,11 +113,12 @@ def report(report_paths: list[str], families: set[str] | None = None) -> None:
             for item in load_dataset(Path(payload["metadata"]["dataset_source"]))
         }
         before = Path(path).stem.removeprefix("test_")
+        since = _window(payload)
         for row in payload["results"]:
             if families and row["template_id"] not in families:
                 continue
             item = items.get(row["id"])
-            found = _pick_log(item.id, item.question, before) if item else None
+            found = _pick_log(item.id, item.question, before, since) if item else None
             if found is None:
                 continue
             chosen = graph_choice(_steps(found["log"]), list(item.options))
@@ -142,6 +143,25 @@ def report(report_paths: list[str], families: set[str] | None = None) -> None:
             for outcome in ("agrees", "generator_override", "no_graph_evidence")
         }
         print(f"    {family:30s} {counts}")
+
+
+def _window(report: dict) -> str:
+    """The earliest log this report's own run could have written.
+
+    A report states when it finished and how long each question took; the run began no earlier
+    than its finish minus the total of the slowest concurrent stream, so the start of the slowest
+    question is a safe lower bound. Logs older than that belong to some other run, and joining
+    one to this report's rows measures a revision that is not the one being reported.
+    """
+
+    from datetime import datetime, timedelta
+
+    finished = datetime.strptime(report["metadata"]["timestamp"][:19], "%Y-%m-%dT%H:%M:%S")
+    longest = max((row.get("time") or 0) for row in report["results"])
+    total = sum((row.get("time") or 0) for row in report["results"])
+    concurrency = max(int(report["metadata"].get("concurrency") or 1), 1)
+    span = max(total / concurrency, longest) + 120
+    return (finished - timedelta(seconds=span)).strftime("%Y%m%dT%H%M%SZ")
 
 
 if __name__ == "__main__":

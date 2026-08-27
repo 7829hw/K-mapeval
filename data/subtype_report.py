@@ -123,6 +123,7 @@ def classify(report_path: str, family: str = "nearby_cuisine_subtype") -> None:
         item.id: item for item in load_dataset(Path(report["metadata"]["dataset_source"]))
     }
     before = Path(report_path).stem.removeprefix("test_")
+    since = _window(report)
     table: Counter = Counter()
     rows = []
     for row in report["results"]:
@@ -136,7 +137,7 @@ def classify(report_path: str, family: str = "nearby_cuisine_subtype") -> None:
         elif not facts.target_subtype:
             outcome = "no_subtype_stated"
         else:
-            found = _pick_log(item.id, item.question, before)
+            found = _pick_log(item.id, item.question, before, since)
             outcome = _outcome(_executed(found["log"])) if found else "no_log"
         table[(outcome, bool(row["answer_correct"]))] += 1
         rows.append((row["id"], outcome, bool(row["answer_correct"]), facts.target_subtype))
@@ -150,6 +151,25 @@ def classify(report_path: str, family: str = "nearby_cuisine_subtype") -> None:
           f"{sum(v for (_, c), v in table.items() if c):7d} "
           f"{sum(v for (_, c), v in table.items() if not c):7d} {len(rows):7d}")
     return rows
+
+
+def _window(report: dict) -> str:
+    """The earliest log this report's own run could have written.
+
+    A report states when it finished and how long each question took; the run began no earlier
+    than its finish minus the total of the slowest concurrent stream, so the start of the slowest
+    question is a safe lower bound. Logs older than that belong to some other run, and joining
+    one to this report's rows measures a revision that is not the one being reported.
+    """
+
+    from datetime import datetime, timedelta
+
+    finished = datetime.strptime(report["metadata"]["timestamp"][:19], "%Y-%m-%dT%H:%M:%S")
+    longest = max((row.get("time") or 0) for row in report["results"])
+    total = sum((row.get("time") or 0) for row in report["results"])
+    concurrency = max(int(report["metadata"].get("concurrency") or 1), 1)
+    span = max(total / concurrency, longest) + 120
+    return (finished - timedelta(seconds=span)).strftime("%Y%m%dT%H%M%SZ")
 
 
 if __name__ == "__main__":

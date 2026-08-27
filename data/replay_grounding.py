@@ -74,17 +74,28 @@ def _read_log(path: Path) -> dict[str, Any] | None:
     return None
 
 
-def _pick_log(question_id: str, question: str, before: str) -> dict[str, Any] | None:
+def _pick_log(
+    question_id: str, question: str, before: str, since: str | None = None
+) -> dict[str, Any] | None:
     """The latest log for this question written no later than the run that reported it.
 
     Question ids repeat across draws, so the text has to match too; without that a `kmapeval_042`
     from another 300-question set would be replayed against this one's options.
+
+    `since` bounds the other end and is not optional when the answer is being joined to a
+    *particular* run's rows. A log is skipped when its planner logged no graph -- which happens
+    when the draft returns none and the repair supplies it -- and without a lower bound the scan
+    then walks back to whatever earlier run has a usable one. That silently answered "what did
+    this revision do" with a log another revision wrote: two of the `unconsumed_inputs`
+    violations reported for this revision came from a baseline-era log picked up that way.
     """
 
     for path in reversed(_log_candidates(question_id)):
         stamp = _LOG_STAMP.match(path.name)
         if not stamp or stamp.group(1) > before:
             continue
+        if since is not None and stamp.group(1) < since:
+            return None
         parsed = _read_log(path)
         if parsed and _same_question(parsed["question"], question):
             parsed["log"] = path.name

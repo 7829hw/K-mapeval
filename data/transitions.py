@@ -65,11 +65,12 @@ def unconsumed(report_path: str) -> None:
         item.id: item for item in load_dataset(Path(report["metadata"]["dataset_source"]))
     }
     before = Path(report_path).stem.removeprefix("test_")
+    since = _window(report)
     offenders: Counter = Counter()
     nodes = 0
     for row in report["results"]:
         item = items.get(row["id"])
-        found = _pick_log(item.id, item.question, before) if item else None
+        found = _pick_log(item.id, item.question, before, since) if item else None
         if found is None:
             continue
         for step in _transformed(found["log"]):
@@ -102,6 +103,25 @@ def _transformed(log_name: str) -> list[dict]:
         except json.JSONDecodeError:
             continue
     return graphs[-1] if graphs else []
+
+
+def _window(report: dict) -> str:
+    """The earliest log this report's own run could have written.
+
+    A report states when it finished and how long each question took; the run began no earlier
+    than its finish minus the total of the slowest concurrent stream, so the start of the slowest
+    question is a safe lower bound. Logs older than that belong to some other run, and joining
+    one to this report's rows measures a revision that is not the one being reported.
+    """
+
+    from datetime import datetime, timedelta
+
+    finished = datetime.strptime(report["metadata"]["timestamp"][:19], "%Y-%m-%dT%H:%M:%S")
+    longest = max((row.get("time") or 0) for row in report["results"])
+    total = sum((row.get("time") or 0) for row in report["results"])
+    concurrency = max(int(report["metadata"].get("concurrency") or 1), 1)
+    span = max(total / concurrency, longest) + 120
+    return (finished - timedelta(seconds=span)).strftime("%Y%m%dT%H%M%SZ")
 
 
 if __name__ == "__main__":

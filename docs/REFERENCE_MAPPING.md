@@ -3290,3 +3290,63 @@ Their pass spreads were 7, 11 and 3 points respectively, and there are no same-r
 runs on those files, so they are A3 levels rather than controlled deltas. The complete A0-A3
 table, all source report names, three label axes, failure distribution and repair rates are in
 `reports/intent_removal_a0_a3.md`.
+
+## Two spatial relations the semantic vocabulary could not say
+
+The Concept Transformation stage (see `reports/semantic_transformation_ablation.md`) recovered to
+60.4% on v7-283 and stalled there, with two families carrying most of the remaining gap for the
+same kind of reason: the planner could describe the question correctly and the vocabulary had no
+symbol for what it described.
+
+`routing_turn_count_via` asks about the drive from A through B to C. `ROUTE_MEASURE` had an
+origin and a destination and nothing between them, so a resolved [A, B, C] was measured A to B --
+a real route, fully executed, and the wrong one -- and the turns were counted on it. That is a
+confident wrong answer, not a failure, which is why it cost 69.8 points on the family without
+showing up in any error count.
+
+`trip_total_distance` asks for the whole drive of a stated itinerary. `ROUTE_MATRIX` over n stops
+routes n^2 pairs and the trip drives n-1 of them, so a total over the matrix answered a question
+about every pair. Two of that family's 21 rows reported an errored step; the rest ran cleanly and
+returned a number several times too large.
+
+Both are added as *relations*, not as operators -- `directions` has taken waypoints since the
+port began and every leg was already in the matrix:
+
+- **`via`** on a route node: a list of ids in the order the route reaches them, wired to
+  `directions` waypoints in that order. The ends of the route are the inputs and positions `via`
+  did not claim. Nothing infers a waypoint from position, deliberately: "A와 B 중 C에 더 가까운
+  곳" has a middle too, and a rule that made middles into waypoints would route it through the
+  answer.
+- **`SELECT_LEGS`** and the `select_legs` operator: the consecutive legs of a square matrix,
+  optionally under a stated order. A graph that totals a bare square matrix gets the selection
+  composed in as its own node, so the grouping stays visible in the graph rather than implied by
+  a factor.
+
+Three defects surfaced alongside them, none about waypoints or legs. All three were `inputs[0]`
+standing in for every input: a route reader handed geocoded endpoints wired
+`extract_distance(route=$A)`; `distance_matrix` over four resolved stops built a 1x1 grid; and
+`tsp_tw` took its node list from whichever input was object-typed, giving a five-stop trip one
+place beside a six-place matrix. They were invisible because the families they broke were already
+broken for the stated reason.
+
+Offline replay over the 283 recorded first-compose graphs: 42 changed -- `trip_optimal_order`
+10/24, `trip_feasible_count_five` 9/21, `trip_total_distance` 9/21, `routing_turn_count_via`
+7/21, `routing_detour_cost` 7/24, and **0 of the 151** `nearby_*`/`poi_*`/`unanswerable_*` rows.
+The replay caught one regression of this work before a benchmark did: the first version of the
+route-composition rule composed a drive from `compare_routes` to itself. Note the limit of that
+measurement -- `via` and `SELECT_LEGS` are planner vocabulary, so graphs recorded before they
+existed never use them. The replay measures the wiring fixes; only a run measures the vocabulary.
+
+Three Spatial-Agent passes at `53d28d1` on v7-283, concurrency 32, read 68.6/70.3/67.8 (mean
+**68.9%**) against the single pass at `689734d` reading 60.4%. Validation 97.5/98.9/97.9,
+semantic-vocabulary ratio 100%, concrete operator leakage 0 of 4,937 nodes. The two target
+families moved +41.3 each (`routing_turn_count_via` 14.3 -> 55.6, `trip_total_distance`
+52.4 -> 93.7), and the wiring fixes moved two families that were not targets
+(`routing_detour_cost` +23.6, `trip_optimal_order` +6.9). By class, `routing` +22.2 and `trip`
++15.7 against `nearby` -1.2 and `poi` -2.2 -- and the offline footprint says nothing in this
+change reaches a `nearby` or `poi` graph, so read those two as the draw, on this repository's own
+rule that a family number belongs to the draw it was measured on.
+
+Against `af51e93`'s 82.1% the remaining gap is about 13 points, from 22. It sits where the replay
+says this change never reached: `nearby_within_radius_count` 22.2, `nearby_cuisine_subtype` 38.9,
+`poi_distance_difference` 62.6 -- retrieve-then-narrow and pairwise-measure shapes, not routes.

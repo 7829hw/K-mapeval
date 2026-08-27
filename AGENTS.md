@@ -81,12 +81,16 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   categories is not comparable to a mean over four. v1, v2 and v3 predate `mapeval_class`; every
   set from v4 on states it per row.
 - Never special-case a question ID or option string, and never hardcode an answer.
-- For a change to Spatial-Agent *grounding*, the replay is `data/replay_grounding.py` and it is
-  cheap: grounding is a pure function of the planner's graph, the Analysis output, the question
-  and its options, and `logs/` already holds all four per question. Dump the grounded graphs at
-  both revisions and diff them — same graphs on both sides, no LLM calls, no Kakao quota. It has
-  already earned it twice: it proved the intent conjuncts changed zero of 2,577 graphs, and it
-  caught two regressions in the intent-free grounding before they reached a benchmark.
+- For a change to Spatial-Agent's *deterministic tail* — factorization and grounding — the
+  replay is `data/replay_grounding.py` and it is cheap: both are a pure function of the planner's
+  graph, the Analysis output, the question and its options, and `logs/` already holds all four per
+  question. Dump the graphs at both revisions and diff them — same graphs on both sides, no LLM
+  calls, no Kakao quota. It has
+  already earned it three times: it proved the intent conjuncts changed zero of 2,577 graphs, it
+  caught two regressions in the intent-free grounding, and it caught a route composed from
+  `compare_routes` to itself — each before a benchmark pass was spent on it. What it cannot
+  measure is a change to the planner's *vocabulary*: graphs recorded before a symbol existed never
+  use it, so `via` and `SELECT_LEGS` needed a run and the wiring fixes beside them did not.
 - Before shipping a change, measure which families it moves, not just whether the overall accuracy
   went up. Naming no family in the code is not enough — a rule can still be a family patch by
   effect, and the point is to measure the architecture, not to handle types. The cheap check is a
@@ -184,6 +188,16 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
 
 ## Benchmarks
 
+- A route the question sends *through* somewhere is one route with waypoints, and a total over an
+  itinerary covers the legs it drives. Both are said in the semantic graph — `via` on a route
+  node, `SELECT_LEGS` over a matrix — and neither is ever inferred from where an input happened
+  to sit: "A와 B 중 C에 더 가까운 곳" has a middle too, and a rule that made middles into waypoints
+  would route it through the answer. Adding them moved `routing_turn_count_via` 14.3 → 55.6 and
+  `trip_total_distance` 52.4 → 93.7. Three defects surfaced beside them, all one shape —
+  `inputs[0]` standing in for every input, in `distance_matrix`, in `tsp_tw`'s node list, and in a
+  route reader handed endpoints — and they were worth `routing_detour_cost` +23.6 and
+  `trip_optimal_order` +6.9, neither of which was a target. When a wiring rule reads one input,
+  ask what it does with the rest. See `docs/REFERENCE_MAPPING.md`.
 - An operator must answer the question the *question* asks, not the one its name suggests. `tsp_tw`
   is a travelling-salesman operator, and it permuted an itinerary the question had already ordered,
   ranked every tour by seconds when the question asked for metres, and left the tour open when the

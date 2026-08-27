@@ -329,3 +329,29 @@ def test_a_count_reads_a_count_a_node_already_reported() -> None:
 
     assert ops.count_items({"visited_count": 3, "order": [0, 2, 1]})["count"] == 3
     assert ops.count_items([{"name": "가"}, {"name": "나"}])["count"] == 2
+
+
+def test_a_stated_subtype_that_matches_nothing_is_evidence_and_not_a_lexicon_gap() -> None:
+    """The filter used to pass every candidate through, and the ranking answered from those."""
+
+    from src.tools.spatial import SpatialOperatorRegistry as ops
+
+    restaurants = [
+        {"name": "태백식당", "category": "음식점 > 한식", "latitude": 37.5, "longitude": 127.0},
+        {"name": "김밥천국", "category": "음식점 > 분식", "latitude": 37.5, "longitude": 127.0},
+    ]
+
+    assert ops.filter_places(restaurants, required_types=["중식"]) == restaurants
+    assert ops.filter_places(restaurants, required_types=["중식"], types_are_required=True) == []
+    kept = ops.filter_places(restaurants, required_types=["분식"], types_are_required=True)
+    assert [place["name"] for place in kept] == ["김밥천국"]
+
+
+def test_a_subtype_over_candidates_with_no_category_at_all_is_still_a_gap() -> None:
+    """Nothing to test the constraint against is a lexicon gap, and the filter is dropped."""
+
+    from src.tools.spatial import SpatialOperatorRegistry as ops
+
+    bare = [{"name": "가게", "latitude": 37.5, "longitude": 127.0}]
+
+    assert ops.filter_places(bare, required_types=["중식"], types_are_required=True) == bare

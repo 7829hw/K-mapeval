@@ -256,7 +256,7 @@ OPERATOR_CONTRACTS: dict[str, OperatorContract] = {
     "filter_places": OperatorContract(
         "object",
         ("places",),
-        ("min_rating", "price_levels", "required_types", "open_now"),
+        ("min_rating", "price_levels", "required_types", "open_now", "types_are_required"),
         ("places",),
     ),
     "steps_analysis": OperatorContract(

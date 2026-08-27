@@ -489,6 +489,7 @@ class SpatialOperatorRegistry:
         price_levels: list[str] | None = None,
         required_types: list[str] | None = None,
         open_now: bool | None = None,
+        types_are_required: bool = False,
     ) -> list[dict[str, Any]]:
         price_set = {value.casefold() for value in (price_levels or [])}
         candidates = [place for _, place in _as_place_list(places, keep_unresolved=True)]
@@ -518,11 +519,21 @@ class SpatialOperatorRegistry:
             for place in attribute_matches
             if any(matches_required_type(place, required) for required in required_types or [])
         ]
-        # The kind filter is a preference, exactly as it is in `nearest`: a category vocabulary
-        # that does not cover this type is a gap in the lexicon, not evidence that none of these
-        # places qualifies. Emptying the list here is worse than not filtering, because the
-        # ranking downstream then has nothing to rank and the answer gets guessed.
-        return selected or attribute_matches
+        if selected:
+            return selected
+        if types_are_required and evidence_carries(attribute_matches, "category"):
+            # The question stated the narrowing and the provider files it, so "none of these is
+            # 중식" is evidence and not a gap in the lexicon. Passing every candidate through
+            # here is how a 중식 question was answered with the nearest restaurant of any kind:
+            # the constraint the question spent a clause on simply stopped applying, and nothing
+            # downstream could tell. Where the candidates carry no category at all the old
+            # reading still holds -- that is a gap, and the filter is dropped.
+            return []
+        # Otherwise the kind filter is a preference, exactly as it is in `nearest`: a category
+        # vocabulary that does not cover this type is a gap in the lexicon, not evidence that
+        # none of these places qualifies. Emptying the list here is worse than not filtering,
+        # because the ranking downstream then has nothing to rank and the answer gets guessed.
+        return attribute_matches
 
     @staticmethod
     def steps_analysis(route: dict[str, Any], landmark: str | None = None) -> dict[str, Any]:

@@ -7,11 +7,20 @@ plus the question and its options, so it can be re-run offline as many times as 
 revisions to compare, with no LLM calls and no Kakao quota.
 
     python data/replay_grounding.py reports/test_A.json ... --out before.json
-    git checkout <other-revision> && python data/replay_grounding.py ... --out after.json
+    git -C <checkout> ... && PYTHONPATH=<checkout> python <checkout>/data/replay_grounding.py \
+        reports/test_A.json --out after.json
     python data/replay_grounding.py --diff before.json after.json
 
 The diff is counted by `template_id` and by `mapeval_class`, because "the overall accuracy did
 not move" and "no family moved" are different claims and only the second one is evidence.
+
+`PYTHONPATH` is not optional and the provenance banner is why. Running a worktree's copy of this
+script as `python data/replay_grounding.py` puts *that script's directory* on `sys.path`, not the
+worktree root, so `import src` falls through to the editable install and resolves to the main
+checkout. Both sides of a comparison then run the same code and the diff reads "0 changed" --
+which is indistinguishable from a change with no footprint, and is the more comforting of the two
+readings. So every run prints which `src` it actually imported, beside the revision it believes
+it is measuring; a mismatch between those two lines is the bug, and it is now visible.
 
 This is offline dataset tooling: it imports `src/`, and nothing under `src/` imports it.
 """
@@ -153,9 +162,64 @@ def _factorize(
     ).graph
 
 
+def provenance() -> dict[str, str]:
+    """What this replay is actually running: the checkout, the code, and the datasets.
+
+    Recorded rather than assumed. A footprint is a claim about two revisions, and the only
+    evidence that it measured two is that these lines differ between the runs being compared.
+    """
+
+    import subprocess
+
+    import src.agent.semantics as semantics
+    import src.agent.spatial as spatial
+
+    # The checkout `src` lives in, so it can be set beside the checkout this script came from.
+    source = Path(semantics.__file__).resolve().parents[2]
+    del semantics
+    try:
+        revision = subprocess.run(
+            ["git", "-C", str(source), "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        dirty = bool(
+            subprocess.run(
+                ["git", "-C", str(source), "status", "--porcelain", "--", "src", "data"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+        )
+    except (OSError, subprocess.CalledProcessError):
+        revision, dirty = "unknown", False
+    return {
+        "script": str(Path(__file__).resolve()),
+        "imported_src": str(Path(spatial.__file__).resolve().parents[2]),
+        "revision": revision + ("+dirty" if dirty else ""),
+        "datasets": str(ROOT / "dataset"),
+    }
+
+
+def _announce(where: dict[str, str]) -> None:
+    print("replaying with:")
+    for key in ("script", "imported_src", "revision", "datasets"):
+        print(f"  {key:14s} {where[key]}")
+    script_root = str(Path(where["script"]).parent.parent)
+    if script_root != where["imported_src"]:
+        print(
+            f"  WARNING        this script lives in {script_root} but imports src from "
+            f"{where['imported_src']}; set PYTHONPATH={script_root} to measure the checkout "
+            "this script came from"
+        )
+
+
 def replay(report_paths: list[Path]) -> dict[str, Any]:
     from src.dataset import load_dataset, resolve_mapeval_class
 
+    where = provenance()
+    _announce(where)
     grounded: dict[str, Any] = {}
     misses = Counter()
     for report_path in report_paths:
@@ -187,10 +251,23 @@ def replay(report_paths: list[Path]) -> dict[str, Any]:
             except Exception as error:  # a graph this revision refuses is itself an outcome
                 entry["error"] = f"{type(error).__name__}: {error}"
             grounded[key] = entry
-    return {"questions": grounded, "skipped": dict(misses)}
+    return {"questions": grounded, "skipped": dict(misses), "provenance": where}
 
 
 def diff(before: dict[str, Any], after: dict[str, Any]) -> None:
+    for label, side in (("before", before), ("after", after)):
+        where = side.get("provenance") or {}
+        print(
+            f"{label:7s} revision={where.get('revision', 'unrecorded')} "
+            f"src={where.get('imported_src', 'unrecorded')}"
+        )
+    left_where = (before.get("provenance") or {}).get("imported_src")
+    right_where = (after.get("provenance") or {}).get("imported_src")
+    if left_where is not None and left_where == right_where:
+        print(
+            "  WARNING both sides imported src from the same directory, so this diff compares a "
+            "revision against itself; re-run one side with PYTHONPATH set to its checkout"
+        )
     left, right = before["questions"], after["questions"]
     shared = sorted(set(left) & set(right))
     changed = [

@@ -1660,6 +1660,11 @@ def _ground_graph_literals(
             # and the sector. A planner asked to transcribe it writes the whole phrase, and
             # "중식 음식점" matches no category path at all.
             arguments["required_types"] = [facts.target_subtype]
+            # The question stated it and the provider files it, so an empty result is evidence
+            # rather than a lexicon gap. Without this the filter passes every candidate through
+            # the moment none matches, and the constraint the question spent a clause on stops
+            # applying with nothing downstream able to tell.
+            arguments["types_are_required"] = True
             grounded.append({**step, "arguments": arguments})
             continue
         if operator == "filter_by_distance" and radius_m is not None:

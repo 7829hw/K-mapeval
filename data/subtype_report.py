@@ -103,6 +103,11 @@ def _candidate_count(step: dict, steps: list[dict]) -> int | None:
 def _outcome(steps: list[dict]) -> str:
     """Which of the five, from the filter step the run actually executed."""
 
+    if not steps:
+        # Nothing ran at all -- the graph was refused before execution. That is a different
+        # outcome from a graph that ran without its narrowing, and reporting it as the second
+        # inflates the architectural failure count with rows that never got as far as narrowing.
+        return "nothing_executed"
     narrowing = [
         step
         for step in steps
@@ -111,7 +116,18 @@ def _outcome(steps: list[dict]) -> str:
     ]
     if not narrowing:
         return "narrowing_not_in_graph"
-    step = narrowing[0]
+    # Any of them narrowing effectively is enough: a graph often both filters and ranks by kind,
+    # and reading only the first calls the whole question a drop when the second one bound.
+    outcomes = [_one_narrowing(step, steps) for step in narrowing]
+    if "applied" in outcomes:
+        return "applied"
+    for outcome in ("no_provider_match", "narrowing_dropped", "attributes_missing"):
+        if outcome in outcomes:
+            return outcome
+    return outcomes[0]
+
+
+def _one_narrowing(step: dict, steps: list[dict]) -> str:
     if step.get("status") != "ok":
         return "filter_step_failed"
     result = step.get("result")

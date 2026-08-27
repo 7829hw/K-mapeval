@@ -43,6 +43,12 @@ class AgentResult(BaseModel):
     # semantic vocabulary took, and it belongs beside an accuracy that was measured with it.
     graph_nodes: int = Field(default=0, ge=0)
     planner_named_operator_nodes: int = Field(default=0, ge=0)
+    # Departures from what a well-formed semantic graph would look like, recorded and not
+    # refused. Both were tried as refusals and both cost more than they caught: enforcing them
+    # turned answerable questions into validation failures at about three times the rate they
+    # prevented an unrestricted answer, and took G1-G5 below 90%. They stay because the
+    # architectural claim needs them measurable, not because the graph is unusable without them.
+    semantic_diagnostics: list[dict[str, Any]] = Field(default_factory=list)
     latency_ms: float = Field(default=0.0, ge=0)
     failure_type: str | None = None
     failure_message: str | None = None

@@ -956,12 +956,15 @@ class SemanticFactorization:
     decisions: tuple[dict[str, str], ...]
     #: Nodes the planner named an operator for instead of a transformation.
     concrete_nodes: tuple[str, ...]
+    #: Departures worth counting that are not worth refusing over. See `AgentResult`.
+    diagnostics: tuple[dict[str, Any], ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "graph": self.graph,
             "decisions": [dict(row) for row in self.decisions],
             "concrete_nodes": list(self.concrete_nodes),
+            "diagnostics": [dict(row) for row in self.diagnostics],
         }
 
 
@@ -1250,6 +1253,7 @@ def factorize_semantic_graph(
     graph: list[dict[str, Any]] = []
     decisions: list[dict[str, str]] = []
     concrete: list[str] = []
+    diagnostics: list[dict[str, Any]] = []
     produced_by: dict[str, str] = {}
     output_types: dict[str, str] = {}
     # A node the factorization folded into its input: the id still resolves, to the node that
@@ -1318,13 +1322,20 @@ def factorize_semantic_graph(
         # carried never applied -- one of the eight graphs that came out with no narrowing in
         # them. A reference that resolves to nothing is a planner fault with a name.
         carried = _constraint_inputs(declared_inputs, constraint_by_id)
-        dangling = _dangling_references(
+        for reference in _dangling_references(
             declared_inputs, follow, produced_by, resolved_concepts, constraint_by_id
-        )
-        if dangling:
-            raise ValueError(
-                f"GeoFlow node {node_id!r} names {', '.join(dangling)} as input, which is "
-                "neither a node in this graph nor a concept any RESOLVE_PLACES bound"
+        ):
+            # Recorded, not refused. As a refusal this cost `nearby_kth_nearest` 27.8 points and
+            # took validation below 90%: the graphs it names are malformed, and repair does not
+            # fix them, so enforcing it traded a wrong answer for no answer. The reference is
+            # still a defect and still worth counting.
+            diagnostics.append(
+                {
+                    "kind": "invalid_semantic_reference",
+                    "node": node_id,
+                    "transform": transform_name or "(operator)",
+                    "reference": reference.strip("'"),
+                }
             )
         endpoints: tuple[str, ...] = ()
         if transform_name.upper() in _PAIRWISE_TRANSFORMS:
@@ -1638,7 +1649,9 @@ def factorize_semantic_graph(
                 **({"constraint_ids": carried} if carried else {}),
             }
         )
-    return SemanticFactorization(graph, tuple(decisions), tuple(concrete))
+    return SemanticFactorization(
+        graph, tuple(decisions), tuple(concrete), tuple(diagnostics)
+    )
 
 
 def _bind_named_entities(

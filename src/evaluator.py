@@ -322,6 +322,8 @@ class Evaluator:
                 # the compact details so aggregate accuracy cannot hide a broken execution path.
                 "execution_error_count": len(result.execution_errors),
                 "graph_nodes": result.graph_nodes,
+                # Recorded, never a reason to refuse the graph. See `AgentResult`.
+                "semantic_diagnostics": result.semantic_diagnostics,
                 "planner_named_operator_nodes": result.planner_named_operator_nodes,
                 "execution_errors": result.execution_errors,
                 "error": error,
@@ -388,6 +390,7 @@ class Evaluator:
             "reasoning_chars": 0,
             "execution_error_count": 0,
             "graph_nodes": 0,
+            "semantic_diagnostics": [],
             "planner_named_operator_nodes": 0,
             "execution_errors": [],
             "error": error,

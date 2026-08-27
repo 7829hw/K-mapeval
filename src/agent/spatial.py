@@ -4,7 +4,7 @@ import json
 import re
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -286,6 +286,7 @@ class SpatialAgent(BenchmarkAgent):
         execution_errors: list[dict[str, str]] = []
         semantic_nodes = 0
         concrete_nodes = 0
+        semantic_diagnostics: list[dict[str, Any]] = []
         try:
             analysis_response = self.llm.chat(
                 [
@@ -503,6 +504,7 @@ class SpatialAgent(BenchmarkAgent):
             # the semantic vocabulary took.
             semantic_nodes = len(semantic.graph)
             concrete_nodes = len(semantic.concrete_nodes)
+            semantic_diagnostics = [dict(row) for row in semantic.diagnostics]
             trace.append({"stage": "transform", **semantic.as_dict()})
             trace.append({"stage": "factorize", **factorized.as_dict()})
             trace.append(
@@ -683,6 +685,7 @@ class SpatialAgent(BenchmarkAgent):
             execution_errors=execution_errors,
             graph_nodes=semantic_nodes,
             planner_named_operator_nodes=concrete_nodes,
+            semantic_diagnostics=semantic_diagnostics,
             latency_ms=(time.perf_counter() - started) * 1000,
             failure_type=failure_type,
             failure_message=failure_message,
@@ -752,9 +755,6 @@ def _factorize_validate_plan(
     grounded = _ground_graph_literals(
         semantic.graph, question, options, facts, retrieval_specs=retrieval_specs
     )
-    unheld = _unpreserved_constraints(grounded, facts)
-    if unheld:
-        raise ValueError("; ".join(unheld))
     factorized = factorize_geoflow(analysis, {"graph": grounded}, strict_types=strict_types)
     # The planner budget above governs what the planner authored. Retrieval fan-out added
     # during grounding is deterministic and gets its own allowance on top of it.
@@ -762,6 +762,14 @@ def _factorize_validate_plan(
         factorized.as_dict(),
         max_steps=max(max_steps, len(grounded)),
         strict_types=strict_types,
+    )
+    # Counted after the graph is otherwise accepted, and deliberately not a G1-G5 constraint: as
+    # a refusal this blocked graphs that go on to answer correctly, and the evidence does not
+    # support calling an unpreserved restriction unexecutable. It is an architectural
+    # measurement, so it travels with the result rather than ending it.
+    semantic = replace(
+        semantic,
+        diagnostics=(*semantic.diagnostics, *_unpreserved_constraints(grounded, facts)),
     )
     return factorized, steps, constraints, semantic
 
@@ -776,7 +784,9 @@ _CONSTRAINT_ARGUMENTS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _unpreserved_constraints(steps: list[dict[str, Any]], facts: GroundingFacts) -> list[str]:
+def _unpreserved_constraints(
+    steps: list[dict[str, Any]], facts: GroundingFacts
+) -> list[dict[str, Any]]:
     """Restrictions the question states that nothing on the way to the answer applies.
 
     A stated narrowing that no node carries is a question answered without its own condition --
@@ -789,7 +799,7 @@ def _unpreserved_constraints(steps: list[dict[str, Any]], facts: GroundingFacts)
     is a different problem and not this one.
     """
 
-    unheld: list[str] = []
+    unheld: list[dict[str, Any]] = []
     for fact, arguments in _CONSTRAINT_ARGUMENTS.items():
         stated = getattr(facts, fact, None)
         if not stated:
@@ -802,9 +812,13 @@ def _unpreserved_constraints(steps: list[dict[str, Any]], facts: GroundingFacts)
         if carriers and _reaches_a_measure(steps, carriers):
             continue
         unheld.append(
-            f"the question restricts the answer to {stated!r} and no step on the way to the "
-            "measure applies it; narrow the candidates, or measure them as a set so the "
-            "restriction has somewhere to sit"
+            {
+                "kind": "constraint_unpreserved",
+                "constraint": fact,
+                "value": str(stated),
+                "carried_by": sorted(carriers),
+                "reaches_measure": bool(carriers),
+            }
         )
     return unheld
 

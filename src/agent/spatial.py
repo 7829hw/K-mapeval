@@ -171,17 +171,15 @@ What the question is about, not what the tools are:
   say so on the graph -- {"graph":[...],"not_applicable":["FILTER"]} -- rather than leaving it
   out; a shape was retrieved because the question has that structure, so an omission is either a
   mistake or a judgement and only you can say which.
-- A measure between two places has to say which two. Give PAIRWISE_MEASURE the two nodes that
+- A measure between two places has to say which two. Give DISTANCE_MEASURE the two nodes that
   resolved them, or name the two concepts in concept_ids. Two measures over one resolved list
   are the same measure twice, and their difference is zero.
-- Say which kind of measure you mean. SET_MEASURE ranks a whole candidate set against one
-  anchor and is where a restriction on that set lives; PAIRWISE_MEASURE relates two named places
-  and carries nothing about a set. A question that restricts what counts -- a kind, a radius, a
-  sector -- needs SET_MEASURE over the candidates, because measuring them one pair at a time
-  leaves the restriction nowhere to sit and the answer comes back unrestricted.
+- A measure of a whole candidate set against one anchor takes the anchor first and the set
+  second, and it is where a restriction on that set lives. Measuring the candidates one pair at
+  a time leaves a stated kind or radius nowhere to sit and the answer comes back unrestricted.
 - A restriction the analysis extracted is a concept, and the node that applies it names it as an
-  input: FILTER or SET_MEASURE with inputs ["candidates", "constraint"]. The literal is bound for
-  you; naming the concept is how the graph says where the restriction applies.
+  input: FILTER with inputs ["candidates", "constraint"]. The literal is bound for you; naming
+  the concept is how the graph says where the restriction applies.
 
 Do not select an option and do not use the gold answer."""
 

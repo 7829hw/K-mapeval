@@ -818,7 +818,7 @@ TEMPLATES = {
         # separate the working graphs from the broken ones here.
         "pattern": (
             "RESOLVE_PLACES (the anchor only) -> PLACE_SEARCH (the broad kind) -> "
-            "FILTER (scope=attribute) -> SET_MEASURE -> ORDINAL_SELECT -> MATCH_OPTIONS"
+            "FILTER (scope=attribute) -> DISTANCE_MEASURE -> ORDINAL_SELECT -> MATCH_OPTIONS"
         ),
         "example": {"graph": []},
     },
@@ -1085,7 +1085,7 @@ SKELETONS: dict[str, list[dict[str, Any]]] = {
         # checked; the prompt says it in prose instead.
         {"id": "narrowed", "transform": "FILTER", "inputs": ["found"],
          "factors": {"scope": "attribute"}, "role": "support"},
-        {"id": "ranked", "transform": "SET_MEASURE", "inputs": ["anchor", "narrowed"],
+        {"id": "ranked", "transform": "DISTANCE_MEASURE", "inputs": ["anchor", "narrowed"],
          "role": "support"},
         {"id": "kth", "transform": "ORDINAL_SELECT", "inputs": ["ranked"],
          "factors": {"ordinal": 1}, "role": "support"},

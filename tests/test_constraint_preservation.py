@@ -46,17 +46,18 @@ def _build(graph, *, concepts, options=OPTIONS, facts=FACTS):
 # ---------------------------------------------------------------------------------------------
 
 
-def test_a_set_measure_ranks_a_set_however_many_inputs_it_has() -> None:
-    """`DISTANCE_MEASURE` guesses from the shape of its inputs; `SET_MEASURE` is told."""
+def test_a_measure_over_an_anchor_and_a_set_ranks() -> None:
+    """Inferred from what each input resolved to. The alternative was measured and reverted."""
 
     assert resolve_operator(
-        "SET_MEASURE", {}, input_types=["object", "object"], facts=None, available=ALL
-    ) == ("nearest", "_a_set")
+        "DISTANCE_MEASURE", {}, input_types=["object", "object"], facts=None, available=ALL,
+        input_is_collection=[False, True],
+    ) == ("nearest", "_one_place_against_many")
 
 
-def test_a_pairwise_measure_relates_two_places_and_says_nothing_about_a_set() -> None:
+def test_two_places_relate_as_a_pair() -> None:
     assert resolve_operator(
-        "PAIRWISE_MEASURE", {}, input_types=["object", "object"], facts=None, available=ALL
+        "DISTANCE_MEASURE", {}, input_types=["object", "object"], facts=None, available=ALL
     )[0] == "haversine_distance"
 
 
@@ -66,7 +67,7 @@ def test_a_set_measure_over_a_retrieval_carries_the_stated_kind() -> None:
             {"id": "anchor", "transform": "RESOLVE_PLACES", "inputs": [],
              "concept_ids": ["anchor"], "role": "extent"},
             {"id": "found", "transform": "PLACE_SEARCH", "inputs": ["anchor"]},
-            {"id": "ranked", "transform": "SET_MEASURE", "inputs": ["anchor", "found"]},
+            {"id": "ranked", "transform": "DISTANCE_MEASURE", "inputs": ["anchor", "found"]},
             {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["ranked"],
              "role": "measure"},
         ],
@@ -117,7 +118,7 @@ def test_an_input_that_names_nothing_is_reported_and_the_graph_still_runs() -> N
         [
             {"id": "anchor", "transform": "RESOLVE_PLACES", "inputs": [],
              "concept_ids": ["anchor"], "role": "extent"},
-            {"id": "m", "transform": "PAIRWISE_MEASURE", "inputs": ["anchor", "candidate_0"]},
+            {"id": "m", "transform": "DISTANCE_MEASURE", "inputs": ["anchor", "candidate_0"]},
         ],
         concepts=[ANCHOR, KIND],
     )
@@ -126,7 +127,7 @@ def test_an_input_that_names_nothing_is_reported_and_the_graph_still_runs() -> N
     assert len(reported) == 1
     assert reported[0]["node"] == "m"
     assert reported[0]["reference"] == "candidate_0"
-    assert reported[0]["transform"] == "PAIRWISE_MEASURE"
+    assert reported[0]["transform"] == "DISTANCE_MEASURE"
     # And the graph is intact: the reference to nothing is dropped, as it always was, rather
     # than taking the node and the question with it.
     assert [step["operator"] for step in built.graph] == [
@@ -168,7 +169,7 @@ def test_a_pairwise_graph_that_cannot_hold_the_stated_kind_is_reported() -> None
                 for index in range(4)
             ),
             *(
-                {"id": f"m{index}", "transform": "PAIRWISE_MEASURE",
+                {"id": f"m{index}", "transform": "DISTANCE_MEASURE",
                  "inputs": ["anchor", f"r{index}"]}
                 for index in range(4)
             ),

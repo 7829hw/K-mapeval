@@ -288,7 +288,9 @@ class SpatialAgent(BenchmarkAgent):
             # evidence -- it is what the deterministic extractors already found in the same
             # question, which the fallback used to discard in favour of the question text.
             stated = extract_facts(raw_analysis, question)
-            analysis = normalize_analysis(raw_analysis, question, fallback_intent, facts=stated)
+            analysis = normalize_analysis(
+                raw_analysis, question, fallback_intent, facts=stated, options=options
+            )
             predicted_intent = str(analysis.pop("intent")).lower()
             if predicted_intent not in SUPPORTED_INTENTS:
                 predicted_intent = fallback_intent

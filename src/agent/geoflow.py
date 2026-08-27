@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -1433,6 +1433,7 @@ def normalize_analysis(
     question: str,
     fallback_intent: str,
     facts: Any = None,
+    options: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Normalize the Analysis stage's reply, completing it from `facts` where it came up short.
 
@@ -1473,6 +1474,7 @@ def normalize_analysis(
             )
     if not concepts:
         concepts = _concepts_from_facts(facts, measure)
+    concepts = _repair_place_concepts(concepts, question, facts, options)
     if measure is None:
         measure = next(
             (
@@ -1500,6 +1502,149 @@ def normalize_analysis(
         "measure": measure,
         "target_type": target_type,
     }
+
+
+#: A place name in these benchmarks runs to about fifteen characters. Past twenty-five, a
+#: "place" that also appears in the question is a clause of the question.
+_LONGEST_PLACE_NAME = 25
+
+
+def _known_names(facts: Any, options: Sequence[str]) -> list[str]:
+    """Every entity this question is already known to name, from the facts and the candidates."""
+
+    known: list[str] = [str(option).strip() for option in options]
+    if facts is not None:
+        known.extend(str(name).strip() for name in (getattr(facts, "listed_places", ()) or ()))
+        stated = getattr(facts, "stated_places", None)
+        if callable(stated):
+            known.extend(str(name).strip() for name in stated())
+    return [name for name in known if name]
+
+
+def _split_into_known_names(text: str, known: Sequence[str]) -> list[str]:
+    """The entities a joined string names, or nothing when it does not name several.
+
+    Deliberately not a comma splitter. `제과,베이커리` is one kind of place and
+    `우리은행 365코너 왕십리역지점(점외)` carries its own punctuation, so a split is only made
+    when every piece is an entity this question was already known to name. What that catches is
+    the Analysis stage emitting the whole candidate list as one concept -- which then geocoded
+    "이태원 농담, 코파카바나그릴, 웍바이술0.05, 이태원주식" as a single place, found nothing, and
+    left the subtype filter one opaque item to narrow.
+    """
+
+    if "," not in text:
+        return []
+    lookup = {"".join(name.split()): name for name in known}
+    pieces = [_bare_name(piece) for piece in text.strip().strip("[]()").split(",")]
+    matched = [lookup.get("".join(piece.split())) for piece in pieces]
+    if len(matched) < 2 or any(name is None for name in matched):
+        return []
+    return [name for name in matched if name]
+
+
+#: The label a stage puts in front of a candidate when it is listing them. Recorded spellings:
+#: `Option 0: 볶다`, and the same with `선택지`/`후보`.
+_CANDIDATE_LABEL = re.compile(r"^\s*(?:option|선택지|후보|candidate)\s*\d*\s*[:.)]\s*", re.I)
+
+
+def _bare_name(piece: str) -> str:
+    """One entity out of however the stage wrapped it.
+
+    The joined concept arrives in three spellings across the recorded runs: plain
+    `A, B, C`; a Python list repr rendered as a string, `['A', 'B', 'C']`; and labelled,
+    `Option 0: A, Option 1: B`. All three are the same mistake, and the licence to split is the
+    same either way -- every piece has to be an entity this question was already known to name.
+    """
+
+    stripped = _CANDIDATE_LABEL.sub("", piece.strip())
+    return stripped.strip().strip("[]()").strip().strip("'\"").strip()
+
+
+def _is_question_text(text: str, question: str) -> bool:
+    """Is this "place" a clause of the question rather than an entity in it?"""
+
+    stripped = text.strip()
+    if len(stripped) < _LONGEST_PLACE_NAME:
+        return False
+    return stripped in question or question.startswith(stripped[:_LONGEST_PLACE_NAME])
+
+
+def _repair_place_concepts(
+    concepts: list[dict[str, Any]], question: str, facts: Any, options: Sequence[str]
+) -> list[dict[str, Any]]:
+    """Reconcile the Analysis stage's concepts with what the question was read to state.
+
+    Three repairs, each keyed on evidence this pipeline already has rather than on a new read of
+    the question:
+
+    * a concept holding several known entities as one string becomes one concept per entity;
+    * a "place" that is a clause of the question is marked synthetic, so nothing geocodes it;
+    * entities the facts found and no concept mentions are added.
+
+    Valid concepts are left exactly as they are. Every concept this function creates or alters
+    carries ``attributes["source"] = "fact_completion"`` so a report can count them.
+    """
+
+    known = _known_names(facts, options)
+    repaired: list[dict[str, Any]] = []
+    for concept in concepts:
+        text = str(concept.get("text") or "")
+        pieces = _split_into_known_names(text, known)
+        if pieces and concept.get("concept_type") in {"location", "object"}:
+            for index, name in enumerate(pieces):
+                repaired.append(
+                    {
+                        **concept,
+                        "id": f"{concept.get('id')}_{index}",
+                        "text": name,
+                        "attributes": {
+                            **(concept.get("attributes") or {}),
+                            "source": "fact_completion",
+                        },
+                    }
+                )
+            continue
+        if concept.get("concept_type") in {"location", "object"} and _is_question_text(
+            text, question
+        ):
+            repaired.append(
+                {
+                    **concept,
+                    "attributes": {
+                        **(concept.get("attributes") or {}),
+                        "synthetic": True,
+                        "source": "fact_completion",
+                    },
+                }
+            )
+            continue
+        repaired.append(concept)
+
+    listed = [
+        str(name).strip()
+        for name in (getattr(facts, "listed_places", ()) or () if facts is not None else ())
+        if str(name).strip()
+    ]
+    if listed:
+        present = {
+            "".join(str(concept.get("text") or "").split()) for concept in repaired
+        }
+        missing = [name for name in listed if "".join(name.split()) not in present]
+        anchor = next(
+            (concept["id"] for concept in repaired if concept.get("role") == "extent"), None
+        )
+        for index, name in enumerate(missing):
+            repaired.append(
+                {
+                    "id": f"listed_{index}",
+                    "text": name,
+                    "concept_type": "location",
+                    "role": "support",
+                    "attributes": {"source": "fact_completion"},
+                    "depends_on": [anchor] if anchor else [],
+                }
+            )
+    return repaired
 
 
 def _concepts_from_facts(facts: Any, measure: str | None) -> list[dict[str, Any]]:
@@ -1537,6 +1682,13 @@ def _concepts_from_facts(facts: Any, measure: str | None) -> list[dict[str, Any]
     for index, name in enumerate(pair or ()):
         if str(name).strip():
             built.append(concept(f"compared_{index}", str(name).strip(), "location", "extent", []))
+    listed = getattr(facts, "listed_places", ()) if facts is not None else ()
+    for index, name in enumerate(listed or ()):
+        if str(name).strip():
+            built.append(
+                concept(f"listed_{index}", str(name).strip(), "location", "support",
+                        ["anchor"] if built else [])
+            )
     if not built:
         # Nothing stated that any extractor could find. A measure alone is still a valid graph:
         # it says what is being asked for and nothing about where, which is honest.

@@ -19,6 +19,7 @@ from src.agent.geoflow import (
     ExampleEmbedder,
     OperatorContract,
     canonical_reference,
+    conformance_violations,
     factorize_geoflow,
     normalize_analysis,
     normalize_and_validate_graph,
@@ -165,6 +166,11 @@ What the question is about, not what the tools are:
   scope="attribute", then rank. The analysis extracted both halves and the filter is bound for
   you. Ranking straight off the retrieval answers with the nearest place of the broad kind, and
   the other options are exactly that.
+- A retrieved shape's steps are required, not suggested. If the shape you were shown narrows,
+  ranks, aggregates or routes, your graph does that too. Where a step genuinely does not apply,
+  say so on the graph -- {"graph":[...],"not_applicable":["FILTER"]} -- rather than leaving it
+  out; a shape was retrieved because the question has that structure, so an omission is either a
+  mistake or a judgement and only you can say which.
 - A measure between two places has to say which two. Give DISTANCE_MEASURE the two nodes that
   resolved them, or name the two concepts in concept_ids. Two measures over one resolved list
   are the same measure twice, and their difference is zero.
@@ -306,6 +312,10 @@ class SpatialAgent(BenchmarkAgent):
             # is read off the concepts and roles. Which worked example resembles this question is
             # a similarity judgement, and that is what an embedding is for.
             templates = retrieve_templates(runtime_analysis, question)
+            # Only the top shape's structure is enforced: that is the one the retrieval says the
+            # question is, and requiring every retrieved shape's steps would demand a graph that
+            # is two shapes at once.
+            required_structure = templates[0].get("requires") if templates else None
             examples = retrieve_examples(
                 runtime_analysis, question, embed=self.example_embedder
             )
@@ -349,6 +359,7 @@ class SpatialAgent(BenchmarkAgent):
                     self.max_steps,
                     retrieval_specs=self.tools.retrieval_specs,
                     available_operators=self.executable_operators,
+                    requires=required_structure,
                 )
             except ValueError as graph_error:
                 trace.append(
@@ -396,6 +407,7 @@ class SpatialAgent(BenchmarkAgent):
                         self.max_steps,
                         retrieval_specs=self.tools.retrieval_specs,
                         available_operators=self.executable_operators,
+                        requires=required_structure,
                     )
                 except ValueError as repair_error:
                     # Upstream has no type or role check to fail in the first place. The repair
@@ -416,6 +428,13 @@ class SpatialAgent(BenchmarkAgent):
                             retrieval_specs=self.tools.retrieval_specs,
                             available_operators=self.executable_operators,
                             strict_types=False,
+                            # `strict_types=False` relaxes this port's own type, role and
+                            # argument-value checks on the last attempt. Conformance is not one
+                            # of those: it says the graph does the reasoning its shape calls for,
+                            # and a graph that skips it answers a different question rather than
+                            # answering this one imperfectly. Relaxing it here would be the
+                            # deterministic stage waving through missing semantics.
+                            requires=required_structure,
                         )
                     except ValueError as repaired_lenient_error:
                         trace.append(
@@ -438,6 +457,7 @@ class SpatialAgent(BenchmarkAgent):
                                 retrieval_specs=self.tools.retrieval_specs,
                                 available_operators=self.executable_operators,
                                 strict_types=False,
+                                requires=required_structure,
                             )
                         except ValueError as original_lenient_error:
                             trace.append(
@@ -690,10 +710,20 @@ def _factorize_validate_plan(
     strict_types: bool = True,
     retrieval_specs: RetrievalSpecs = canonical_retrieval_specs,
     available_operators: frozenset[str] = frozenset(OPERATOR_CONTRACTS),
+    requires: dict[str, Any] | None = None,
 ):
     raw_steps = plan.get("graph") if plan.get("graph") is not None else plan.get("steps")
     if not isinstance(raw_steps, list):
         raise ValueError("GeoFlow response does not contain a graph")
+    # Conformance before factorization. A shape is retrieved because the question has that
+    # structure, and a graph that drops one of its steps is answering a different question --
+    # eight recorded `nearby_cuisine_subtype` graphs had `Search-Narrow-Rank` in front of the
+    # planner and no narrowing in them, and each one ranked restaurants of every kind. The
+    # factorizer must not make this good: synthesising a missing step would be deterministic
+    # code inventing spatial reasoning the planner did not do.
+    departures = conformance_violations(plan, requires)
+    if departures:
+        raise ValueError("; ".join(departures))
     if len(raw_steps) > max_steps:
         raise ValueError(
             f"GeoFlow graph has {len(raw_steps)} operators, exceeding "

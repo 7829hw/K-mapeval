@@ -749,6 +749,10 @@ TEMPLATES = {
         "affinity": {"radius", "within", "count"},
         "radius_literal": True,
         "keywords": ("반경", "이내", "within", "radius"),
+        "requires": {
+            "transforms": ("FILTER", "AGGREGATE"),
+            "dependencies": (("FILTER", "AGGREGATE"),),
+        },
         "pattern": (
             "RESOLVE_PLACES -> PLACE_SEARCH -> DISTANCE_MEASURE -> FILTER (the stated radius) "
             "-> AGGREGATE (count) -> MATCH_OPTIONS"
@@ -782,7 +786,11 @@ TEMPLATES = {
         "affinity": {"radius", "within", "count", "candidates"},
         "listed_literal": True,
         "keywords": ("반경", "이내", "목록", "몇 곳"),
-        "supersedes": ("radius",),
+        "supersedes": ("radius", "geocode_compare"),
+        "requires": {
+            "transforms": ("DISTANCE_MEASURE", "FILTER", "AGGREGATE"),
+            "dependencies": (("DISTANCE_MEASURE", "FILTER"), ("FILTER", "AGGREGATE")),
+        },
         "pattern": (
             "RESOLVE_PLACES (anchor) + RESOLVE_PLACES (scope=listed) -> DISTANCE_MEASURE -> "
             "FILTER (the stated radius) -> AGGREGATE (count) -> MATCH_OPTIONS"
@@ -794,7 +802,20 @@ TEMPLATES = {
         "affinity": {"nearest", "closest", "kind", "subtype", "cuisine"},
         "subtype_literal": True,
         "keywords": ("가장 가까운", "가까운", "nearest"),
-        "supersedes": ("search_rank_ordinal",),
+        # `Geocode-Batch-Compare` is the rival shape, and it is the one the planner copied on
+        # five of the eight graphs that came out with no narrowing at all: its pattern is
+        # "resolve the anchor and the candidates, then rank them", which is exactly the wrong
+        # answer sitting beside the right one. Same reason `Search-Rank-Ordinal` supersedes it.
+        "supersedes": ("search_rank_ordinal", "geocode_compare"),
+        # Deliberately declares no required structure, and the measurement is why. A
+        # `PLACE_SEARCH -> FILTER` requirement reads as the obvious contract for this shape and
+        # is wrong: over 47 recorded rows it is violated by 45, of which 37 answered correctly.
+        # The narrowing does not have to be a FILTER node -- grounding binds the stated kind onto
+        # `nearest` as well, so a graph that measures the anchor against a *set* enforces it with
+        # no filter in sight, while one that measures the candidates pairwise has nowhere to put
+        # it. That distinction lives in the operator the measure factorizes to, not in which
+        # transformations the graph names, so no contract over transformation presence can
+        # separate the working graphs from the broken ones here.
         "pattern": (
             "RESOLVE_PLACES (the anchor only) -> PLACE_SEARCH (the broad kind) -> "
             "FILTER (scope=attribute) -> DISTANCE_MEASURE -> ORDINAL_SELECT -> MATCH_OPTIONS"
@@ -1187,9 +1208,114 @@ def retrieve_templates(
     """
 
     return [
-        {"name": template["name"], "pattern": template["pattern"]}
+        {
+            "name": template["name"],
+            "pattern": template["pattern"],
+            **({"requires": template["requires"]} if template.get("requires") else {}),
+        }
         for _key, template in _rank_templates(analysis, question, limit=limit)
     ]
+
+
+#: Which shapes declare required structure. Only the three whose omission has been measured:
+#: `Search-Narrow-Rank`, where eight recorded graphs dropped the narrowing, and the two counting
+#: shapes, whose aggregate is the whole question. A requirement on every shape would be a
+#: constraint asserted rather than evidenced, and it turns a graph that would have executed into
+#: a refusal -- so each entry earns its place from a measurement.
+#:
+#: How a planner says a shape's required step does not apply here. Declared on the graph, not
+#: left implicit: a shape is retrieved because the question has that structure, so omitting a
+#: step it requires is either a mistake or a judgement, and only the planner can say which.
+_WAIVER_KEYS = ("not_applicable", "inapplicable", "omitted")
+
+
+def conformance_violations(
+    plan: dict[str, Any], requires: dict[str, Any] | None
+) -> list[str]:
+    """Where a semantic graph departs from the structure its retrieved shape requires.
+
+    A skeleton is retrieved because the question has that structure. Eight of the recorded
+    `nearby_cuisine_subtype` graphs were composed with `Search-Narrow-Rank` in front of the
+    planner and no narrowing step in them at all -- five copied the rival shape that was
+    retrieved beside it, two stopped after the retrieval, one wrote a `FILTER` whose inputs named
+    concepts rather than nodes. Every one of them then ranked restaurants of every kind and
+    answered with the nearest.
+
+    Prose in the prompt did not carry it, so the requirement is checked instead. A planner may
+    still decline a step -- `"not_applicable": ["FILTER"]` on the graph -- which is a judgement it
+    has to make explicitly rather than by omission.
+    """
+
+    if not requires:
+        return []
+    steps = plan.get("graph") if plan.get("graph") is not None else plan.get("steps")
+    if not isinstance(steps, list):
+        return []
+    waived = {
+        str(name).upper()
+        for key in _WAIVER_KEYS
+        for name in (plan.get(key) or [])
+    }
+    present: dict[str, set[str]] = {}
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        name = str(step.get("transform") or "").strip().upper()
+        if name:
+            present.setdefault(name, set()).add(str(step.get("id") or ""))
+    violations: list[str] = []
+    for transform in requires.get("transforms", ()):
+        if transform.upper() not in present and transform.upper() not in waived:
+            violations.append(
+                f"the retrieved shape requires a {transform} step and the graph has none; "
+                f'add it, or declare "not_applicable": ["{transform}"] on the graph'
+            )
+    if violations:
+        return violations
+    reaches = _transform_reachability(steps)
+    for producer, consumer in requires.get("dependencies", ()):
+        if producer.upper() in waived or consumer.upper() in waived:
+            continue
+        if not any(
+            consumer.upper() in reaches.get(node, set())
+            for node in present.get(producer.upper(), set())
+        ):
+            violations.append(
+                f"the retrieved shape requires the {consumer} step to consume what "
+                f"{producer} produced, directly or through the nodes between them"
+            )
+    return violations
+
+
+def _transform_reachability(steps: Sequence[Any]) -> dict[str, set[str]]:
+    """Which transformations each node's output eventually feeds."""
+
+    transform_of: dict[str, str] = {}
+    consumers: dict[str, list[str]] = {}
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        node = str(step.get("id") or "")
+        transform_of[node] = str(step.get("transform") or "").strip().upper()
+        for value in step.get("inputs") or step.get("depends_on") or []:
+            consumers.setdefault(str(value).lstrip("$").split(".", 1)[0], []).append(node)
+    reaches: dict[str, set[str]] = {}
+
+    def walk(node: str, seen: set[str]) -> set[str]:
+        if node in reaches:
+            return reaches[node]
+        found: set[str] = set()
+        for consumer in consumers.get(node, ()):
+            if consumer in seen:
+                continue
+            found.add(transform_of.get(consumer, ""))
+            found |= walk(consumer, seen | {consumer})
+        reaches[node] = found
+        return found
+
+    for node in transform_of:
+        walk(node, {node})
+    return reaches
 
 
 def _rank_templates(

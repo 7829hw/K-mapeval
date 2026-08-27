@@ -112,6 +112,12 @@ def _one_place_against_many(resolution: Resolution) -> bool:
     return resolution.fans_out or (resolution.arity >= 3 and resolution.endpoint_count != 2)
 
 
+def _a_set(_: Resolution) -> bool:
+    """The graph said this measures one place against a set. Believe it."""
+
+    return True
+
+
 def _pairwise(resolution: Resolution) -> bool:
     """Two distinct places to separate, rather than a list to cross-join."""
 
@@ -335,6 +341,19 @@ TRANSFORMS: dict[str, Transform] = {
             ("haversine_distance", _pairwise),
             ("pairwise_distances", _over_a_collection),
         ),
+        "object",
+    ),
+    "SET_MEASURE": Transform(
+        "SET_MEASURE",
+        "How far each of a set of candidates is from one anchor, ranked. Carries the "
+        "restrictions the question puts on the set.",
+        (("nearest", _a_set),),
+        "object",
+    ),
+    "PAIRWISE_MEASURE": Transform(
+        "PAIRWISE_MEASURE",
+        "The separation between two named places, and nothing about a set.",
+        (("haversine_distance", _pairwise), ("pairwise_distances", _over_a_collection)),
         "object",
     ),
     "ROUTE_MEASURE": Transform(
@@ -1085,7 +1104,65 @@ def _place_references(
 
 
 #: Transformations that relate exactly two places, and so have a pair to name.
-_PAIRWISE_TRANSFORMS = frozenset({"DISTANCE_MEASURE", "ROUTE_MEASURE"})
+_PAIRWISE_TRANSFORMS = frozenset({"DISTANCE_MEASURE", "PAIRWISE_MEASURE", "ROUTE_MEASURE"})
+
+
+#: Concept roles that name a *restriction* rather than a thing to measure. A question's radius,
+#: compass sector and kind of place arrive as concepts in these roles.
+_CONSTRAINT_ROLES = frozenset({"sub_condition", "condition"})
+
+
+def constraint_concepts(concepts: Sequence[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """The concepts that restrict a measurement rather than supply one of its operands."""
+
+    return {
+        str(concept.get("id")): concept
+        for concept in concepts
+        if isinstance(concept, dict)
+        and str(concept.get("role") or "") in _CONSTRAINT_ROLES
+        and concept.get("concept_type") not in {"location"}
+    }
+
+
+def _constraint_inputs(
+    declared_inputs: Sequence[Any], constraints: dict[str, dict[str, Any]]
+) -> list[str]:
+    """Constraint concepts this node names as inputs.
+
+    A planner writes `FILTER(inputs=["distance_measure", "constraint"])`, and it is right to:
+    the restriction is a thing the question stated and the node is where it applies. Read as a
+    data dependency it is a reference to nothing, and the whole node was refused for it. Read as
+    what it is, it is the semantic graph saying which node carries the constraint -- which is
+    what makes constraint preservation checkable rather than inferred from operator choice.
+    """
+
+    return [
+        str(value).lstrip("$").strip()
+        for value in declared_inputs
+        if str(value).lstrip("$").strip() in constraints
+    ]
+
+
+def _dangling_references(
+    declared_inputs: Sequence[Any],
+    follow: Callable[[str], str],
+    produced_by: dict[str, str],
+    resolved_concepts: dict[str, list[str]],
+    constraints: dict[str, dict[str, Any]],
+) -> list[str]:
+    """Inputs that name nothing this graph produced, no concept it resolved, no constraint."""
+
+    bound = {name for names in resolved_concepts.values() for name in names}
+    missing: list[str] = []
+    for value in declared_inputs:
+        name = str(value).lstrip("$").strip()
+        if not name:
+            continue
+        node = follow(name.split(".", 1)[0])
+        if node in produced_by or name in bound or name in constraints:
+            continue
+        missing.append(repr(name))
+    return list(dict.fromkeys(missing))
 
 
 def _resolvable_sources(
@@ -1169,6 +1246,7 @@ def factorize_semantic_graph(
         if isinstance(concept, dict) and not (concept.get("attributes") or {}).get("synthetic")
     }
     counting_question = options_state_counts(options)
+    constraint_by_id = constraint_concepts(concepts)
     graph: list[dict[str, Any]] = []
     decisions: list[dict[str, str]] = []
     concrete: list[str] = []
@@ -1234,6 +1312,20 @@ def factorize_semantic_graph(
         # A waypoint is something the route depends on, so it joins the dependencies even when
         # the node did not also list it as an input.
         inputs = list(dict.fromkeys([*inputs, *via_nodes]))
+        # An input that names neither an upstream node nor a concept an upstream node resolved
+        # is a reference to nothing. Silently dropping it left a `FILTER` over three named
+        # candidates with no inputs at all, so the node was wired empty and the narrowing it
+        # carried never applied -- one of the eight graphs that came out with no narrowing in
+        # them. A reference that resolves to nothing is a planner fault with a name.
+        carried = _constraint_inputs(declared_inputs, constraint_by_id)
+        dangling = _dangling_references(
+            declared_inputs, follow, produced_by, resolved_concepts, constraint_by_id
+        )
+        if dangling:
+            raise ValueError(
+                f"GeoFlow node {node_id!r} names {', '.join(dangling)} as input, which is "
+                "neither a node in this graph nor a concept any RESOLVE_PLACES bound"
+            )
         endpoints: tuple[str, ...] = ()
         if transform_name.upper() in _PAIRWISE_TRANSFORMS:
             endpoints, endpoint_nodes = _resolve_endpoints(
@@ -1541,6 +1633,9 @@ def factorize_semantic_graph(
                 "output_type": output_type,
                 "role": str(step.get("role") or "support"),
                 "concept_ids": [str(value) for value in (step.get("concept_ids") or [])],
+                # Which stated restrictions this node was told to apply. Grounding binds their
+                # literals, and constraint preservation is checked against them.
+                **({"constraint_ids": carried} if carried else {}),
             }
         )
     return SemanticFactorization(graph, tuple(decisions), tuple(concrete))

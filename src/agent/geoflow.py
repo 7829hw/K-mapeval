@@ -818,7 +818,7 @@ TEMPLATES = {
         # separate the working graphs from the broken ones here.
         "pattern": (
             "RESOLVE_PLACES (the anchor only) -> PLACE_SEARCH (the broad kind) -> "
-            "FILTER (scope=attribute) -> DISTANCE_MEASURE -> ORDINAL_SELECT -> MATCH_OPTIONS"
+            "FILTER (scope=attribute) -> SET_MEASURE -> ORDINAL_SELECT -> MATCH_OPTIONS"
         ),
         "example": {"graph": []},
     },
@@ -1079,9 +1079,13 @@ SKELETONS: dict[str, list[dict[str, Any]]] = {
         {"id": "anchor", "transform": "RESOLVE_PLACES", "inputs": [],
          "concept_ids": ["<the anchor concept>"], "role": "extent"},
         {"id": "found", "transform": "PLACE_SEARCH", "inputs": ["anchor"], "role": "support"},
+        # The kind concept may be named beside the candidates -- inputs ["found", "<the kind>"]
+        # -- which is how the graph says where the restriction applies. Left out of the skeleton
+        # itself because a placeholder in `inputs` is a reference to nothing, and references are
+        # checked; the prompt says it in prose instead.
         {"id": "narrowed", "transform": "FILTER", "inputs": ["found"],
          "factors": {"scope": "attribute"}, "role": "support"},
-        {"id": "ranked", "transform": "DISTANCE_MEASURE", "inputs": ["anchor", "narrowed"],
+        {"id": "ranked", "transform": "SET_MEASURE", "inputs": ["anchor", "narrowed"],
          "role": "support"},
         {"id": "kth", "transform": "ORDINAL_SELECT", "inputs": ["ranked"],
          "factors": {"ordinal": 1}, "role": "support"},

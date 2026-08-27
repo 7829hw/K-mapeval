@@ -171,9 +171,17 @@ What the question is about, not what the tools are:
   say so on the graph -- {"graph":[...],"not_applicable":["FILTER"]} -- rather than leaving it
   out; a shape was retrieved because the question has that structure, so an omission is either a
   mistake or a judgement and only you can say which.
-- A measure between two places has to say which two. Give DISTANCE_MEASURE the two nodes that
+- A measure between two places has to say which two. Give PAIRWISE_MEASURE the two nodes that
   resolved them, or name the two concepts in concept_ids. Two measures over one resolved list
   are the same measure twice, and their difference is zero.
+- Say which kind of measure you mean. SET_MEASURE ranks a whole candidate set against one
+  anchor and is where a restriction on that set lives; PAIRWISE_MEASURE relates two named places
+  and carries nothing about a set. A question that restricts what counts -- a kind, a radius, a
+  sector -- needs SET_MEASURE over the candidates, because measuring them one pair at a time
+  leaves the restriction nowhere to sit and the answer comes back unrestricted.
+- A restriction the analysis extracted is a concept, and the node that applies it names it as an
+  input: FILTER or SET_MEASURE with inputs ["candidates", "constraint"]. The literal is bound for
+  you; naming the concept is how the graph says where the restriction applies.
 
 Do not select an option and do not use the gold answer."""
 
@@ -744,6 +752,9 @@ def _factorize_validate_plan(
     grounded = _ground_graph_literals(
         semantic.graph, question, options, facts, retrieval_specs=retrieval_specs
     )
+    unheld = _unpreserved_constraints(grounded, facts)
+    if unheld:
+        raise ValueError("; ".join(unheld))
     factorized = factorize_geoflow(analysis, {"graph": grounded}, strict_types=strict_types)
     # The planner budget above governs what the planner authored. Retrieval fan-out added
     # during grounding is deterministic and gets its own allowance on top of it.
@@ -753,6 +764,91 @@ def _factorize_validate_plan(
         strict_types=strict_types,
     )
     return factorized, steps, constraints, semantic
+
+
+#: The argument each stated restriction becomes once grounding has bound it. Preservation is
+#: checked here, on the operator graph, because that is where a restriction either reaches the
+#: answer or does not -- and *not* by looking for a FILTER node, which measured wrong: the kind
+#: rides on `nearest` as often as on a filter, and 37 of 45 graphs without one answered
+#: correctly. What matters is that the restriction is carried, not which shape carries it.
+_CONSTRAINT_ARGUMENTS: dict[str, tuple[str, ...]] = {
+    "target_subtype": ("required_type", "required_types"),
+}
+
+
+def _unpreserved_constraints(steps: list[dict[str, Any]], facts: GroundingFacts) -> list[str]:
+    """Restrictions the question states that nothing on the way to the answer applies.
+
+    A stated narrowing that no node carries is a question answered without its own condition --
+    "the nearest 중식 음식점" answered with the nearest restaurant of any kind. It looks like a
+    clean run: every step succeeds, and the one that should have narrowed either is not there or
+    was handed a set it does not restrict.
+
+    Scoped to the restrictions that have been measured to go missing. A check asserted over every
+    stated fact would refuse graphs for constraints the operator set has no way to carry, which
+    is a different problem and not this one.
+    """
+
+    unheld: list[str] = []
+    for fact, arguments in _CONSTRAINT_ARGUMENTS.items():
+        stated = getattr(facts, fact, None)
+        if not stated:
+            continue
+        carriers = {
+            str(step.get("id"))
+            for step in steps
+            if any(key in (step.get("arguments") or {}) for key in arguments)
+        }
+        if carriers and _reaches_a_measure(steps, carriers):
+            continue
+        unheld.append(
+            f"the question restricts the answer to {stated!r} and no step on the way to the "
+            "measure applies it; narrow the candidates, or measure them as a set so the "
+            "restriction has somewhere to sit"
+        )
+    return unheld
+
+
+def _reaches_a_measure(steps: list[dict[str, Any]], sources: set[str]) -> bool:
+    """Does anything downstream of these nodes end at the Measure?"""
+
+    consumers: dict[str, list[str]] = {}
+    measures = set()
+    for step in steps:
+        node = str(step.get("id"))
+        if str(step.get("role")) == "measure":
+            measures.add(node)
+        for name in _references(step):
+            consumers.setdefault(name, []).append(node)
+    if not measures:
+        # No Measure named: the last node is what the answer is read from, as elsewhere here.
+        measures = {str(steps[-1].get("id"))} if steps else set()
+    seen, frontier = set(sources), list(sources)
+    while frontier:
+        node = frontier.pop()
+        if node in measures:
+            return True
+        for consumer in consumers.get(node, ()):
+            if consumer not in seen:
+                seen.add(consumer)
+                frontier.append(consumer)
+    return False
+
+
+def _references(step: dict[str, Any]) -> set[str]:
+    """Every node id this step depends on, declared or referenced in its arguments."""
+
+    found = {str(value) for value in (step.get("depends_on") or [])}
+    stack: list[Any] = [step.get("arguments")]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, dict):
+            stack.extend(value.values())
+        elif isinstance(value, list | tuple):
+            stack.extend(value)
+        elif isinstance(value, str) and value.startswith("$"):
+            found.add(value[1:].split(".", 1)[0])
+    return found
 
 
 def _compact_evaluation_evidence(

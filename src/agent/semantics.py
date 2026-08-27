@@ -23,6 +23,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from src.tools.spatial import options_state_counts
+
 #: What a semantic node may carry besides its inputs. These are *semantic* parameters -- an
 #: ordinal position, which measure to rank by, which way to aggregate -- never a question
 #: literal. Radii, sectors, stays and budgets come from the analysis facts and are bound after
@@ -72,6 +74,10 @@ class Resolution:
     #: How many places the node named as the endpoints of its measure. A pairwise measure that
     #: says which pair it is between is a pair, whatever its inputs look like.
     endpoint_count: int = 0
+    #: Do the candidate texts answer "how many"? Read off the options, which factorization
+    #: already receives; a count matched to "세 곳" is a different relation from a distance
+    #: matched to "약 2.4km", and the options are what say which.
+    options_are_counts: bool = False
 
     @property
     def fans_out(self) -> bool:
@@ -266,6 +272,19 @@ def _sum(_: Resolution) -> bool:
     return True
 
 
+def _against_a_count(resolution: Resolution) -> bool:
+    """A count is a whole number of things, and the option that states it is the answer.
+
+    `match_distance_options` reads a magnitude out of an option and takes the nearest, and
+    "한 곳"/"두 곳" carries no digit for it to read -- so every counting question's matcher
+    reported no best option and the response stage answered from the words itself.
+    """
+
+    return resolution.options_are_counts and bool(
+        {"count_items", "tsp_tw"} & set(resolution.input_operators)
+    )
+
+
 def _against_a_numeric_measure(resolution: Resolution) -> bool:
     return "amount" in resolution.input_types
 
@@ -425,6 +444,7 @@ TRANSFORMS: dict[str, Transform] = {
         "MATCH_OPTIONS",
         "Map the computed evidence onto the candidate answer texts.",
         (
+            ("match_count_options", _against_a_count),
             ("match_distance_options", _against_a_numeric_measure),
             ("match_type_options", _against_a_category),
             ("match_options", _against_place_names),
@@ -457,6 +477,7 @@ def resolve_operator(
     input_operators: Sequence[str] | None = None,
     via_count: int = 0,
     endpoint_count: int = 0,
+    options_are_counts: bool = False,
 ) -> tuple[str, str]:
     """Which operator performs this transformation here, and which rule chose it.
 
@@ -481,6 +502,7 @@ def resolve_operator(
         input_operators=tuple(input_operators or ()),
         via_count=via_count,
         endpoint_count=endpoint_count,
+        options_are_counts=options_are_counts,
     )
     chosen = transform.choose(resolution)
     if chosen is None or chosen[0] not in available:
@@ -833,6 +855,8 @@ def wire_arguments(
         )
     if operator == "match_options":
         return {"places": wiring.whole(0)} if arity else {}
+    if operator == "match_count_options":
+        return {"count": wiring.whole(0)} if arity else {}
     if operator == "match_distance_options":
         return {"distance": wiring.whole(0)} if arity else {}
     if operator == "match_type_options":
@@ -1144,6 +1168,7 @@ def factorize_semantic_graph(
         for concept in concepts
         if isinstance(concept, dict) and not (concept.get("attributes") or {}).get("synthetic")
     }
+    counting_question = options_state_counts(options)
     graph: list[dict[str, Any]] = []
     decisions: list[dict[str, str]] = []
     concrete: list[str] = []
@@ -1370,6 +1395,7 @@ def factorize_semantic_graph(
                 input_operators=[produced_by.get(name) or "" for name in inputs],
                 via_count=len(via_refs),
                 endpoint_count=len(endpoints),
+                options_are_counts=counting_question,
             )
             if (
                 transform_name.upper() == "SORT"
@@ -1655,6 +1681,7 @@ _LIFT: dict[str, str] = {
     "select_legs": "SELECT_LEGS",
     "match_options": "MATCH_OPTIONS",
     "match_distance_options": "MATCH_OPTIONS",
+    "match_count_options": "MATCH_OPTIONS",
     "match_type_options": "MATCH_OPTIONS",
     "identity_measure": "MEASURE",
 }

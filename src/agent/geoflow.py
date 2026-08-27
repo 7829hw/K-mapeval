@@ -283,6 +283,9 @@ OPERATOR_CONTRACTS: dict[str, OperatorContract] = {
     "count_items": OperatorContract(
         "amount", ("items",), reference_arguments=("items",)
     ),
+    "match_count_options": OperatorContract(
+        "object", ("count", "options"), reference_arguments=("count",)
+    ),
     "merge_places": OperatorContract(
         "object", ("items",), reference_arguments=("items",)
     ),
@@ -528,6 +531,7 @@ OPERATOR_INPUT_TYPES: dict[str, dict[str, frozenset[str]]] = {
     "select_legs": {"routes": frozenset({"field"})},
     "filter_by_distance": {"items": frozenset({"object", "field"})},
     "count_items": {"items": frozenset({"object", "field"})},
+    "match_count_options": {"count": frozenset({"amount", "object", "field"})},
     "merge_places": {"items": frozenset({"object"})},
     "match_options": {
         "places": frozenset({"object"}),
@@ -746,7 +750,8 @@ TEMPLATES = {
         "radius_literal": True,
         "keywords": ("반경", "이내", "within", "radius"),
         "pattern": (
-            "RESOLVE_PLACES -> PLACE_SEARCH -> FILTER (the stated radius) -> AGGREGATE -> MEASURE"
+            "RESOLVE_PLACES -> PLACE_SEARCH -> DISTANCE_MEASURE -> FILTER (the stated radius) "
+            "-> AGGREGATE (count) -> MATCH_OPTIONS"
         ),
         "example": {
             "graph": [
@@ -780,7 +785,7 @@ TEMPLATES = {
         "supersedes": ("radius",),
         "pattern": (
             "RESOLVE_PLACES (anchor) + RESOLVE_PLACES (scope=listed) -> DISTANCE_MEASURE -> "
-            "FILTER (the stated radius) -> AGGREGATE (count) -> MEASURE"
+            "FILTER (the stated radius) -> AGGREGATE (count) -> MATCH_OPTIONS"
         ),
         "example": {"graph": []},
     },
@@ -1029,7 +1034,7 @@ SKELETONS: dict[str, list[dict[str, Any]]] = {
         {"id": "inside", "transform": "FILTER", "inputs": ["measured"], "role": "support"},
         {"id": "count", "transform": "AGGREGATE", "inputs": ["inside"],
          "factors": {"aggregate": "count"}, "role": "support"},
-        {"id": "answer", "transform": "MEASURE", "inputs": ["count"], "role": "measure"},
+        {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["count"], "role": "measure"},
     ],
     # A question that lists its own candidates: resolve those, measure each from the anchor,
     # keep the ones the stated radius admits, and count them. The radius is a fact the analysis
@@ -1044,7 +1049,7 @@ SKELETONS: dict[str, list[dict[str, Any]]] = {
         {"id": "inside", "transform": "FILTER", "inputs": ["measured"], "role": "support"},
         {"id": "count", "transform": "AGGREGATE", "inputs": ["inside"],
          "factors": {"aggregate": "count"}, "role": "support"},
-        {"id": "answer", "transform": "MEASURE", "inputs": ["count"], "role": "measure"},
+        {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["count"], "role": "measure"},
     ],
     # A kind of place narrowed by an attribute of it -- 중식 of "중식 음식점". Retrieve the broad
     # kind, narrow to the attribute, then rank: a ranking that skips the narrowing answers with

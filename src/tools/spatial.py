@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from itertools import permutations
@@ -80,6 +81,7 @@ class SpatialOperatorRegistry:
         "select_legs",
         "filter_by_distance",
         "count_items",
+        "match_count_options",
         "merge_places",
         "match_options",
         "match_distance_options",
@@ -346,6 +348,38 @@ class SpatialOperatorRegistry:
             if float(_path(record, key)) <= limit:
                 kept.append(record)
         return kept
+
+    @staticmethod
+    def match_count_options(count: Any, options: list[Any]) -> dict[str, Any]:
+        """Map a computed count onto options that state it in words.
+
+        `match_distance_options` reads a number out of an option and compares magnitudes, and
+        "한 곳"/"두 곳"/"세 곳"/"네 곳" contains no digit, so a count question's matcher matched
+        nothing and reported no best option at all. The count was right and the graph pointed at
+        nowhere; every such question was then answered by the response stage reading the words
+        itself, which is a guess with a good prior rather than a measurement.
+
+        Exact only. A count is a whole number and the option that states it is the answer; the
+        nearest option to a count of three is not "about three".
+        """
+
+        measured = _count_value(count)
+        matches: list[dict[str, Any]] = []
+        for index, raw in enumerate(options):
+            option = str(raw)
+            stated = _count_in_text(option)
+            matches.append(
+                {"option_index": index, "option": option, "value": stated}
+            )
+        exact = [row for row in matches if row["value"] == measured]
+        best = exact[0] if len(exact) == 1 else None
+        return {
+            "computed_count": measured,
+            "option_matches": matches,
+            "best_option": best,
+            "fits": best is not None,
+            "confidence": 0.9 if best is not None else 0.0,
+        }
 
     @staticmethod
     def count_items(items: Any) -> dict[str, Any]:
@@ -2027,6 +2061,64 @@ _PLACE_COLLECTION_KEYS = (
     "candidates",
     "results",
 )
+
+
+#: How Korean states a small count of places. Only the range a counting question offers, and
+#: only as whole numbers: this is a lexicon, not arithmetic.
+_COUNT_WORDS: dict[str, int] = {
+    "영": 0, "한": 1, "하나": 1, "두": 2, "둘": 2, "세": 3, "셋": 3, "네": 4, "넷": 4,
+    "다섯": 5, "여섯": 6, "일곱": 7, "여덟": 8, "아홉": 9, "열": 10,
+}
+
+
+def _count_value(value: Any) -> int:
+    """The whole number a counting node reported."""
+
+    if isinstance(value, dict):
+        for key in ("count", "visited_count", "leg_count", "value", "total"):
+            found = value.get(key)
+            if isinstance(found, int | float):
+                return int(found)
+        raise ValueError("match_count_options requires a computed count")
+    return int(value)
+
+
+#: An option that states a count is the number and its counter word and nothing else. Anchored
+#: on purpose: "약 2.4km" carries a number too, and "외대앞역 1호선 → ..." carries one inside a
+#: place name, and neither is a count of anything.
+_COUNT_OPTION = re.compile(
+    r"^\s*(?:약\s*)?(?P<value>\d+|[가-힣]{1,3})\s*(?:곳|개|군데|번|명|가지|대)?\s*$"
+)
+
+
+def _count_in_text(option: str) -> int | None:
+    """The count an option states, written as a digit or as a Korean number word."""
+
+    match = _COUNT_OPTION.match(option)
+    if not match:
+        return None
+    value = match.group("value")
+    if value.isdigit():
+        return int(value)
+    return _COUNT_WORDS.get(value)
+
+
+def options_state_counts(options: Sequence[Any]) -> bool:
+    """Do these candidate texts answer "how many"?
+
+    Read off the options themselves rather than off the question: two or more of them state a
+    count outright, and none of the rest carries a number at all -- which is what keeps a list of
+    visiting orders, whose place names contain digits, and a list of distances, which carry
+    units, from being read as counts.
+    """
+
+    texts = [str(option) for option in options]
+    counted = [text for text in texts if _count_in_text(text) is not None]
+    if len(counted) < 2:
+        return False
+    return all(
+        _count_in_text(text) is not None or not re.search(r"\d", text) for text in texts
+    )
 
 
 def _measured_items(value: Any) -> list[Any]:

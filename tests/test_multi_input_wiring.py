@@ -476,3 +476,61 @@ def test_a_subtype_over_candidates_with_no_category_at_all_is_still_a_gap() -> N
     bare = [{"name": "가게", "latitude": 37.5, "longitude": 127.0}]
 
     assert ops.filter_places(bare, required_types=["중식"], types_are_required=True) == bare
+
+
+def test_a_listed_candidate_count_measures_filters_and_counts_the_names_offered() -> None:
+    """The shape end to end, from the facts the analysis read to the option it points at."""
+
+    from src.agent.geoflow import SKELETONS
+    from src.agent.spatial import _ground_graph_literals
+
+    skeleton = [dict(node) for node in SKELETONS["listed_candidates_count"]]
+    skeleton[0]["concept_ids"] = ["anchor"]
+    facts = GroundingFacts(
+        anchor="왕십리곱창거리",
+        target_type="은행",
+        radius_m=300,
+        listed_places=("하나은행365", "우리은행 365코너", "우리은행 서울동부", "KB국민은행ATM"),
+    )
+    options = ["한 곳", "두 곳", "세 곳", "네 곳"]
+    built = _build(
+        skeleton,
+        concepts=[{"id": "anchor", "text": "왕십리곱창거리", "concept_type": "location"}],
+        options=options,
+        facts=facts,
+    )
+    grounded = _ground_graph_literals(built.graph, "질문", options, facts)
+    by_id = {node["id"]: node for node in grounded}
+
+    assert by_id["listed"]["arguments"]["place_names"] == list(facts.listed_places)
+    assert by_id["measured"]["operator"] == "nearest"
+    assert by_id["inside"]["operator"] == "filter_by_distance"
+    assert by_id["inside"]["arguments"]["max_distance_m"] == 300
+    assert by_id["count"]["operator"] == "count_items"
+    # And it ends at the options rather than at an identity measure, so the graph names an
+    # answer instead of leaving the response stage to read "1" and pick "한 곳" itself.
+    assert by_id["answer"]["operator"] == "match_count_options"
+
+
+def test_a_count_matcher_is_chosen_only_when_the_options_count_something() -> None:
+    """Visiting orders carry digits inside place names and distances carry units; neither counts."""
+
+    from src.tools.spatial import options_state_counts
+
+    assert options_state_counts(["한 곳", "두 곳", "세 곳", "네 곳"])
+    assert options_state_counts(["한 곳", "주어진 지도 정보로는 알 수 없음", "세 곳", "네 곳"])
+    assert not options_state_counts(["약 2.4km", "약 3.3km", "약 2.6km", "약 3.1km"])
+    assert not options_state_counts(["외대앞역 1호선 → 롯데시네마", "A → B", "C → D", "E → F"])
+    assert not options_state_counts(["진달래장국", "일일양꼬치", "맛있는떡", "일품채관"])
+
+
+def test_a_count_matches_the_option_that_states_it_and_nothing_else() -> None:
+    from src.tools.spatial import SpatialOperatorRegistry as ops
+
+    options = ["한 곳", "두 곳", "세 곳", "네 곳"]
+
+    assert ops.match_count_options({"count": 1}, options)["best_option"]["option_index"] == 0
+    four = ops.match_count_options({"visited_count": 4}, options)
+    assert four["best_option"]["option_index"] == 3
+    # A count no option states is not "about" the nearest one: a count is exact or it is unmet.
+    assert ops.match_count_options({"count": 9}, options)["best_option"] is None

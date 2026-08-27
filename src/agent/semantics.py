@@ -20,7 +20,7 @@ operator performs it. Two properties matter and both are tested:
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 #: What a semantic node may carry besides its inputs. These are *semantic* parameters -- an
@@ -66,6 +66,9 @@ class Resolution:
     input_is_collection: tuple[bool, ...] = ()
     #: The operators those upstream nodes were factorized to.
     input_operators: tuple[str, ...] = ()
+    #: How many places the node declared as waypoints. A route through somewhere is a different
+    #: route from the one between its ends, and only the graph can say which is asked for.
+    via_count: int = 0
 
     @property
     def fans_out(self) -> bool:
@@ -126,9 +129,21 @@ def _maximum(resolution: Resolution) -> bool:
 
 
 def _over_a_matrix(resolution: Resolution) -> bool:
-    """A route matrix is not a route; asking it for `distance_m` gets a dict and an error."""
+    """Many routes are not a route; asking a grid of them for `distance_m` gets a dict and an
+    error. A selection of legs is the same shape, already narrowed to the ones travelled."""
 
-    return "distance_matrix" in resolution.input_operators
+    return bool({"distance_matrix", "select_legs"} & set(resolution.input_operators))
+
+
+def _through_waypoints(resolution: Resolution) -> bool:
+    """A route the question sends through somewhere is one route with waypoints.
+
+    `travel_time` carries an origin and a destination and nothing between them, so a route
+    stated as "A에서 B를 들러 C까지" has to be measured by the operator that takes waypoints --
+    otherwise the drive that gets measured is a different drive.
+    """
+
+    return resolution.via_count > 0
 
 
 def _duration(resolution: Resolution) -> bool:
@@ -177,8 +192,23 @@ def _proportion(resolution: Resolution) -> bool:
     return str(resolution.factor("aggregate", "sum")).lower() in {"proportion", "share", "ratio"}
 
 
+#: How a node says its aggregate covers the legs an itinerary drives rather than every pair a
+#: matrix holds. `groups` is the older spelling and means the same thing when no explicit group
+#: list is supplied.
+_LEG_SCOPES = frozenset({"groups", "grouped", "legs", "consecutive", "consecutive_legs",
+                         "itinerary", "route_legs"})
+
+
 def _grouped(resolution: Resolution) -> bool:
-    return str(resolution.factor("scope", "")).lower() in {"groups", "grouped", "legs"}
+    """Per-option totals: one group of route indexes per candidate order."""
+
+    return str(resolution.factor("scope", "")).lower() in _LEG_SCOPES
+
+
+def _over_route_legs(resolution: Resolution) -> bool:
+    """A total over routes that have already been narrowed to the ones the trip drives."""
+
+    return "select_legs" in resolution.input_operators
 
 
 def _sum(_: Resolution) -> bool:
@@ -239,14 +269,21 @@ TRANSFORMS: dict[str, Transform] = {
     ),
     "ROUTE_MEASURE": Transform(
         "ROUTE_MEASURE",
-        "The road route from one place to another.",
-        (("travel_time", _duration), ("directions", _distance)),
+        "The road route from one place to another, optionally through stated waypoints.",
+        (("directions", _through_waypoints), ("travel_time", _duration),
+         ("directions", _distance)),
         "field",
     ),
     "ROUTE_MATRIX": Transform(
         "ROUTE_MATRIX",
         "Road cost between every pair of an itinerary's stops.",
         (("distance_matrix", _always),),
+        "field",
+    ),
+    "SELECT_LEGS": Transform(
+        "SELECT_LEGS",
+        "Keep only the legs an ordered itinerary drives, out of a matrix of every pair.",
+        (("select_legs", _always),),
         "field",
     ),
     "ROUTE_EXTRACT": Transform(
@@ -321,6 +358,10 @@ TRANSFORMS: dict[str, Transform] = {
         (
             ("difference", _difference),
             ("calculate_proportion", _proportion),
+            # Ahead of the grouped total: once the legs the trip drives have been selected there
+            # is one group and it is all of them, and `aggregate_route_groups` would be asked for
+            # a group list nothing in the graph carries.
+            ("sum_route_metrics", _over_route_legs),
             ("aggregate_route_groups", _grouped),
             ("sum_amounts", _sum),
         ),
@@ -360,6 +401,7 @@ def resolve_operator(
     available: frozenset[str],
     input_is_collection: Sequence[bool] | None = None,
     input_operators: Sequence[str] | None = None,
+    via_count: int = 0,
 ) -> tuple[str, str]:
     """Which operator performs this transformation here, and which rule chose it.
 
@@ -382,6 +424,7 @@ def resolve_operator(
         available=available,
         input_is_collection=tuple(input_is_collection or ()),
         input_operators=tuple(input_operators or ()),
+        via_count=via_count,
     )
     chosen = transform.choose(resolution)
     if chosen is None or chosen[0] not in available:
@@ -456,6 +499,19 @@ class _Wiring:
     #: The node a route matrix was built at, if the graph built one. `tsp_tw` needs it and a
     #: planner that lists only the places forgets to feed it.
     matrix_source: str | None = None
+    #: References to the places the route passes through, in the order it passes them. Named by
+    #: the graph's own `via` relation, never inferred from where an input happens to sit.
+    via: tuple[str, ...] = ()
+    #: Positions inside a single record-list input that `via` claimed, so the ends of the route
+    #: are read from the positions it did not.
+    via_positions: frozenset[int] = frozenset()
+    #: How many places the single record-list input resolved, so the far end can be found.
+    resolved_count: int = 0
+    #: How many places each input resolved, so a stop list gathers all of them.
+    resolved_sizes: tuple[int, ...] = ()
+    #: The stop references every matrix node was built over, keyed by node id. A tour indexes
+    #: into its cost matrix, so its node list has to be that matrix's own stops in that order.
+    matrix_stops: dict[str, list[str]] = field(default_factory=dict)
 
     def place(self, position: int, index: int = 0) -> str:
         node = self.inputs[position]
@@ -468,13 +524,44 @@ class _Wiring:
         return _items_ref(self.inputs[position], self.producers[position])
 
     def two_places(self) -> tuple[str, str]:
-        """The two places to relate: one node holding both, or one node each."""
+        """The two places to relate: one node holding both, or one node each.
+
+        When the graph declared waypoints inside a single resolved list, the ends of the route
+        are the first and *last* positions the waypoints did not claim. Reading the second
+        position as the destination is what measured 인디스타 → 소설호텔 for a question about
+        인디스타 → 소설호텔 → 공작지.
+        """
 
         if not self.inputs:
             return "", ""
         if len(self.inputs) >= 2:
             return self.place(0), self.place(1)
+        if self.via_positions:
+            free = [
+                index
+                for index in range(self.resolved_count)
+                if index not in self.via_positions
+            ]
+            if len(free) >= 2:
+                return self.place(0, free[0]), self.place(0, free[-1])
         return self.place(0, 0), self.place(0, 1)
+
+    def every_place(self) -> list[str]:
+        """One reference per place across every input, in the order the inputs were given.
+
+        An input that resolved several names contributes each of them: an itinerary written as
+        one anchor node and one node holding the rest is the common shape, and taking `.0.place`
+        of the second lost every stop after the first.
+        """
+
+        references: list[str] = []
+        for position in range(len(self.inputs)):
+            size = self.resolved_sizes[position] if position < len(self.resolved_sizes) else 0
+            if self.producers[position] in _RECORD_LIST_OPERATORS and size > 1:
+                references.extend(self.place(position, index) for index in range(size))
+            else:
+                references.append(self.place(position))
+        return references
 
     def by_type(self, wanted: str, produced_by: dict[str, str]) -> str | None:
         for node in self.inputs:
@@ -530,18 +617,39 @@ def wire_arguments(
         return {"locations": wiring.whole(0)} if arity else {}
     if operator in {"directions", "travel_time"}:
         origin, destination = wiring.two_places()
-        return {"origin": origin, "destination": destination} if origin else {}
+        if not origin:
+            return {}
+        routed: dict[str, Any] = {"origin": origin, "destination": destination}
+        if wiring.via and operator == "directions":
+            # In the order the graph listed them: Kakao drives the waypoints as given, so
+            # reversing two of them measures a different drive that still routes.
+            routed["waypoints"] = list(wiring.via)
+        return routed
     if operator == "distance_matrix":
-        return {"origins": wiring.whole(0), "destinations": wiring.whole(0)} if arity else {}
+        if not arity:
+            return {}
+        # Several resolved nodes are several stops, not a matrix over the first one. A planner
+        # that resolves each stop separately -- which it does about half the time -- produced a
+        # 1x1 grid, and the leg selection then had a single route and no leg to take.
+        stops = wiring.every_place() if arity >= 2 else wiring.whole(0)
+        return {"origins": stops, "destinations": stops}
     if operator in {"extract_distance", "extract_duration", "steps_analysis"}:
         return {"route": wiring.whole(0)} if arity else {}
+    if operator == "select_legs":
+        return {"routes": wiring.whole(0)} if arity else {}
     if operator == "sum_route_metrics":
         return {"routes": wiring.whole(0)} if arity else {}
     if operator == "compare_routes":
         return {"routes": [wiring.whole(i) for i in range(arity)]}
     if operator == "tsp_tw":
-        nodes = wiring.by_type("object", output_types) or (wiring.whole(0) if arity else None)
         matrix = wiring.by_type("field", output_types) or wiring.matrix_source
+        # The tour's order indexes into its cost matrix, so the nodes are that matrix's own
+        # stops, in the order it was built over. Taking them from whichever input happened to be
+        # object-typed gave a five-stop trip a one-place node list beside a six-place matrix.
+        stops = wiring.matrix_stops.get(str(matrix or "").lstrip("$")) if matrix else None
+        nodes: Any = stops or wiring.by_type("object", output_types)
+        if not nodes and arity:
+            nodes = wiring.whole(0)
         arguments: dict[str, Any] = {}
         if nodes:
             arguments["nodes"] = nodes
@@ -646,6 +754,114 @@ def is_semantic_graph(steps: Sequence[Any]) -> bool:
     )
 
 
+#: Transformations that read a computed route. Given places instead, the route between them is
+#: what they meant, and composing it is the same macro expansion `tsp_tw`'s cost matrix gets.
+_ROUTE_READING_TRANSFORMS = frozenset({"ROUTE_EXTRACT", "ROUTE_STEPS"})
+
+
+#: Operators whose output is unambiguously a located place. A route reader fed one of these was
+#: given an endpoint, never a route.
+_GEOCODERS = frozenset({"batch_geocode", "geocode", "reverse_geocode"})
+
+
+def _needs_a_route_composed(
+    transform_name: str, inputs: Sequence[str], producers: Sequence[str]
+) -> bool:
+    """A route reader handed the endpoints of a route rather than the route.
+
+    `ROUTE_EXTRACT` over two `batch_geocode` nodes is how a planner writes "the distance of the
+    leg from A to B", and it wired `extract_distance(route=$A)` -- a place where a route belongs.
+    Every graph that decomposed a drive into legs wrote it this way: two of the recorded
+    `routing_turn_count_via` graphs and three of `trip_total_distance`, each one an errored step
+    or a repair round.
+
+    Only a geocoder counts. `compare_routes` is typed `object` too and its output is a route that
+    was chosen; composing a drive from that end to itself is what the first version of this rule
+    did to two `routing_detour_cost` graphs, and the replay caught it before the benchmark did.
+    """
+
+    if transform_name.upper() not in _ROUTE_READING_TRANSFORMS:
+        return False
+    if len(inputs) < 2:
+        return False
+    return all(producer in _GEOCODERS for producer in producers)
+
+
+#: Transformations that would otherwise total every pair of a matrix rather than the legs a
+#: trip drives. `ROUTE_EXTRACT` is here because `sum_route_metrics` over a matrix node is the
+#: same sum under a different name.
+_MATRIX_TOTALLING_TRANSFORMS = frozenset({"AGGREGATE", "ROUTE_EXTRACT"})
+
+
+def _totals_a_bare_matrix(
+    transform_name: str,
+    factors: dict[str, Any],
+    inputs: Sequence[str],
+    produced_by: dict[str, str],
+    square_matrices: set[str],
+) -> bool:
+    """Is this node about to add up a whole origins x destinations grid?"""
+
+    if transform_name.upper() not in _MATRIX_TOTALLING_TRANSFORMS:
+        return False
+    if len(inputs) != 1 or inputs[0] not in square_matrices:
+        return False
+    if produced_by.get(inputs[0]) != "distance_matrix":
+        return False
+    aggregate = str(factors.get("aggregate", "sum")).lower()
+    return aggregate not in {"difference", "subtract", "minus", "proportion", "share", "ratio"}
+
+
+def _resolve_via(
+    step: dict[str, Any],
+    inputs: Sequence[str],
+    follow: Callable[[str], str],
+    produced_by: dict[str, str],
+    resolved_concepts: dict[str, list[str]],
+) -> tuple[tuple[str, ...], frozenset[int], tuple[str, ...]]:
+    """The places a route passes through, as the graph named them.
+
+    `via` is an explicit relation on the node -- a list of ids, in the order the route reaches
+    them. Each id is either an upstream node that resolved one place, or a concept an upstream
+    `RESOLVE_PLACES` bound; both become a reference to that place. Nothing here reads which
+    input sat where: a waypoint that the graph did not declare is not a waypoint, because the
+    alternative is deciding that the middle of any three places is one, and "A와 B 중 C에 더
+    가까운 곳" has a middle too.
+
+    Returns the references, which positions of a single resolved list they claimed, and which
+    upstream nodes they depend on.
+    """
+
+    declared = step.get("via")
+    if declared is None:
+        declared = step.get("waypoints")
+    if isinstance(declared, str):
+        declared = [declared]
+    if not isinstance(declared, list) or not declared:
+        return (), frozenset(), ()
+
+    references: list[str] = []
+    positions: set[int] = set()
+    depends: list[str] = []
+    for raw in declared:
+        name = str(raw).lstrip("$").strip()
+        if not name:
+            continue
+        node = follow(name.split(".", 1)[0])
+        if node in produced_by:
+            references.append(_place_ref(node, produced_by[node]))
+            depends.append(node)
+            continue
+        for source in inputs:
+            aligned = resolved_concepts.get(source) or []
+            if name in aligned:
+                index = aligned.index(name)
+                references.append(_place_ref(source, produced_by.get(source), index))
+                positions.add(index)
+                break
+    return tuple(references), frozenset(positions), tuple(dict.fromkeys(depends))
+
+
 def factorize_semantic_graph(
     steps: Sequence[Any],
     *,
@@ -688,6 +904,19 @@ def factorize_semantic_graph(
     # Which concept every earlier RESOLVE_PLACES already claimed, so a later one that names no
     # resolvable concept does not take the same places again.
     claimed: set[str] = set()
+    # Which concept sits at which position of a resolved list, for the nodes where the binding
+    # came from named concepts. `via` names a concept and the reference it becomes is that
+    # concept's position, so a route through the second of three stops is written as such
+    # rather than assumed from where the argument fell.
+    resolved_concepts: dict[str, list[str]] = {}
+    # How many places each node resolved, so the far end of a route can be found.
+    resolved_counts: dict[str, int] = {}
+    # Matrix nodes whose origins and destinations are the same list, so their routes form a
+    # square grid whose consecutive legs are the ones an itinerary drives.
+    square_matrices: set[str] = set()
+    # The stop references every matrix node was built over, so a tour that indexes into one can
+    # be given the same list in the same order.
+    matrix_stops: dict[str, list[str]] = {}
 
     def follow(name: str) -> str:
         seen: set[str] = set()
@@ -714,6 +943,12 @@ def factorize_semantic_graph(
         factors = step.get("factors")
         factors = dict(factors) if isinstance(factors, dict) else {}
         transform_name = str(step.get("transform") or "").strip()
+        via_refs, via_positions, via_nodes = _resolve_via(
+            step, inputs, follow, produced_by, resolved_concepts
+        )
+        # A waypoint is something the route depends on, so it joins the dependencies even when
+        # the node did not also list it as an input.
+        inputs = list(dict.fromkeys([*inputs, *via_nodes]))
 
         if not transform_name:
             # The planner named an operator. Kept rather than refused -- a graph that would have
@@ -738,6 +973,121 @@ def factorize_semantic_graph(
             rule = "planner_named_the_operator"
             output_type = str(step.get("output_type") or "object")
         else:
+            if _needs_a_route_composed(
+                transform_name, inputs, [produced_by.get(name) or "" for name in inputs]
+            ) and (
+                "directions" in available
+            ):
+                route_id = f"{node_id}_route"
+                route_wiring = _Wiring(
+                    inputs=tuple(inputs),
+                    producers=tuple(produced_by.get(name) for name in inputs),
+                    factors=factors,
+                    via=via_refs,
+                    via_positions=via_positions,
+                    resolved_count=resolved_counts.get(inputs[0], 0) if inputs else 0,
+                    resolved_sizes=tuple(resolved_counts.get(name, 0) for name in inputs),
+                )
+                graph.append(
+                    {
+                        "id": route_id,
+                        "operator": "directions",
+                        "arguments": wire_arguments(
+                            "directions", route_wiring, output_types=output_types
+                        ),
+                        "depends_on": list(inputs),
+                        "output_type": "field",
+                        "role": "support",
+                        "concept_ids": [],
+                    }
+                )
+                produced_by[route_id] = "directions"
+                emits_collection[route_id] = False
+                output_types[route_id] = "field"
+                decisions.append(
+                    {
+                        "id": route_id,
+                        "transform": "ROUTE_MEASURE",
+                        "operator": "directions",
+                        "rule": "composed_route_for_a_route_reader",
+                    }
+                )
+                inputs = [route_id]
+                via_refs, via_positions = (), frozenset()
+            if (
+                transform_name.upper() == "SELECT_LEGS"
+                and len(inputs) >= 2
+                and all(produced_by.get(name) in _GEOCODERS for name in inputs)
+                and "distance_matrix" in available
+            ):
+                # The legs of an itinerary come out of the costs between its stops, so a
+                # SELECT_LEGS handed the stops themselves is asking for the matrix first. Same
+                # expansion as the route a ROUTE_EXTRACT needs, one shape up.
+                grid_id = f"{node_id}_matrix"
+                stops = _Wiring(
+                    inputs=tuple(inputs),
+                    producers=tuple(produced_by.get(name) for name in inputs),
+                    factors=factors,
+                    resolved_sizes=tuple(resolved_counts.get(name, 0) for name in inputs),
+                ).every_place()
+                graph.append(
+                    {
+                        "id": grid_id,
+                        "operator": "distance_matrix",
+                        "arguments": {"origins": stops, "destinations": stops},
+                        "depends_on": list(inputs),
+                        "output_type": "field",
+                        "role": "support",
+                        "concept_ids": [],
+                    }
+                )
+                produced_by[grid_id] = "distance_matrix"
+                square_matrices.add(grid_id)
+                matrix_stops[grid_id] = list(stops)
+                emits_collection[grid_id] = False
+                output_types[grid_id] = "field"
+                decisions.append(
+                    {
+                        "id": grid_id,
+                        "transform": "ROUTE_MATRIX",
+                        "operator": "distance_matrix",
+                        "rule": "composed_matrix_for_leg_selection",
+                    }
+                )
+                inputs = [grid_id]
+            if _totals_a_bare_matrix(
+                transform_name, factors, inputs, produced_by, square_matrices
+            ) and "select_legs" in available:
+                # A square matrix holds every pair; an itinerary drives the consecutive ones.
+                # Totalling the matrix answers a question about n^2 legs when the trip has
+                # n-1 of them, which is how `trip_total_distance` returned a confident number
+                # roughly four times too large with no step reporting an error. The selection
+                # is a node of its own so the grouping stays visible in the graph.
+                legs_id = f"{node_id}_legs"
+                source = inputs[0]
+                graph.append(
+                    {
+                        "id": legs_id,
+                        "operator": "select_legs",
+                        "arguments": {"routes": f"${source}"},
+                        "depends_on": [source],
+                        "output_type": "field",
+                        "role": "support",
+                        "concept_ids": [],
+                    }
+                )
+                produced_by[legs_id] = "select_legs"
+                emits_collection[legs_id] = False
+                output_types[legs_id] = "field"
+                decisions.append(
+                    {
+                        "id": legs_id,
+                        "transform": "SELECT_LEGS",
+                        "operator": "select_legs",
+                        "rule": "composed_consecutive_legs",
+                    }
+                )
+                inputs = [legs_id]
             operator, rule = resolve_operator(
                 transform_name,
                 factors,
@@ -746,6 +1096,7 @@ def factorize_semantic_graph(
                 available=available,
                 input_is_collection=[emits_collection.get(name, False) for name in inputs],
                 input_operators=[produced_by.get(name) or "" for name in inputs],
+                via_count=len(via_refs),
             )
             if (
                 transform_name.upper() == "SORT"
@@ -772,13 +1123,23 @@ def factorize_semantic_graph(
                     (f"${name}" for name, op in produced_by.items() if op == "distance_matrix"),
                     None,
                 ),
+                via=via_refs,
+                via_positions=via_positions,
+                resolved_count=resolved_counts.get(inputs[0], 0) if inputs else 0,
+                resolved_sizes=tuple(resolved_counts.get(name, 0) for name in inputs),
+                matrix_stops=matrix_stops,
             )
             arguments = wire_arguments(operator, wiring, output_types=output_types)
-            arguments = _bind_named_entities(
+            arguments, aligned = _bind_named_entities(
                 operator, arguments, step, factors, concept_text, options, concepts, claimed
             )
-            for name in arguments.get("place_names") or []:
+            names = arguments.get("place_names") or []
+            for name in names:
                 claimed.add(str(name))
+            if operator == "batch_geocode":
+                resolved_counts[node_id] = len(names)
+                if len(aligned) == len(names):
+                    resolved_concepts[node_id] = aligned
             output_type = TRANSFORMS[transform_name.upper()].output_type
 
         if (
@@ -806,6 +1167,8 @@ def factorize_semantic_graph(
                 }
             )
             produced_by[matrix_id] = "distance_matrix"
+            square_matrices.add(matrix_id)
+            matrix_stops[matrix_id] = [places]
             emits_collection[matrix_id] = False
             output_types[matrix_id] = "field"
             decisions.append(
@@ -818,6 +1181,12 @@ def factorize_semantic_graph(
             )
             arguments["distance_matrix"] = f"${matrix_id}"
             inputs = [*inputs, matrix_id]
+        if operator == "distance_matrix" and isinstance(arguments, dict):
+            origins, destinations = arguments.get("origins"), arguments.get("destinations")
+            if origins is not None and origins == destinations:
+                square_matrices.add(node_id)
+                if isinstance(origins, list):
+                    matrix_stops[node_id] = list(origins)
         produced_by[node_id] = operator if isinstance(operator, str) else ""
         # `operator` may not be a string here: a planner that writes
         # `"operator": ["extract_distance", "extract_distance"]` is carried through so the graph
@@ -863,7 +1232,7 @@ def _bind_named_entities(
     options: Sequence[str],
     concepts: Sequence[dict[str, Any]],
     claimed: set[str],
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], list[str]]:
     """Fill the place names a geocode needs from the concept graph, never from the planner.
 
     The entities are already in the concept graph -- that is what the Analysis stage extracted
@@ -880,23 +1249,24 @@ def _bind_named_entities(
     """
 
     if operator != "batch_geocode":
-        return arguments
+        return arguments, []
     requested = [str(value) for value in (step.get("concept_ids") or [])]
 
     # 1. The node said outright that it resolves the candidate texts.
     if str(factors.get("scope") or "").lower() in {"options", "candidates"}:
         arguments["place_names"] = list(options)
-        return arguments
+        return arguments, []
 
     # 2. Concepts the analysis actually has.
-    named = [
-        concept_text[value]
+    aligned = [
+        value
         for value in requested
         if value in concept_text and concept_text[value].strip()
     ]
+    named = [concept_text[value] for value in aligned]
     if named:
         arguments["place_names"] = named
-        return arguments
+        return arguments, aligned
 
     # 3. Every id it named is invented. When they read as the options -- `Option 0`,
     #    `candidate_options`, `option_places` -- that is what it meant.
@@ -904,7 +1274,7 @@ def _bind_named_entities(
         "option" in value.lower() or "candidate" in value.lower() for value in requested
     ):
         arguments["place_names"] = list(options)
-        return arguments
+        return arguments, []
 
     # 4. Otherwise take the located concepts no earlier node has claimed. This is the case where
     #    the Analysis stage returned only `question_context` and the planner had nothing to name.
@@ -925,12 +1295,12 @@ def _bind_named_entities(
     ]
     if unclaimed:
         arguments["place_names"] = unclaimed
-        return arguments
+        return arguments, []
 
     # 5. Nothing in the concept graph to resolve. The options are the only places left that the
     #    question certainly names, and an empty geocode is a certain failure.
     arguments["place_names"] = list(options)
-    return arguments
+    return arguments, []
 
 
 # ---------------------------------------------------------------------------------------------
@@ -975,6 +1345,7 @@ _LIFT: dict[str, str] = {
     "difference": "AGGREGATE",
     "calculate_proportion": "AGGREGATE",
     "aggregate_route_groups": "AGGREGATE",
+    "select_legs": "SELECT_LEGS",
     "match_options": "MATCH_OPTIONS",
     "match_distance_options": "MATCH_OPTIONS",
     "match_type_options": "MATCH_OPTIONS",

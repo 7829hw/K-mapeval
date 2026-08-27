@@ -273,6 +273,9 @@ OPERATOR_CONTRACTS: dict[str, OperatorContract] = {
     "aggregate_route_groups": OperatorContract(
         "amount", ("routes", "groups"), reference_arguments=("routes", "groups")
     ),
+    "select_legs": OperatorContract(
+        "field", ("routes",), ("order",), ("routes",)
+    ),
     "merge_places": OperatorContract(
         "object", ("items",), reference_arguments=("items",)
     ),
@@ -515,6 +518,7 @@ OPERATOR_INPUT_TYPES: dict[str, dict[str, frozenset[str]]] = {
     "steps_analysis": {"route": frozenset({"field"})},
     "sum_route_metrics": {"routes": frozenset({"field"})},
     "aggregate_route_groups": {"routes": frozenset({"field"})},
+    "select_legs": {"routes": frozenset({"field"})},
     "merge_places": {"items": frozenset({"object"})},
     "match_options": {
         "places": frozenset({"object"}),
@@ -795,7 +799,7 @@ TEMPLATES = {
         "trip_literal": True,
         "keywords": ("일정", "차례", "경유", "여행", "trip", "itinerary"),
         "pattern": (
-            "ROUTE_MATRIX -> AGGREGATE (scope=groups) -> MEASURE"
+            "ROUTE_MATRIX -> SELECT_LEGS (the consecutive legs) -> AGGREGATE -> MEASURE"
         ),
         "example": {
             "graph": [
@@ -879,8 +883,12 @@ TEMPLATES = {
         "name": "Route-Step-Extract",
         "affinity": {"turn", "step", "instruction", "guidance"},
         "network_literal": True,
+        "guidance_literal": True,
         "keywords": ("경로 단계", "도로", "회전", "step"),
-        "pattern": "RESOLVE_PLACES -> ROUTE_MEASURE -> ROUTE_STEPS -> MEASURE",
+        "pattern": (
+            "RESOLVE_PLACES -> ROUTE_MEASURE (via = anything the route passes through) -> "
+            "ROUTE_STEPS -> MEASURE"
+        ),
         "example": {
             "graph": [
                 {
@@ -1024,8 +1032,11 @@ SKELETONS: dict[str, list[dict[str, Any]]] = {
     # a turn happens on. A via-point is part of the route, not a second route.
     "route_step_extract": [
         {"id": "ends", "transform": "RESOLVE_PLACES", "inputs": [],
-         "concept_ids": ["<origin, any via point, destination>"], "role": "extent"},
-        {"id": "route", "transform": "ROUTE_MEASURE", "inputs": ["ends"], "role": "support"},
+         "concept_ids": ["<origin, any via point, destination, in that order>"],
+         "role": "extent"},
+        {"id": "route", "transform": "ROUTE_MEASURE", "inputs": ["ends"],
+         "via": ["<the concept the route passes through, omit when it passes through nothing>"],
+         "role": "support"},
         {"id": "steps", "transform": "ROUTE_STEPS", "inputs": ["route"], "role": "support"},
         {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["steps"], "role": "measure"},
     ],
@@ -1044,8 +1055,10 @@ SKELETONS: dict[str, list[dict[str, Any]]] = {
         {"id": "stops", "transform": "RESOLVE_PLACES", "inputs": [],
          "concept_ids": ["<the start and every stop, in the order stated>"], "role": "extent"},
         {"id": "legs", "transform": "ROUTE_MATRIX", "inputs": ["stops"], "role": "support"},
-        {"id": "total", "transform": "AGGREGATE", "inputs": ["legs"],
-         "factors": {"aggregate": "sum", "scope": "groups", "measure": "distance"},
+        {"id": "path", "transform": "SELECT_LEGS", "inputs": ["legs"],
+         "factors": {"scope": "consecutive"}, "role": "support"},
+        {"id": "total", "transform": "AGGREGATE", "inputs": ["path"],
+         "factors": {"aggregate": "sum", "measure": "distance"},
          "role": "support"},
         {"id": "answer", "transform": "MATCH_OPTIONS", "inputs": ["total"], "role": "measure"},
     ],
@@ -1302,6 +1315,14 @@ def _template_shape_score(
         r"(자동차|차량|운전|주행|도로|경로|route|driv)", lowered_question
     ):
         score += 8
+    if template.get("guidance_literal") and re.search(
+        r"(안내에\s*따르|주행\s*안내|회전|turn|manoeuvr|maneuver)", lowered_question
+    ):
+        # The answer is read off the driving guidance rather than off the route's totals, which
+        # is a different shape from "which route is shorter". Structural in the same way a
+        # stated radius is: without it a turn-count question retrieved Multi-Route-Compare and
+        # Filter-Aggregate-Measure, and never saw the shape that reads a step list at all.
+        score += 16
     return score
 
 

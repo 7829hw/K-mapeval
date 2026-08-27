@@ -102,9 +102,13 @@ concept types and the transformation you name. Name the relation, not the implem
 Transformations:
 {transform_catalogue}
 
-Every node is {"id", "transform", "inputs", "role"} and may carry "concept_ids" and "factors".
+Every node is {"id", "transform", "inputs", "role"} and may carry "concept_ids", "factors" and
+"via".
 - inputs are the ids of the nodes this one consumes, in order. The first input of a search, a
   filter, a sort or a route is the place it is measured from.
+- via, on a ROUTE_MEASURE, lists what the route passes through on the way -- concept ids, in the
+  order the route reaches them. A route stated as "A에서 B를 들러 C까지" is one route from A to C
+  with B in via, never two routes. Leave it out when the route passes through nothing.
 - concept_ids are the analysis concepts this node is about. A RESOLVE_PLACES node lists the
   concepts whose places it resolves, and the names come from those concepts -- do not retype a
   place name, and do not translate or shorten one.
@@ -139,6 +143,9 @@ What the question is about, not what the tools are:
 - A question that ranks by 주행거리/이동거리 is decided in metres and one that ranks by time in
   seconds. Say which with factors.measure; the orders a trip question offers sit about 2% apart,
   so the wrong measure answers a different question.
+- The whole distance or duration of an itinerary the question already orders is ROUTE_MATRIX ->
+  SELECT_LEGS -> AGGREGATE. The matrix holds every pair of stops; the trip drives only the
+  consecutive ones, and SELECT_LEGS is how the graph says which those are.
 - When the options are counts of places, the answer is how many stops fit the stated time, so let
   ROUTE_OPTIMIZE decide feasibility rather than counting the places the question mentions.
 - Two anchors bound some questions -- "A와 B 양쪽 모두에서", "A에서 B까지 이동하는 경로 위에" --

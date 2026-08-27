@@ -115,13 +115,42 @@ def _ground(graph: list[dict[str, Any]], question: str, options: list[str], anal
     # that left it at the canonical default would report a footprint the runtime never has.
     from src.tools.kakao import retrieval_specs
 
+    facts = spatial.extract_facts(analysis, question)
+    graph = _factorize(graph, analysis, options, facts)
     return spatial._ground_graph_literals(
         graph,
         question,
         options,
-        spatial.extract_facts(analysis, question),
+        facts,
         retrieval_specs=retrieval_specs,
     )
+
+
+def _factorize(
+    graph: list[dict[str, Any]], analysis: dict[str, Any], options: list[str], facts: Any
+) -> list[dict[str, Any]]:
+    """G -> G', where this revision has that stage; the recorded graph unchanged where it does not.
+
+    The planner answers in transformations now, and which operator performs each is decided
+    deterministically before grounding runs. That whole tail is still a pure function of the
+    recorded plan, so it replays the same way -- and a change to the operator choice shows up
+    here rather than needing a benchmark pass to see.
+    """
+
+    try:
+        from src.agent.geoflow import OPERATOR_CONTRACTS
+        from src.agent.semantics import factorize_semantic_graph, is_semantic_graph
+    except ImportError:
+        return graph
+    if not is_semantic_graph(graph):
+        return graph
+    return factorize_semantic_graph(
+        graph,
+        concepts=analysis.get("concepts") or [],
+        options=options,
+        facts=facts,
+        available=frozenset(OPERATOR_CONTRACTS),
+    ).graph
 
 
 def replay(report_paths: list[Path]) -> dict[str, Any]:

@@ -77,6 +77,7 @@ class SpatialOperatorRegistry:
         "sum_amounts",
         "difference",
         "aggregate_route_groups",
+        "select_legs",
         "merge_places",
         "match_options",
         "match_distance_options",
@@ -589,6 +590,51 @@ class SpatialOperatorRegistry:
         elif kind == "duration":
             result["duration_s"] = magnitude
         return result
+
+    @staticmethod
+    def select_legs(routes: Any, order: list[int] | None = None) -> dict[str, Any]:
+        """The legs an ordered itinerary actually travels, out of a matrix of every pair.
+
+        `distance_matrix(origins=stops, destinations=stops)` routes n^2 pairs, of which an
+        itinerary drives n-1: the consecutive ones. Totalling the matrix instead answers a
+        different question by roughly a factor of n, and it is the number `trip_total_distance`
+        was returning -- the graph ran, every leg was real, and the sum covered every pair.
+
+        `order` is the sequence of stop indexes to walk, defaulting to the order the matrix was
+        built in, which is the order the itinerary stated. It is a permutation of the stops, not
+        a list of pair indexes: a leg is a consecutive pair of it.
+        """
+
+        pairs = _route_list(routes)
+        if not isinstance(pairs, list) or not pairs:
+            raise ValueError("select_legs received no routes to select from")
+        side = math.isqrt(len(pairs))
+        if side * side != len(pairs):
+            raise ValueError(
+                f"select_legs expects a square origins x destinations matrix, got {len(pairs)} "
+                "routes"
+            )
+        walk = [int(value) for value in order] if order else list(range(side))
+        if len(walk) < 2:
+            raise ValueError("select_legs needs at least two stops to make a leg")
+        if any(index < 0 or index >= side for index in walk):
+            raise ValueError(f"select_legs order refers to a stop outside the {side} in the matrix")
+        legs: list[dict[str, Any]] = []
+        for position in range(len(walk) - 1):
+            origin, destination = walk[position], walk[position + 1]
+            leg = dict(pairs[origin * side + destination])
+            leg["leg_index"] = position
+            leg["from_index"] = origin
+            leg["to_index"] = destination
+            legs.append(leg)
+        errors = [leg.get("error") for leg in legs if leg.get("status") == "error"]
+        return {
+            "routes": legs,
+            "order": walk,
+            "leg_count": len(legs),
+            "complete": not errors,
+            "errors": errors,
+        }
 
     @staticmethod
     def aggregate_route_groups(

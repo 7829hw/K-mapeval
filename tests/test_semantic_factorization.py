@@ -377,8 +377,13 @@ def test_a_total_over_a_matrix_is_not_an_extract_from_a_route() -> None:
         concepts=[{"id": "a", "text": "가"}, {"id": "b", "text": "나"}],
     )
 
-    assert built.graph[2]["operator"] == "sum_route_metrics"
+    # A square matrix holds every pair; a trip drives the consecutive ones. The selection is
+    # composed in as its own node so the grouping stays visible in the graph, and the total is
+    # taken over what it selected rather than over the whole grid.
+    assert built.graph[2]["operator"] == "select_legs"
     assert built.graph[2]["arguments"] == {"routes": "$m"}
+    assert built.graph[3]["operator"] == "sum_route_metrics"
+    assert built.graph[3]["arguments"] == {"routes": "$e_legs"}
 
 
 # ---------------------------------------------------------------------------------------------

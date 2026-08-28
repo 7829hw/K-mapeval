@@ -3466,3 +3466,45 @@ def test_two_names_a_syllable_apart_are_both_left_alone() -> None:
     from src.agent.spatial import _verbatim_name
 
     assert _verbatim_name("가나다", "가나라 가나마 근처?", [], []) == "가나다"
+
+
+def test_a_turn_total_is_told_which_count_it_adds() -> None:
+    """`steps_analysis` already returns every count. A total over two legs failed not because
+    the numbers were missing but because `sum_amounts` was never told which column to add, and a
+    step payload carries no bare measurement to fall back on -- so every two-leg turn question
+    lost its second leg and answered from the first alone.
+    """
+
+    from src.agent.spatial import _ground_graph_literals, extract_facts
+
+    question = (
+        "A에서 B를 들러 C까지 자동차로 이동합니다. 주행 안내에 따르면 좌회전을 몇 번 해야 하나요?"
+    )
+    facts = extract_facts({}, question)
+    assert facts.turn_field == "left_turn_count"
+    graph = [
+        {"id": "r1", "operator": "directions", "arguments": {"origin": "$a", "destination": "$b"}},
+        {"id": "s1", "operator": "steps_analysis", "arguments": {"route": "$r1"}},
+        {"id": "s2", "operator": "steps_analysis", "arguments": {"route": "$r1"}},
+        {"id": "t", "operator": "sum_amounts", "arguments": {"amounts": ["$s1", "$s2", "$r1"]}},
+    ]
+    grounded = {step["id"]: step for step in _ground_graph_literals(graph, question, [], facts)}
+    total = grounded["t"]["arguments"]
+    assert total["key"] == "left_turn_count"
+    # The route node carries distances rather than turns; counting turns over it is a different
+    # question, not a smaller answer.
+    assert total["amounts"] == ["$s1", "$s2"]
+
+
+def test_a_question_naming_no_turn_leaves_the_total_alone() -> None:
+    from src.agent.spatial import _ground_graph_literals, extract_facts
+
+    question = "A에서 B까지 전체 주행 거리는 얼마인가요?"
+    facts = extract_facts({}, question)
+    assert facts.turn_field is None
+    graph = [
+        {"id": "s1", "operator": "steps_analysis", "arguments": {"route": "$r1"}},
+        {"id": "t", "operator": "sum_amounts", "arguments": {"amounts": ["$s1"]}},
+    ]
+    grounded = {step["id"]: step for step in _ground_graph_literals(graph, question, [], facts)}
+    assert "key" not in grounded["t"]["arguments"]

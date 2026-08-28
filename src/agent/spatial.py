@@ -1331,6 +1331,10 @@ class GroundingFacts:
     #: not a waypoint inferred from where an input sat: `via` on a route node remains the only
     #: thing that may say that, and this only fills a route the graph left without one.
     via_place: str | None = None
+    #: Which turn the question counts, as the field `steps_analysis` records it under. Stated in
+    #: the sentence like a radius is, and bound the same way: the count is already computed and
+    #: what a total over several legs needs is to be told which column to add.
+    turn_field: str | None = None
 
     def stated_stay(self, name: str) -> float:
         """The stay stated for exactly this place, or zero when the question states none."""
@@ -1414,7 +1418,30 @@ def extract_facts(analysis: dict[str, Any], question: str) -> GroundingFacts:
         route_objective="distance" if _asks_for_distance(question) else None,
         stated_literals=(literals := _verbatim_concept_texts(analysis, question)),
         via_place=_extract_waypoint(question, literals),
+        turn_field=_extract_turn_field(question),
     )
+
+
+#: What the question calls a turn, and the field `steps_analysis` counts it into.
+_TURN_FIELDS = (
+    ("좌회전", "left_turn_count"),
+    ("우회전", "right_turn_count"),
+    ("회전교차로", "roundabout_exit_count"),
+    ("로터리", "roundabout_exit_count"),
+)
+
+
+def _extract_turn_field(question: str) -> str | None:
+    """Which turn a question counts, when it counts one.
+
+    `steps_analysis` already returns every count; a total over two legs fails not because the
+    numbers are missing but because `sum_amounts` was never told which of them to add, and a
+    step payload carries no bare measurement to fall back on. Only one kind may be named --
+    a question asking about two is not asking for one total.
+    """
+
+    found = {field for word, field in _TURN_FIELDS if word in question}
+    return next(iter(found)) if len(found) == 1 else None
 
 
 #: How a question says a drive passes through somewhere.
@@ -1651,6 +1678,11 @@ def _ground_graph_literals(
     # was counting the turns of the route that skipped it. Only with one route in the graph,
     # because a detour question measures two and only one of them goes through the stop; that
     # one is told apart by the graph's own structure, not from here.
+    # Which nodes produced a turn-by-turn analysis, so a total over them can be told which count
+    # it is adding.
+    step_analyses = {
+        str(step.get("id")) for step in steps if step.get("operator") == "steps_analysis"
+    }
     lone_route = next(
         iter(step for step in steps if step.get("operator") in {"directions", "travel_time"}), None
     )
@@ -1906,6 +1938,22 @@ def _ground_graph_literals(
                 arguments["mode"] = "radius_set" if radius_m is not None else "nearest"
             grounded.append({**step, "arguments": arguments})
             continue
+        if operator == "sum_amounts" and facts.turn_field and not arguments.get("key"):
+            # A total over turn-by-turn analyses is a total of one of their counts, and
+            # `steps_analysis` already computed every one of them: what the operator lacks is
+            # being told which column to add, and a step payload carries no bare measurement to
+            # fall back on, so it refused. The route nodes a planner lists beside them carry
+            # distances rather than turns and are dropped -- a turn count over a route payload
+            # is not a smaller answer, it is a different question.
+            analysed = [
+                value
+                for value in (arguments.get("amounts") or ())
+                if isinstance(value, str)
+                and str(value).lstrip("$").split(".", 1)[0] in step_analyses
+            ]
+            if analysed:
+                arguments["amounts"] = analysed
+                arguments["key"] = facts.turn_field
         if (
             lone_route is not None
             and step is lone_route

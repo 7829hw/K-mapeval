@@ -720,3 +720,32 @@ def test_a_measure_says_which_pair_it_is_between_even_from_one_geocode_batch() -
     # step-shaped wire format always put them.
     assert steps["t3"]["inputs"][0] == "t1"
     assert "via" in steps["t3"]["inputs"] and "end" in steps["t3"]["inputs"]
+
+
+def test_an_aggregate_computes_the_relation_its_factor_names() -> None:
+    """The operator and its guard have always been here; what was missing was the planner being
+    told the factor exists. `GRAPH_PROMPT` listed the grounding factors -- radius, ordinal,
+    stays -- and none of the semantic ones after the IR rewrite, so every AGGREGATE fell to the
+    default and "얼마나 차이가 나나요" was answered with 14799 m for distances of 6640 m and
+    8158 m: their sum, reported as their difference.
+    """
+
+    def measure(factors: dict[str, object]) -> str:
+        graph = [
+            {"id": "a", "transform": "RESOLVE_PLACES", "inputs": [], "role": "extent"},
+            {"id": "d1", "transform": "DISTANCE_MEASURE", "inputs": ["a"], "role": "support"},
+            {"id": "d2", "transform": "DISTANCE_MEASURE", "inputs": ["a"], "role": "support"},
+            {
+                "id": "agg",
+                "transform": "AGGREGATE",
+                "inputs": ["d1", "d2"],
+                "role": "measure",
+                **({"factors": factors} if factors else {}),
+            },
+        ]
+        return {step["id"]: step for step in _build(graph).graph}["agg"]["operator"]
+
+    assert measure({"aggregate": "difference"}) == "difference"
+    assert measure({"aggregate": "count"}) == "count_items"
+    # The default stays a sum, which is why the factor has to be said rather than inferred.
+    assert measure({}) == "sum_amounts"

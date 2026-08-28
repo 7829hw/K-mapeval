@@ -109,6 +109,11 @@ The first input of a search, a filter, a sort, a ranking or a route is the place
 from; the rest are what it measures. A node that ranks a retrieval takes the anchor first and the
 retrieval second.
 
+A route the question sends *through* somewhere is one ROUTE_MEASURE with "via": the concept ids
+it passes through, in the order it reaches them. "A에서 B를 들러 C까지" is one route from A to C
+with B in via, never two routes and never a route that forgets B. Leave via out when the route
+passes through nothing; it is never inferred from where an input happens to sit.
+
 A drive between two stated places is one ROUTE_MEASURE, whatever the question asks about it.
 "Shortest", "fastest" and "by distance" are objectives on that one route -- say them as factors,
 not as a different transformation. ROUTE_MATRIX and ROUTE_OPTIMIZE are for an itinerary of three
@@ -1401,12 +1406,35 @@ def _verbatim_concept_texts(analysis: dict[str, Any], question: str) -> tuple[st
     So this widens the repair vocabulary without ever letting a paraphrase into it.
     """
 
-    texts = (
+    texts = [
         str(concept.get("text") or "").strip()
         for concept in (analysis.get("concepts") or [])
         if isinstance(concept, dict)
-    )
-    return tuple(dict.fromkeys(text for text in texts if len(text) >= 2 and text in question))
+    ]
+    literals: list[str] = []
+    for text in texts:
+        if len(text) < 2 or text not in question:
+            continue
+        literals.append(text)
+        # The Analysis stage copies a clause as often as a name -- `삼성출판박물관을 경유해서 가는
+        # 경우` -- and then the name itself is in no vocabulary anything can repair against. What
+        # sits before a grammatical ending is the name, which is the same test `_verbatim_name`
+        # applies from the other side.
+        name = _name_before_a_clause(text)
+        if name:
+            literals.append(name)
+    return tuple(dict.fromkeys(literals))
+
+
+def _name_before_a_clause(text: str) -> str | None:
+    """The place a phrase names, when the rest of it is grammar rather than more name."""
+
+    # Leftmost, so the name is what precedes the *first* grammatical ending. Scanning from the
+    # right returns `삼성출판박물관을 경유해서 가`, which is a longer phrase and not a place.
+    for end in range(2, len(text)):
+        if _CLAUSE_FOLLOWS.match(text[end:]):
+            return text[:end]
+    return None
 
 
 def _concept_attributes(analysis: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2545,6 +2573,11 @@ _NOT_A_NAME = re.compile(r"[\s\W_A-Za-z]*")
 #: A Korean grammatical ending, followed by a space or nothing. What separates a place name the
 #: planner left a particle on from a place name whose next syllable merely looks like one.
 _TRAILING_CLAUSE = re.compile(r"^(?:을|를|은|는|이|가|에서|에|으로|로|까지|부터|와|과|의)(?:\s|$)")
+#: The same endings, but a clause has to actually follow. Used when reading a name *out of* an
+#: Analysis concept text, where ending at the particle is far more likely to be a name that
+#: happens to end in that syllable: `중계동학원가` is a place, not `중계동학원` plus a subject
+#: marker.
+_CLAUSE_FOLLOWS = re.compile(r"^(?:을|를|은|는|이|가|에서|에|으로|로|까지|부터|와|과|의)\s\S")
 
 _DESCRIPTIVE_TAIL = re.compile(
     r"\s*(?:\(\s*(?:의\s*)?(?:위치\s*정보|위치|좌표|지점|장소)\s*\)"

@@ -3363,3 +3363,28 @@ def test_a_clause_the_planner_copied_with_the_name_is_trimmed_to_the_place() -> 
     assert _verbatim_name("강남역에스컬레이터", "강남역에스컬레이터 근처?", [], ["강남역"]) == (
         "강남역에스컬레이터"
     )
+
+
+def test_a_place_is_read_out_of_a_concept_text_that_carries_a_clause() -> None:
+    """The Analysis stage copies a clause as often as a name, and then the name itself is in no
+    vocabulary anything can repair against: `삼성출판박물관을 경유해서 가는 경우` was geocoded as
+    written and the whole question was lost as a `PlaceNotFoundError`."""
+
+    from src.agent.spatial import _verbatim_concept_texts
+
+    question = "포유모텔에서 학동역 7호선까지, 삼성출판박물관을 경유해서 가는 경우의 주행거리는?"
+    literals = _verbatim_concept_texts(
+        {"concepts": [{"text": "삼성출판박물관을 경유해서 가는 경우"}]}, question
+    )
+    assert "삼성출판박물관" in literals
+
+
+def test_a_name_that_merely_ends_in_a_particle_syllable_is_left_whole() -> None:
+    """`중계동학원가` is a place, not `중계동학원` plus a subject marker. A clause has to
+    actually follow before the ending counts as grammar."""
+
+    from src.agent.spatial import _verbatim_concept_texts
+
+    question = "중계동학원가에서 신설동역 1호선까지"
+    literals = _verbatim_concept_texts({"concepts": [{"text": "중계동학원가"}]}, question)
+    assert literals == ("중계동학원가",)

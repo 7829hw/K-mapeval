@@ -45,6 +45,15 @@ from src.agent.validation import accepted_output_types
 #: Procedural precedence, as G2 orders it. Contextual roles sit outside it by design.
 _ROLE_ORDER = ("sub_condition", "condition", "support", "measure")
 
+#: Transformations that need a *located* place, not a kind of place or a set of them. A
+#: PLACE_SEARCH takes a category and a FILTER takes candidates, so neither is here: geocoding
+#: `정형외과` because a search reads it would send the geocoder after a word.
+_NEEDS_LOCATED_PLACES = frozenset(
+    {"ROUTE_MEASURE", "ROUTE_MATRIX", "ROUTE_OPTIMIZE", "DISTANCE_MEASURE"}
+)
+#: The core concepts a place is typed with.
+_PLACE_TYPES = frozenset({"location", "object"})
+
 
 def canonicalize_ir_payload(
     analysis: Mapping[str, Any], payload: Mapping[str, Any]
@@ -223,6 +232,24 @@ class _Canonicalizer:
                 raw, edge_id, transform, is_last=is_last, inputs=tuple(dict.fromkeys(inputs))
             )
 
+            attributes = raw.get("attributes")
+            attributes = dict(attributes) if isinstance(attributes, dict) else {}
+            # `via` says what a route passes through, and the graph is the only thing allowed to
+            # say it -- a rule that made a middle input into a waypoint would route
+            # "A와 B 중 C에 더 가까운 곳" through the answer. A planner writes it beside the
+            # transformation as often as inside `attributes`, and reading only the second
+            # spelling lost every waypoint: `routing_turn_count_via` counted the turns of a
+            # route that skipped the stop it was asked about.
+            declared_via = raw.get("via") or attributes.get("via") or ()
+            if isinstance(declared_via, str):
+                declared_via = [declared_via]
+            resolved_via = [
+                value
+                for entry in declared_via
+                for value in self._resolve(entry, edge_id=edge_id)
+            ]
+            if resolved_via:
+                attributes["via"] = list(dict.fromkeys(resolved_via))
             self._edges.append(
                 TransformationEdge(
                     edge_id,
@@ -230,7 +257,7 @@ class _Canonicalizer:
                     tuple(dict.fromkeys(inputs)),
                     outputs,
                     tuple(dict.fromkeys(factor_ids)),
-                    raw.get("attributes") if isinstance(raw.get("attributes"), dict) else {},
+                    attributes,
                 )
             )
             self._outputs_by_edge[edge_id] = outputs
@@ -376,11 +403,54 @@ class _Canonicalizer:
 
     # -- assembly ----------------------------------------------------------------------------
 
+    def _resolve_the_places_nothing_resolved(self) -> None:
+        """Geocode the places a measure reads when the graph never said to.
+
+        A drive needs located places, and a graph that writes ROUTE_MEASURE straight over the
+        Analysis concepts has named them without resolving them: `directions` then arrives with
+        no origin and no destination and the question is refused before it starts. On a held-out
+        draw that was 31 of 100 questions, across four different operators saying it four
+        different ways.
+
+        Additive and last-resort like the rest of this module: it fires only for a concept no
+        transformation produces, and the edge it adds is the one a planner writes when it gets
+        this right -- one RESOLVE_PLACES reading those concepts and producing them in place.
+        """
+
+        wanted: list[str] = []
+        for edge in self._edges:
+            if edge.transformation.upper() not in _NEEDS_LOCATED_PLACES:
+                continue
+            for concept_id in edge.input_concepts:
+                node = self._concepts.get(concept_id)
+                if node is None or concept_id in self._producer:
+                    continue
+                if node.core_concept in _PLACE_TYPES and concept_id not in wanted:
+                    wanted.append(concept_id)
+        if not wanted:
+            return
+        edge_id = "resolve_places"
+        while edge_id in self._outputs_by_edge:
+            edge_id += "_"
+        resolved = TransformationEdge(
+            edge_id,
+            "RESOLVE_PLACES",
+            tuple(wanted),
+            tuple(wanted),
+            (),
+            {"source": "implicit_completion"},
+        )
+        self._edges.insert(0, resolved)
+        self._outputs_by_edge[edge_id] = tuple(wanted)
+        for concept_id in wanted:
+            self._producer[concept_id] = edge_id
+
     def build(self) -> GeoFlowGraph:
         self._seed()
         self._build_edges()
         if not self._edges:
             raise ValueError("GeoFlow response does not contain a non-empty graph")
+        self._resolve_the_places_nothing_resolved()
         self._retype_produced_concepts()
         self._propagate_roles()
         self._root_the_leaves_in_context()

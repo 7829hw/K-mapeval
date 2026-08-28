@@ -293,7 +293,9 @@ def test_match_options_is_dropped_and_the_measure_it_named_is_kept() -> None:
             ]
         }
     )
-    assert [edge.id for edge in graph.transformation_edges] == ["t1", "t2"]
+    assert "MATCH_OPTIONS" not in {
+        edge.transformation.upper() for edge in graph.transformation_edges
+    }
     assert graph.concepts_by_id["d"].functional_role == "measure"
 
 
@@ -517,3 +519,96 @@ def test_the_unconsumed_input_rule_refuses_a_draft_but_not_the_question() -> Non
         {}, payload, options=[], facts=facts, available=available, strict_types=False
     )
     assert any(row.get("rule") == "unconsumed_inputs" for row in relaxed.semantic.diagnostics)
+
+
+def test_a_route_says_what_it_passes_through_however_the_planner_spells_it() -> None:
+    """`via` is the only thing allowed to say a route has a waypoint -- inferring one from a
+    middle input would route "A와 B 중 C에 더 가까운 곳" through the answer. A planner writes it
+    beside the transformation as often as inside `attributes`, and reading only the second
+    spelling lost every waypoint: `routing_turn_count_via` counted the turns of a route that
+    skipped the stop it was asked about.
+    """
+
+    payload = {
+        "concept_nodes": [
+            {"id": "a", "core_concept": "location", "functional_role": "extent"},
+            {"id": "b", "core_concept": "location", "functional_role": "support"},
+            {"id": "c", "core_concept": "location", "functional_role": "support"},
+            {"id": "route", "core_concept": "field", "functional_role": "measure"},
+        ],
+        "transformation_edges": [
+            {
+                "id": "t1",
+                "transformation": "ROUTE_MEASURE",
+                "input_concepts": ["a", "c"],
+                "via": ["b"],
+                "output_concepts": ["route"],
+            }
+        ],
+    }
+    graph = _valid(payload)
+    edge = next(item for item in graph.transformation_edges if item.id == "t1")
+    assert edge.attributes["via"] == ["b"]
+
+
+def test_a_measure_whose_places_nothing_resolved_gets_them_geocoded() -> None:
+    """A graph that writes ROUTE_MEASURE straight over the Analysis concepts has named its
+    places without resolving them, and `directions` then arrives with no origin and no
+    destination. On a held-out draw that was 31 of 100 questions, across four operators saying
+    it four different ways."""
+
+    graph = _valid(
+        {
+            "concept_nodes": [
+                {"id": "from", "core_concept": "location", "functional_role": "extent"},
+                {"id": "to", "core_concept": "location", "functional_role": "support"},
+                {"id": "route", "core_concept": "field", "functional_role": "measure"},
+            ],
+            "transformation_edges": [
+                {
+                    "id": "t1",
+                    "transformation": "ROUTE_MEASURE",
+                    "input_concepts": ["from", "to"],
+                    "output_concepts": ["route"],
+                }
+            ],
+        }
+    )
+    resolving = [
+        edge
+        for edge in graph.transformation_edges
+        if edge.transformation.upper() == "RESOLVE_PLACES"
+    ]
+    assert len(resolving) == 1
+    assert set(resolving[0].output_concepts) == {"from", "to"}
+
+
+def test_a_kind_of_place_is_not_geocoded_because_a_search_reads_it() -> None:
+    """`정형외과` is what to look for, not somewhere to look. Only transformations that need a
+    located place ask for one."""
+
+    graph = _valid(
+        {
+            "transformation_edges": [
+                {
+                    "id": "t1",
+                    "transformation": "RESOLVE_PLACES",
+                    "input_concepts": ["anchor"],
+                    "output_concepts": ["anchor"],
+                },
+                {
+                    "id": "t2",
+                    "transformation": "PLACE_SEARCH",
+                    "input_concepts": ["anchor", "candidates"],
+                    "output_concepts": ["found"],
+                },
+                {
+                    "id": "t3",
+                    "transformation": "ORDINAL_SELECT",
+                    "input_concepts": ["found"],
+                    "output_concepts": ["answer"],
+                },
+            ]
+        }
+    )
+    assert [edge.id for edge in graph.transformation_edges] == ["t1", "t2", "t3"]

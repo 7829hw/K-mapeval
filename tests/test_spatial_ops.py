@@ -3598,3 +3598,27 @@ def test_a_field_projected_off_a_batch_list_is_a_spelling_the_executor_survives(
         normalize_and_validate_graph(projected, max_steps=8)
     steps, _ = normalize_and_validate_graph(projected, max_steps=8, strict_types=False)
     assert [step["id"] for step in steps] == ["geo", "details"]
+
+
+def test_a_tour_names_the_stops_it_visits_in_the_order_it_reaches_them() -> None:
+    """`order` is indices. Leaving the names to be read off them in prose made the *order* a
+    guess, the same way leaving the count to be read off them made the count one: a tour of
+    [0, 2, 1, 3, 0] was reported in the order its nodes were listed, so an ordering question was
+    answered with the itinerary it was given rather than the one computed.
+    """
+
+    from src.tools import SpatialOperatorRegistry
+
+    nodes = [
+        {"query": "제일모텔", "place": {"name": "제일모텔"}},
+        {"place": {"name": "이마트 신도림점"}},
+        {"place": {"name": "무계동천"}},
+        {"place": {"name": "퐁피두센터 한화"}},
+    ]
+    matrix = [[0, 10, 3, 6], [10, 0, 8, 4], [3, 8, 0, 5], [6, 4, 5, 0]]
+    tour = SpatialOperatorRegistry().tsp_tw(
+        nodes=nodes, distance_matrix=matrix, metric="distance", return_to_start=True
+    )
+    assert tour["order"] == [0, 2, 1, 3, 0]
+    # The start is named once and the drive home is not a second visit.
+    assert tour["ordered_stops"] == ["제일모텔", "무계동천", "이마트 신도림점", "퐁피두센터 한화"]

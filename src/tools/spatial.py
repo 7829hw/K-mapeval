@@ -1114,6 +1114,28 @@ class SpatialOperatorRegistry:
         }
 
     @staticmethod
+    def _tour_names(nodes: list[dict[str, Any]], order: list[int]) -> list[str]:
+        """The stops a tour visits, named, in the order it reaches them.
+
+        `order` is indices. Leaving the names to be read off them in prose is what made the
+        *order* a guess, the same way leaving the count to be read off them made the count one:
+        a tour of [0, 2, 3, 1, 0] was reported in the order its nodes were listed, so an
+        ordering question answered with the itinerary it was given rather than the one computed.
+        The start is named once and the drive home is not a second visit.
+        """
+
+        names: list[str] = []
+        for index in order:
+            if not 0 <= index < len(nodes):
+                continue
+            node = nodes[index]
+            place = node.get("place") if isinstance(node.get("place"), dict) else node
+            name = str((place or {}).get("name") or node.get("query") or "").strip()
+            if name and name not in names:
+                names.append(name)
+        return names
+
+    @staticmethod
     def tsp_tw(
         nodes: list[dict[str, Any]],
         distance_matrix: list[list[float]] | dict[str, Any],
@@ -1236,7 +1258,11 @@ class SpatialOperatorRegistry:
                     "metric": MATRIX_METRICS[metric],
                 }
         if best is not None:
-            return {**best, "fallback_used": False}
+            return {
+                **best,
+                "ordered_stops": SpatialOperatorRegistry._tour_names(nodes, best["order"]),
+                "fallback_used": False,
+            }
         order = [start_index]
         remaining = set(visit_indexes)
         elapsed = float((service_times or [0.0] * len(nodes))[start_index])
@@ -1287,6 +1313,7 @@ class SpatialOperatorRegistry:
             order.append(start_index)
         return {
             "order": order,
+            "ordered_stops": SpatialOperatorRegistry._tour_names(nodes, order),
             "visited_count": visited_count,
             "total_cost": elapsed,
             "travel_cost": elapsed - service,
@@ -1352,6 +1379,7 @@ def _walk_stated_order(
         order.append(start_index)
     return {
         "order": order,
+        "ordered_stops": SpatialOperatorRegistry._tour_names(nodes, order),
         "visited_count": visited_count,
         "total_cost": elapsed,
         "travel_cost": elapsed - service,

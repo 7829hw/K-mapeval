@@ -49,7 +49,7 @@ import argparse
 import itertools
 import json
 import random
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from benchmark_core import (
@@ -126,6 +126,22 @@ def _scan_limit(floor: int, count: int) -> int:
 # ------------------------------------------------------------------ nearby
 
 
+def _scarcest_ordinal(
+    feasible: Sequence[int], produced: dict[int, int], target: dict[int, int]
+) -> int:
+    """Which of the ordinals an anchor can supply to spend it on.
+
+    The gap tests are nested -- k=4 asks for every gap k=3 asks for and one more -- so `feasible`
+    is always a prefix of (2, 3, 4): every usable anchor can supply k=2 and only a few can supply
+    k=4. Picking the least-produced value and breaking the tie toward the smaller k therefore
+    handed the first generous anchors to the one value that needed no generosity. Take the value
+    furthest below its own target instead, and break ties toward the larger k, which is the harder
+    one to come by.
+    """
+
+    return max(feasible, key=lambda k: (target[k] - produced[k], k))
+
+
 def nearby_kth_nearest(
     builder: Builder, pool: Pool, rng: random.Random, count: int
 ) -> list[dict]:
@@ -139,12 +155,22 @@ def nearby_kth_nearest(
 
     anchors = pool.of("AT4", "CT1", "SW8", "AD5")
     rng.shuffle(anchors)
-    codes = ["CE7", "BK9", "PM9", "CS2"]
+    # Sparse kinds, because a dense one cannot ask this question. The family asked for the k-th
+    # nearest cafe, bank, pharmacy or convenience store, and over 108 anchors those four supplied
+    # 0, 2, 2 and 2 usable neighbourhoods and *not one* separable past k=2 -- Seoul puts four
+    # cafes inside `ORDINAL_MARGIN_M` of each other. So the ordinal was never being drawn; it was
+    # being dictated, and five draws running audited as concentrated on k=2. The same 108 anchors
+    # give `MT1` 43 usable and 23 separable past k=2, `PO3` 27 and 7, `SC4` 23 and 10, `CT1` 21
+    # and 9. The dense categories are still asked by `nearby_cuisine_subtype` (FD6) and
+    # `nearby_subtype_kth` (HP8), which do not turn on a bare ordinal.
+    codes = ["MT1", "SC4", "PO3", "CT1"]
     produced_counts: dict[int, int] = {2: 0, 3: 0, 4: 0}
     # What the selection at the end of this function hands each of 2, 3 and 4, so that "we have
     # enough of every ordinal" is asked against the quota that will actually be filled rather than
     # against a fraction of it. At v6's count of eight the two are the same number.
     per_value = count // 3
+    base, remainder = divmod(count, 3)
+    target = {2: base + remainder, 3: base, 4: base}
     scan_limit = _scan_limit(ORDINAL_SCAN_FLOOR, count)
     made: list[tuple[int, dict]] = []
     used: set[str] = set()
@@ -202,7 +228,10 @@ def nearby_kth_nearest(
         # `trip_feasible_count` spends its rungs instead.
         if not feasible:
             continue
-        kth = min(feasible, key=lambda k: (produced_counts[k], k))
+        # On the v8 draw eight of the twenty-four accepted anchors could have answered k=3 or
+        # k=4 and the spread still came out 17 / 4 / 3, because the generous ones were spent on
+        # k=2 first.
+        kth = _scarcest_ordinal(feasible, produced_counts, target)
         gold = ranked[kth - 1]
         decoys = rng.sample([place for place in ranked if place is not gold], 3)
         options = [gold, *decoys]

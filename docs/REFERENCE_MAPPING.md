@@ -3645,3 +3645,82 @@ six; the cause is recorded in `AGENTS.md` — it anchors on Seoul's four densest
 where half of consecutive rank gaps fall under `ORDINAL_MARGIN_M` — and the lever is the pool or
 the margin, not the scan this change fixed. That family's 44.4 / 77.8 is not quotable; nothing
 else on the set is affected.
+
+## The ordinal family could not ask its own question, and five draws said so
+
+`nearby_kth_nearest` audited as concentrated on k=2 in six draws for six — 19 of 24 on v7, 20 of 24
+on v7c, 17 of 24 on v8 — while `nearby_subtype_kth`, which draws its ordinal by the same rule in
+the same file, balanced every time. Two repairs had already been made and neither moved it: the
+ordinal stopped being keyed on the anchor loop index, and `_scan_limit` started growing with
+`count`. This file recorded the remaining suspicion as "the lever is the pool or the margin, not
+the scan". Measured, it is the pool, and not marginally.
+
+Over 108 anchors at `ORDINAL_MARGIN_M = 90`, by the category the question asks for:
+
+| code | kind | usable anchors | separable past k=2 | can supply k=4 |
+| --- | --- | --- | --- | --- |
+| `CE7` | 카페 | 0 | 0 | 0 |
+| `FD6` | 음식점 | 0 | 0 | 0 |
+| `CS2` | 편의점 | 2 | **0** | 0 |
+| `BK9` | 은행 | 2 | **0** | 0 |
+| `PM9` | 약국 | 2 | **0** | 0 |
+| `MT1` | 대형마트 | 43 | 23 | 11 |
+| `PO3` | 공공기관 | 27 | 7 | 3 |
+| `SC4` | 학교 | 23 | 10 | 4 |
+| `CT1` | 문화시설 | 21 | 9 | 5 |
+| `SW8` | 지하철역 | 37 | 17 | 8 |
+
+The family asked by `CE7`, `BK9`, `PM9` and `CS2`. Those four supplied six usable neighbourhoods
+between them and *not one* separable past k=2, so k was never being drawn — it was being dictated
+by the category, and no balancing code could have fixed it. Seoul puts four cafes inside 90 m of
+each other; the ordinal question needs a kind of place the city spaces out. The family now asks by
+`MT1`, `SC4`, `PO3` and `CT1`, and draws 8/8/8 at count 24 on four different seeds, at 601 Kakao
+calls against the 5,799 the dense pool spent failing.
+
+**A second defect underneath it, worth the general note.** The gap tests are nested — k=4 requires
+every gap k=3 requires and one more — so `feasible` is always a prefix of `(2, 3, 4)`: every usable
+anchor supplies k=2 and only a few supply k=4. `min(feasible, key=lambda k: (produced[k], k))`
+therefore broke every early tie toward k=2 and spent the scarce anchors on the value that needed no
+scarcity. `_scarcest_ordinal` takes the value furthest below its own target and breaks ties toward
+the larger k. Replaying v8's exact draw off the cache — free and deterministic, because
+`gold_evidence.ranked_m` records what each accepted anchor could have offered — separates the two
+repairs:
+
+| | spread | most-common share |
+| --- | --- | --- |
+| as v8 shipped | 17 / 4 / 3 | 0.71 (audit fails) |
+| tie-break fixed, dense pool | 16 / 4 / 4 | 0.67 |
+| tie-break fixed, sparse pool | **8 / 8 / 8** | 0.33 |
+
+**What the family was hiding.** Split by k on v9, three passes a side:
+
+| k | rows | ReAct | Spatial-Agent |
+| --- | --- | --- | --- |
+| 2 | 24 | 62.5 | 91.7 |
+| 3 | 24 | 12.5 | 75.0 |
+| 4 | 24 | 16.7 | 66.7 |
+
+Ranking four options against each other — what an agent does when it does not retrieve — answers a
+k-th question whenever the k-1 nearer places are all among the decoys: 60% of the time at k=2, 10%
+at k=4. ReAct scores the rung that is answerable that way and collapses on the two that are not.
+So a draw that was 17 to 19 of 24 rows at k=2 was not merely unbalanced; it was quoting the
+baseline's single best rung as the family's number.
+
+## v9: the first 300-row set that passes its own audit
+
+Built at `d95a9bc` plus the ordinal fix, run at `d95a9bc` with `src/` untouched, so it is held out.
+Three passes a side, concurrency 32, `--react-tools reference`, temperature 0, budget 15.
+
+| | passes | mean | spread |
+| --- | --- | --- | --- |
+| no-tool floor | 79/300 | **26.3** | — |
+| floor excluding `unanswerable_*` | 61/279 | **21.9** | — |
+| ReAct | 44.7 / 47.7 / 44.0 | **45.4** | 3.7 |
+| Spatial-Agent | 69.0 / 72.3 / 70.0 | **70.4** | 3.3 |
+
+Gap 25.0, outside either agent's spread. `poi` is again the widest class gap — ReAct 21.7 against
+Spatial-Agent 76.7, the baseline below its own floor on both of that class's families — and the
+`unanswerable` class and `trip_feasible_count_five` again invert toward ReAct, which is what a
+high-floor ladder does. Read v8 and v9 as two draws, not as a before and after: the only thing that
+changed between them under `src/` is nothing, and the family numbers move by the usual per-draw
+range.

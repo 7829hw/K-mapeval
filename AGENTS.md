@@ -177,16 +177,24 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   grow with `count` still cannot balance, the parameter is not the scan — it is what the family
   draws from. `nearby_kth_nearest` has skewed to k=2 in five draws for five while
   `nearby_subtype_kth`, which draws k identically in the same builder, balanced in all five,
-  because the first anchors on Seoul's four densest chain categories where half of all consecutive
-  rank gaps fall under `ORDINAL_MARGIN_M` and the second searches a sparse subtype where a fifth
-  do. One audit failure is a draw; five in one family and none in its twin is a generator defect,
-  and the lever is the pool or the margin, not the scan. Run today, `data/audit_dataset.py` exits
-  non-zero on 14 of the 17 sets in `dataset/` — every one of them for `nearby_kth_nearest` alone
-  — and only `v7a`, `v7b` and `v7h3` are clean. `v8` is the sixth draw in a row this family has
-  skewed, at 17 of 24. So do not read "passes the audit" off a benchmark
-  entry written before the k-balance rule existed; re-run it. Until the pool or the margin
-  changes, `nearby_kth_nearest` is not quotable on any of those 13, and nothing else in them is
-  affected.
+  because the first anchors on Seoul's four densest chain categories and the second searches a
+  sparse subtype. One audit failure is a draw; six in one family and none in its twin is a
+  generator defect, and **it was the pool**. Measured over 108 anchors at `ORDINAL_MARGIN_M`, the
+  four kinds the family used to ask by — `CE7`, `CS2`, `BK9`, `PM9` — supplied 0, 2, 2 and 2
+  usable neighbourhoods and *not one* separable past k=2, so k was never drawn, it was dictated,
+  and no balancing code could have fixed it. The same anchors give `MT1` 43 usable and 23 past
+  k=2, `PO3` 27 and 7, `SC4` 23 and 10, `CT1` 21 and 9; the family asks by those four now and
+  draws 8/8/8 at count 24. Two things generalise. A parameter is only drawn if the *pool* can
+  supply every value — check the supply before blaming the balancer; the replay is free, because
+  `gold_evidence.ranked_m` records what each accepted anchor could have offered. And a nested
+  feasibility test (k=4 requires every gap k=3 requires) makes the smallest value free and the
+  largest scarce, so a tie broken toward the smaller value spends the scarce anchors on the one
+  that needed no scarcity — `_scarcest_ordinal` breaks it the other way. Sets built before this
+  are unaffected and still fail: `data/audit_dataset.py` exits non-zero on 14 of the 17 pre-`v9`
+  sets in `dataset/`, every one for `nearby_kth_nearest` alone, and only `v7a`, `v7b` and `v7h3`
+  are clean. So do not read "passes the audit" off a benchmark entry written before the k-balance
+  rule existed; re-run it. `nearby_kth_nearest` is not quotable on any of those 14, and nothing
+  else in them is affected.
 - A family's accuracy on one draw is worth less for ReAct than for Spatial-Agent. Over five draws
   at three passes a side, mean cross-draw range per family is 23.6 points for ReAct against 13.6
   for Spatial-Agent, and ten of twelve families swing further for ReAct. So a single-draw family
@@ -225,6 +233,19 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
 - Run every benchmark at `--concurrency 32`. It is what every recorded v7 run used, and a report at
   another concurrency is a different run condition — check `metadata.concurrency` before setting
   two numbers beside each other.
+- `dataset/seoul_kmapeval_v9_mcq_300.jsonl`: the first set in `dataset/` that
+  `data/audit_dataset.py` passes at 300 rows — exact count, upstream's class mix, and
+  `nearby_kth_nearest` at 8/8/8 over k. Built at `d95a9bc` plus the ordinal-pool fix and run at
+  `d95a9bc`; `src/` untouched, so it is **held out**. Floor 26.3 (21.9 excluding
+  `unanswerable_*`), ReAct 44.7/47.7/44.0 (mean 45.4), Spatial-Agent 69.0/72.3/70.0 (mean 70.4)
+  over three passes a side at concurrency 32, gap 25.0 — outside either agent's spread (3.7 and
+  3.3). The reason to prefer it over v8 is what the ordinal fix exposed: split by k,
+  `nearby_kth_nearest` reads ReAct 62.5 / 12.5 / 16.7 against Spatial-Agent 91.7 / 75.0 / 66.7.
+  The baseline answers the rung that ranking four options answers by itself and collapses on the
+  other two, so every earlier draw — 17 to 19 of 24 rows at k=2 — was quoting the baseline's best
+  rung as the family. Same shape as v8 elsewhere: `poi` the widest class gap at 21.7 against 76.7
+  with ReAct below its own floor, and `trip_feasible_count_five` (92.1 against 42.9) and the
+  `unanswerable` class (88.9 against 47.6) inverting on the high-floor ladders.
 - `dataset/seoul_kmapeval_v8_mcq_300.jsonl`: the first draw that is 300 questions rather than
   281-283, built at `81efc7b` plus the builder fix and run at `81efc7b` itself — `src/` was not
   touched, so it is **held out**: nothing under `src/` has been tuned against it. 300 rows, floor

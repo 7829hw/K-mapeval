@@ -8,6 +8,7 @@ none of it needs the city.
 from __future__ import annotations
 
 import random
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -17,9 +18,11 @@ if str(DATA) not in sys.path:
     sys.path.insert(0, str(DATA))
 
 from benchmark_core import MAPEVAL_API_CLASS_MIX, candidate_groups  # noqa: E402
+from build_mapeval_v5_benchmark import NOUNS  # noqa: E402
 from build_mapeval_v6_benchmark import (  # noqa: E402
     ORDINAL_SCAN_FLOOR,
     _scan_limit,
+    _scarcest_ordinal,
     nearby_kth_nearest,
 )
 
@@ -337,3 +340,51 @@ def test_no_generated_row_carries_the_annotators_context(path: Path) -> None:
 
     for row in _rows(path):
         assert "context" not in row, f"{path.name}:{row['id']}"
+
+
+# --------------------------------------------------------------------------------------------
+# The ordinal family: which value an anchor is spent on, and which kinds of place it may ask by.
+# --------------------------------------------------------------------------------------------
+
+
+def test_a_generous_anchor_is_not_spent_on_the_value_every_anchor_can_supply() -> None:
+    """`feasible` is a prefix of (2, 3, 4), so k=2 is free and k=4 is what runs out.
+
+    The gap tests are nested: k=4 asks for every gap k=3 asks for and one more. Picking the
+    least-produced value with `min(..., key=(produced, k))` broke every early tie toward k=2 and
+    burned the scarce anchors on it. On the v8 draw eight of the twenty-four accepted anchors
+    could have answered k=3 or k=4; the file shipped 17 / 4 / 3.
+    """
+
+    target = {2: 8, 3: 8, 4: 8}
+    empty = {2: 0, 3: 0, 4: 0}
+    assert _scarcest_ordinal((2, 3, 4), empty, target) == 4
+    assert _scarcest_ordinal((2, 3), empty, target) == 3
+    assert _scarcest_ordinal((2,), empty, target) == 2
+    # And once a value is full the anchor goes to the next one still short.
+    assert _scarcest_ordinal((2, 3, 4), {2: 0, 3: 0, 4: 8}, target) == 3
+    assert _scarcest_ordinal((2, 3, 4), {2: 0, 3: 8, 4: 8}, target) == 2
+    # The remainder belongs to k=2, which is the value the city can always supply.
+    assert _scarcest_ordinal((2, 3, 4), empty, {2: 4, 3: 2, 4: 2}) == 2
+
+
+def test_the_ordinal_family_does_not_ask_by_a_dense_chain_category() -> None:
+    """A category Seoul packs four of into one block cannot carry an ordinal question at all.
+
+    Measured over 108 anchors at `ORDINAL_MARGIN_M`: `CE7` and `FD6` yielded no anchor whose
+    neighbours are separable, and `CS2`, `BK9` and `PM9` two apiece with *none* past k=2. So the
+    family's k was never drawn -- it was dictated by the category, which is why five draws running
+    audited as concentrated on k=2 and no amount of fixing the scan or the tie-break moved it. The
+    same anchors give `MT1` 43 usable and 23 past k=2, `PO3` 27 and 7, `SC4` 23 and 10, `CT1` 21
+    and 9.
+    """
+
+    source = (DATA / "build_mapeval_v6_benchmark.py").read_text(encoding="utf-8")
+    body = source.split("def nearby_kth_nearest(")[1].split("\ndef ")[0]
+    codes = re.search(r"codes = \[([^\]]*)\]", body).group(1)
+    asked = {token.strip().strip('"') for token in codes.split(",") if token.strip()}
+    assert asked == {"MT1", "SC4", "PO3", "CT1"}, asked
+    assert not asked & {"CE7", "FD6", "CS2", "BK9", "PM9"}
+    # Every kind the family asks by has to have a Korean noun to print.
+    for code in asked:
+        assert NOUNS[code]

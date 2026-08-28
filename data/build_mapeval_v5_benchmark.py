@@ -96,6 +96,13 @@ NOUNS = {
     "CS2": "편의점",
     "PK6": "주차장",
     "FD6": "음식점",
+    # The sparse kinds. A chain category cannot carry an ordinal question at all: measured over
+    # 108 anchors, `CE7` and `FD6` yielded no anchor whose neighbours are separable by
+    # `ORDINAL_MARGIN_M`, and `CS2`, `BK9` and `PM9` yielded two apiece and none past k=2.
+    "MT1": "대형마트",
+    "SC4": "학교",
+    "PO3": "공공기관",
+    "CT1": "문화시설",
 }
 
 # How much closer the gold has to be than the next candidate before an ordinal question is

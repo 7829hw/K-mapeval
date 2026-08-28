@@ -3259,3 +3259,107 @@ def test_a_field_projected_off_a_batch_list_resolves_to_the_list_and_runs() -> N
         "batch_place_details", {"place_ids": _resolve_references("$geo.place_ids", {"geo": rows})}
     ).output
     assert [place["place_id"] for place in details] == ["경복궁", "남산타워"]
+
+
+def test_grounding_keeps_each_geocode_step_its_own_place_when_there_are_no_options() -> None:
+    """`len(names) == len(options) + 1` is the structural proof that a batch is
+    [anchor, *option texts]. MCQ matching left the reasoning core, so grounding is now always
+    handed an empty option list, and the test degenerated into "this batch names one place" --
+    which overwrote that one name with the anchor. Every three-place question then measured the
+    anchor against itself: 40 of 95 recorded graphs collapsed to a single batch, and the
+    distance-difference family answered 0.0 km with every stage reporting success.
+    """
+
+    from src.agent.spatial import _ground_graph_literals, extract_facts
+
+    question = (
+        "토전김익영도자예술에서 지민숲까지의 직선거리와 "
+        "토전김익영도자예술에서 CGV 여의도까지의 직선거리는 얼마나 차이가 나나요?"
+    )
+    analysis = {
+        "concepts": [
+            {"id": "anchor", "text": "토전김익영도자예술", "concept_type": "location"},
+            {"id": "target1", "text": "지민숲", "concept_type": "location"},
+            {"id": "target2", "text": "CGV 여의도", "concept_type": "location"},
+        ]
+    }
+    graph = [
+        {
+            "id": f"resolve_{index}",
+            "operator": "batch_geocode",
+            "arguments": {"place_names": [name]},
+        }
+        for index, name in enumerate(
+            ("토전김익영도자예술의 위치", "지민숲의 위치", "CGV 여의도의 위치")
+        )
+    ]
+    grounded = _ground_graph_literals(graph, question, [], extract_facts(analysis, question))
+    resolved = [step["arguments"]["place_names"] for step in grounded]
+    # Each step keeps its own place, and the planner's description is repaired to the literal.
+    assert resolved == [["토전김익영도자예술"], ["지민숲"], ["CGV 여의도"]]
+
+
+def test_a_descriptive_tail_never_eats_what_tells_two_candidates_apart() -> None:
+    """The first spelling of the repair bound any stated literal contained in the name, which
+    turned `후보1` into `후보` -- the character that distinguishes the candidates."""
+
+    from src.agent.spatial import _verbatim_name
+
+    question = "기준점에서 후보까지의 직선거리는?"
+    assert _verbatim_name("후보1", question, [], ["후보"]) == "후보1"
+    assert _verbatim_name("후보의 위치", question, [], ["후보"]) == "후보"
+
+
+def test_a_decorated_place_name_is_repaired_to_the_literal_the_question_wrote() -> None:
+    """The decorations cannot be enumerated -- `(위치 정보)`, `(located)`, `Resolved location of`
+    -- so the rule is the leftover, not the decoration: take the longest stated place the text
+    contains and accept it only when what is left could not name a place.
+    """
+
+    from src.agent.spatial import _verbatim_name
+
+    question = "토전김익영도자예술에서 지민숲까지, CGV 여의도와 호암늘솔길도 봅니다."
+    stated = ["토전김익영도자예술", "지민숲", "CGV 여의도", "여의도", "호암늘솔길"]
+    assert _verbatim_name("Resolved location of 토전김익영도자예술", question, [], stated) == (
+        "토전김익영도자예술"
+    )
+    assert _verbatim_name("호암늘솔길 (located)", question, [], stated) == "호암늘솔길"
+    assert _verbatim_name("지민숲의 위치", question, [], stated) == "지민숲"
+    # Longest, not unique: `여의도` is stated too, and trimming to it names a different place.
+    assert _verbatim_name("CGV 여의도 (located)", question, [], stated) == "CGV 여의도"
+    # A leftover holding a digit or a Hangul syllable can distinguish two places, so it is not a
+    # decoration and the name is left exactly as written.
+    assert _verbatim_name("후보1", "기준점에서 후보까지?", [], ["후보"]) == "후보1"
+
+
+def test_a_name_the_planner_translated_is_left_alone_rather_than_guessed_at() -> None:
+    """`Located Noiji Gallery` holds no literal the question wrote. Repairing it would mean
+    guessing which place it meant, which is the least-bad match this module refuses to make."""
+
+    from src.agent.spatial import _verbatim_name
+
+    question = "노이지갤러리에서 가장 가까운 곳은?"
+    assert _verbatim_name("Located Noiji Gallery", question, [], ["노이지갤러리"]) == (
+        "Located Noiji Gallery"
+    )
+
+
+def test_a_clause_the_planner_copied_with_the_name_is_trimmed_to_the_place() -> None:
+    """`삼성출판박물관을 경유해서 가는 경우` passes the "is it in the question" guard precisely
+    because it is in the question, and it is still not a place: the geocoder found nothing and
+    the whole question was lost as a `PlaceNotFoundError`."""
+
+    from src.agent.spatial import _verbatim_name
+
+    question = (
+        "포유모텔에서 학동역 7호선까지 자동차로 갈 때, 삼성출판박물관을 경유해서 가는 경우는?"
+    )
+    stated = ["포유모텔", "학동역 7호선", "삼성출판박물관"]
+    assert _verbatim_name("삼성출판박물관을 경유해서 가는 경우", question, [], stated) == (
+        "삼성출판박물관"
+    )
+    assert _verbatim_name("포유모텔에서", question, [], stated) == "포유모텔"
+    # The particle has to be followed by a space: `에` here begins a syllable, not an ending.
+    assert _verbatim_name("강남역에스컬레이터", "강남역에스컬레이터 근처?", [], ["강남역"]) == (
+        "강남역에스컬레이터"
+    )

@@ -88,11 +88,33 @@ Available spatial transformations:
 {transform_catalogue}
 
 Return JSON with:
-- concept_nodes: ConceptNode objects with id, text, core_concept, functional_role, attributes;
-- factor_nodes: explicit FactorNode objects for every radius, ordinal, direction, time budget,
-  stay duration, metric, fixed order, and return-to-start constraint;
 - transformation_edges: TransformationEdge objects with id, transformation, input_concepts,
-  output_concepts, factor_nodes, and optional attributes.
+  output_concepts, factor_nodes, and optional attributes;
+- concept_nodes: ConceptNode objects with id, text, core_concept, functional_role, attributes,
+  for concepts the analysis does not already carry;
+- factor_nodes: explicit FactorNode objects for every radius, ordinal, direction, time budget,
+  stay duration, metric, fixed order, and return-to-start constraint the analysis does not
+  already carry.
+
+The spatial concept analysis above is in scope. Refer to its concepts by their ids; do not restate
+them, and do not rename them. Declare a concept_node only for one the analysis does not have.
+Factors already stated as concept attributes are derived for you.
+
+Place names come from the analysis concepts. Do not retype a place name, and do not translate,
+romanize, shorten or describe one: a concept's text is the name that is looked up, so
+"Located Noiji Gallery" or "지민숲의 위치" is searched for as written and finds another place or
+none.
+
+The first input of a search, a filter, a sort, a ranking or a route is the place it is measured
+from; the rest are what it measures. A node that ranks a retrieval takes the anchor first and the
+retrieval second.
+
+A drive between two stated places is one ROUTE_MEASURE, whatever the question asks about it.
+"Shortest", "fastest" and "by distance" are objectives on that one route -- say them as factors,
+not as a different transformation. ROUTE_MATRIX and ROUTE_OPTIMIZE are for an itinerary of three
+or more stops whose order is not given; ROUTE_COMPARE is for routes the graph has already
+measured. A two-place drive sent through any of them yields a tour of one stop, which carries no
+turn-by-turn guidance and no leg to total.
 
 Concepts are graph nodes and transformations are directed hyperedges. Add implicit concepts needed
 for reasoning, including NETWORK and route FIELD concepts for driving-time or road-distance work.
@@ -106,9 +128,11 @@ indices, benchmark labels, task-family names, or the gold answer."""
 
 REPAIR_PROMPT = """Repair the supplied GeoFlow graph so it passes the listed G1–G5 validation
 error. Preserve the question's typed concepts and factors, but do not treat a retrieved template
-as a constraint. Use the same ConceptNode, FactorNode, and TransformationEdge wire format; choose
-transformations rather than operators and stay within {max_steps} transformation edges. Return
-JSON only, with concept_nodes, factor_nodes, and transformation_edges."""
+as a constraint. Use the same ConceptNode, FactorNode, and TransformationEdge wire format; refer
+to the analysis's concepts by their ids rather than restating them; choose transformations rather
+than operators and stay within {max_steps} transformation edges. Return JSON only, with
+transformation_edges and any concept_nodes or factor_nodes the analysis does not already
+carry."""
 
 EVALUATOR_PROMPT = """You are Spatial-Agent's Grounded Answer Generation stage. Read the validated
 GeoFlow's topological execution evidence and state the spatial answer it supports. Operator output
@@ -176,6 +200,59 @@ class SpatialAgent(BenchmarkAgent):
         return GRAPH_PROMPT.replace(
             "{transform_catalogue}", transform_catalogue(include_mcq=False)
         ).replace("{max_steps}", str(self.max_steps))
+
+    def _lenient_attempts(
+        self,
+        analysis: dict[str, Any],
+        candidates: tuple[tuple[str, dict[str, Any]], ...],
+        question: str,
+        facts: GroundingFacts,
+        trace: list[dict[str, Any]],
+        strict_error: ValueError,
+    ):
+        """The last thing tried before a question is given up on.
+
+        Each candidate graph is re-validated with this port's own type, role and argument-value
+        rules stepped aside. `AGENTS.md` pins this pass: those rules predict one step's refusal,
+        the executor records a step that raises and carries on, and enforcing them strictly here
+        trades a partial answer for none. The paper's G1-G5 are not in the relaxed set.
+        """
+
+        last = strict_error
+        for source, candidate in candidates:
+            try:
+                factorized, steps, constraints, semantic, hyperedges = _factorize_validate_plan(
+                    analysis,
+                    candidate,
+                    question,
+                    facts,
+                    self.max_steps,
+                    retrieval_specs=self.tools.retrieval_specs,
+                    available_operators=self.executable_operators,
+                    strict_types=False,
+                )
+            except ValueError as lenient_error:
+                last = lenient_error
+                trace.append(
+                    {
+                        "stage": "validate",
+                        "status": "invalid",
+                        "mode": "lenient",
+                        "plan_source": source,
+                        "error": str(lenient_error),
+                    }
+                )
+                continue
+            trace.append(
+                {
+                    "stage": "validate",
+                    "status": "valid",
+                    "mode": "lenient",
+                    "plan_source": source,
+                }
+            )
+            return factorized, steps, constraints, semantic, hyperedges, candidate
+        raise GraphValidationError(str(last)) from last
 
     def answer(self, question: str, options: list[str]) -> AgentResult:
         started = time.perf_counter()
@@ -267,7 +344,7 @@ class SpatialAgent(BenchmarkAgent):
             usage += plan_response.usage
             plan = parse_json_object(plan_response.content)
             accepted_plan = plan
-            trace.append({"stage": "compose", "graph": plan.get("graph") or plan.get("steps")})
+            trace.append({"stage": "compose", **_planner_graph_trace(plan)})
             try:
                 factorized, steps, constraints, semantic, operator_hyperedges = (
                     _factorize_validate_plan(
@@ -306,12 +383,7 @@ class SpatialAgent(BenchmarkAgent):
                 reasoning_steps += 1
                 usage += repair_response.usage
                 repaired_plan = parse_json_object(repair_response.content)
-                trace.append(
-                    {
-                        "stage": "repair",
-                        "graph": repaired_plan.get("graph") or repaired_plan.get("steps"),
-                    }
-                )
+                trace.append({"stage": "repair", **_planner_graph_trace(repaired_plan)})
                 try:
                     factorized, steps, constraints, semantic, operator_hyperedges = (
                         _factorize_validate_plan(
@@ -333,7 +405,23 @@ class SpatialAgent(BenchmarkAgent):
                             "error": str(repair_error),
                         }
                     )
-                    raise GraphValidationError(str(repair_error)) from repair_error
+                    # Upstream has no output-type, role or argument-value check to fail in the
+                    # first place. The repair may already have fixed the structural error and be
+                    # rejected only by one of those local rules, so relax the *repaired* graph
+                    # first; going straight back to the original discards a valid repair and
+                    # retries the very error the repair removed. The original is the last
+                    # fallback, for a repair that is structurally invalid too. The paper's G1-G5
+                    # refuse on both passes, so neither attempt can wave through a broken graph.
+                    factorized, steps, constraints, semantic, operator_hyperedges, accepted_plan = (
+                        self._lenient_attempts(
+                            runtime_analysis,
+                            (("repaired", repaired_plan), ("original", plan)),
+                            question,
+                            facts,
+                            trace,
+                            repair_error,
+                        )
+                    )
             # G -> G' as this run performed it: which transformation each node asked for, which
             # operator answered, and which precedence rule decided. `concrete_nodes` counts the
             # nodes the planner named an operator for anyway, which is the measure of whether
@@ -473,7 +561,9 @@ class SpatialAgent(BenchmarkAgent):
             evaluation_json = parse_json_object(evaluation.content)
             grounded_answer = grounded_answer_from_payload(evaluation_json)
             trace.append({"stage": "grounded_answer", **grounded_answer.as_dict()})
-            adapted = self.mcq_adapter.select(grounded_answer, options)
+            adapted = self.mcq_adapter.select(
+                grounded_answer, options, execution_errors=len(execution_errors)
+            )
             predicted, selection = adapted.index, adapted.method
             trace.append(
                 {
@@ -559,6 +649,23 @@ class GraphValidationError(RuntimeError):
 RetrievalSpecs = Callable[[str], list[dict[str, Any]]]
 
 
+def _planner_graph_trace(plan: dict[str, Any]) -> dict[str, Any]:
+    """What the planner actually answered, recorded so a replay can read it back.
+
+    `graph` used to be read off `plan["graph"]`, which the step-shaped wire format carried. The
+    Concept/Edge IR carries `transformation_edges` instead, so that key went to `null` on every
+    question -- and a run whose planner graphs are all null cannot be replayed at all, while
+    `data/replay_grounding.py` reports the empty replay as a success. Both spellings are
+    recorded, and `plan` keeps the concepts and factors the edges refer to, because the edge
+    list alone is not enough to rebuild the graph.
+    """
+
+    return {
+        "graph": plan.get("transformation_edges") or plan.get("graph") or plan.get("steps"),
+        "plan": plan,
+    }
+
+
 def _factorize_validate_plan(
     analysis: dict[str, Any],
     plan: dict[str, Any],
@@ -568,7 +675,17 @@ def _factorize_validate_plan(
     *,
     retrieval_specs: RetrievalSpecs = canonical_retrieval_specs,
     available_operators: frozenset[str] = frozenset(OPERATOR_CONTRACTS),
+    strict_types: bool = True,
 ):
+    """Factorize and validate one drafted graph.
+
+    `strict_types=False` relaxes this port's own output-type, role-ordering and argument-value
+    checks -- upstream has none of them -- on the last attempt before a question is given up on.
+    The paper's own G1-G5 in `validate_geoflow_graph` refuse on both passes, which is why the
+    lenient attempt rescues a graph the port's heuristics rejected and never one that is
+    structurally wrong.
+    """
+
     geoflow = attach_grounding_factors(plan_to_geoflow(analysis, plan), facts)
     if len(geoflow.transformation_edges) > max_steps:
         raise ValueError(
@@ -581,6 +698,7 @@ def _factorize_validate_plan(
         options=[],
         facts=facts,
         available=available_operators,
+        strict_types=strict_types,
     )
     # G -> G'. The planner answered in transformations; which operator performs each is decided
     # here, deterministically, from concept types, explicit factors, and operator contracts.
@@ -589,13 +707,13 @@ def _factorize_validate_plan(
     grounded = _ground_graph_literals(
         semantic.graph, question, [], facts, retrieval_specs=retrieval_specs
     )
-    factorized = factorize_geoflow(analysis, {"graph": grounded}, strict_types=True)
+    factorized = factorize_geoflow(analysis, {"graph": grounded}, strict_types=strict_types)
     # The planner budget above governs what the planner authored. Retrieval fan-out added
     # during grounding is deterministic and gets its own allowance on top of it.
     steps, constraints = normalize_and_validate_graph(
         factorized.as_dict(),
         max_steps=max(max_steps, len(grounded)),
-        strict_types=True,
+        strict_types=strict_types,
     )
     constraints = {**paper_factorized.validation.constraints, **constraints}
     # Counted after the graph is otherwise accepted, and deliberately not a G1-G5 constraint: as
@@ -1184,6 +1302,12 @@ class GroundingFacts:
     trip_origin: str | None = None
     # Which measure the question ranks by. `None` is "the question did not say", not "seconds".
     route_objective: str | None = None
+    #: Every Analysis concept text that appears in the question word for word. The Analysis stage
+    #: reads the question and copies the place names out of it, and the ones it copied exactly are
+    #: question literals by construction -- which is the test applied, so a paraphrase never
+    #: enters. The scans above find a place only in the phrasings they know; this finds the rest,
+    #: and it is what a planner's `지민숲의 위치` has to be repaired back to.
+    stated_literals: tuple[str, ...] = ()
 
     def stated_stay(self, name: str) -> float:
         """The stay stated for exactly this place, or zero when the question states none."""
@@ -1211,8 +1335,9 @@ class GroundingFacts:
             *(self.compared_pair or ()),
             *self.listed_places,
             *(name for name, _ in self.stays),
+            *self.stated_literals,
         )
-        return tuple(name for name in named if name)
+        return tuple(dict.fromkeys(name for name in named if name))
 
 
 def extract_facts(analysis: dict[str, Any], question: str) -> GroundingFacts:
@@ -1264,7 +1389,24 @@ def extract_facts(analysis: dict[str, Any], question: str) -> GroundingFacts:
         trip_destination=_extract_trip_destination(question),
         trip_origin=_stated_departure(question, anchor, stays),
         route_objective="distance" if _asks_for_distance(question) else None,
+        stated_literals=_verbatim_concept_texts(analysis, question),
     )
+
+
+def _verbatim_concept_texts(analysis: dict[str, Any], question: str) -> tuple[str, ...]:
+    """Concept texts the Analysis stage copied out of the question word for word.
+
+    The membership test is the whole guard: a text that is in the question is a literal the
+    question wrote, and a text that is not is the Analysis stage's own prose and is discarded.
+    So this widens the repair vocabulary without ever letting a paraphrase into it.
+    """
+
+    texts = (
+        str(concept.get("text") or "").strip()
+        for concept in (analysis.get("concepts") or [])
+        if isinstance(concept, dict)
+    )
+    return tuple(dict.fromkeys(text for text in texts if len(text) >= 2 and text in question))
 
 
 def _concept_attributes(analysis: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1708,8 +1850,14 @@ def _ground_graph_literals(
             # the head of the second deleted an option — the gold one, in a radius question whose
             # every other stage then worked: the anchor stood 0 m from itself, was the only place
             # inside 600 m, and the generation stage picked from the leftovers.
+            # `len(names) == len(options) + 1` is the structural proof that a batch is
+            # [anchor, *option texts]. It is only a proof while grounding is handed the options,
+            # and MCQ matching left the reasoning core: `options` is now always empty here, which
+            # degenerated the test into "this batch names exactly one place" and overwrote that
+            # one name with the anchor. Every three-place question then measured the anchor
+            # against itself and reported 0.0 km with every stage green.
             if names and (
-                len(names) == len(options) + 1
+                (bool(options) and len(names) == len(options) + 1)
                 or names[0] == batch_anchor
                 or _is_shortened_name(names[0], batch_anchor)
             ):
@@ -1731,7 +1879,8 @@ def _ground_graph_literals(
             ):
                 names.insert(0, batch_anchor)
         if (
-            _ranks_the_options(steps, str(step.get("id") or ""))
+            options
+            and _ranks_the_options(steps, str(step.get("id") or ""))
             and len(names) == len(options) + 1
             and all("|" not in option for option in options)
         ):
@@ -2325,6 +2474,34 @@ def _verbatim_name(
         # measured was a different route and every stage reported success.
         if _is_shortened_name(candidate, literal):
             return literal
+    # The other direction: the planner wrote the literal and then decorated it. `지민숲의 위치`,
+    # `호암늘솔길 (located)` and `Resolved location of 토전김익영도자예술` are all one place name
+    # plus a note about it, and geocoding the note finds another place or none -- three-place
+    # questions resolved all three to the anchor and reported 0.0 km.
+    described = _DESCRIPTIVE_TAIL.sub("", candidate).strip()
+    if described and described != candidate and described in question:
+        return described
+    # The general form, because the decorations cannot be enumerated: take the *longest* stated
+    # place the text contains, and accept it only when what is left over could not name a place.
+    # Longest rather than unique so `CGV 여의도 (located)` keeps `CGV 여의도` where `여의도` is
+    # also stated; and the leftover test is what stops `후보1` from becoming `후보`, since the
+    # `1` it would discard is exactly what tells the candidates apart.
+    contained = [literal for literal in stated or [] if literal and literal in candidate]
+    if contained:
+        longest = max(contained, key=len)
+        remainder = _DESCRIPTIVE_WORDS.sub(" ", candidate.replace(longest, " ", 1))
+        if longest != candidate and _NOT_A_NAME.fullmatch(remainder):
+            return longest
+    # A clause the planner copied out of the question, particle and all: `삼성출판박물관을 경유해서
+    # 가는 경우`. It passes the "is it in the question" guard below precisely because it *is* in
+    # the question -- and it is still not a place, so the geocoder found nothing and the whole
+    # question was lost as a `PlaceNotFoundError`. Only a stated place that is a *prefix*, and
+    # only when the particle after it is followed by a space: `강남역에스컬레이터` keeps its tail
+    # because `에` there begins a syllable, not a grammatical ending.
+    for literal in sorted(stated or [], key=len, reverse=True):
+        if literal and candidate.startswith(literal) and candidate != literal:
+            if _TRAILING_CLAUSE.match(candidate[len(literal) :]):
+                return literal
     if len(candidate) < 4 or candidate in question:
         return name
     best = candidate
@@ -2353,6 +2530,26 @@ def _question_spans(question: str, length: int) -> list[str]:
 # -- a place that does not exist, written over the option the plan had geocoded. Only ever
 # stripped from the *tail*, and only when something is left.
 _VICINITY_TAIL = re.compile(r"\s*(?:근처|인근|주변|부근|일대)$")
+
+# What a planner adds when it names a concept rather than a place: `지민숲의 위치`, `A의 좌표`.
+# A closed set, and stripped only when what remains is a literal the question wrote, so it can
+# never remove the part of a name that distinguishes it from another.
+#: Words a planner adds when it is describing a place rather than naming one. Removed only from
+#: the *leftover* around a name the question stated, never from the name itself.
+_DESCRIPTIVE_WORDS = re.compile(r"(?:위치\s*정보|위치|좌표|지점|장소|정보|의|을|를|은|는|이|가)")
+#: What a leftover may consist of and still leave the name unambiguous: spaces, punctuation and
+#: Latin script. A Hangul syllable or a digit in the leftover can distinguish one place from
+#: another, so a leftover holding either means the planner's text is not just a decorated name.
+_NOT_A_NAME = re.compile(r"[\s\W_A-Za-z]*")
+
+#: A Korean grammatical ending, followed by a space or nothing. What separates a place name the
+#: planner left a particle on from a place name whose next syllable merely looks like one.
+_TRAILING_CLAUSE = re.compile(r"^(?:을|를|은|는|이|가|에서|에|으로|로|까지|부터|와|과|의)(?:\s|$)")
+
+_DESCRIPTIVE_TAIL = re.compile(
+    r"\s*(?:\(\s*(?:의\s*)?(?:위치\s*정보|위치|좌표|지점|장소)\s*\)"
+    r"|(?:의)?\s*(?:위치\s*정보|위치|좌표|지점|장소))$"
+)
 
 
 def _single_anchor(candidate: str) -> str | None:

@@ -6,46 +6,17 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from src.agent.concepts import CONTEXTUAL_ROLES, GeoFlowGraph
-from src.agent.semantics import TRANSFORMS
+from src.agent.semantics import TRANSFORMS, accepted_input_types, accepted_output_types
+
+__all__ = [
+    "G1G5ValidationError",
+    "ValidationResult",
+    "accepted_input_types",
+    "accepted_output_types",
+    "validate_geoflow_graph",
+]
 
 _ROLE_ORDER = {"sub_condition": 0, "condition": 1, "support": 2, "measure": 3}
-_POLYMORPHIC_OUTPUTS = {
-    "RESOLVE_PLACES": frozenset({"location", "object"}),
-    "DISTANCE_MEASURE": frozenset({"amount", "field", "object"}),
-    "FILTER": frozenset({"field", "object"}),
-    "SORT": frozenset({"field", "object"}),
-    "ORDINAL_SELECT": frozenset({"location", "object"}),
-    "EXTREME_SELECT": frozenset({"amount", "location", "object"}),
-    "ROUTE_COMPARE": frozenset({"field", "object"}),
-    "ROUTE_OPTIMIZE": frozenset({"network", "object"}),
-    "AGGREGATE": frozenset({"amount", "proportion"}),
-    "MEASURE": frozenset({"amount", "event", "field", "network", "object", "proportion"}),
-}
-_TRANSFORM_INPUTS = {
-    "RESOLVE_PLACES": frozenset({"location", "object"}),
-    "PLACE_SEARCH": frozenset({"location", "object"}),
-    "PLACE_DETAILS": frozenset({"location", "object"}),
-    "DISTANCE_MEASURE": frozenset({"field", "location", "object"}),
-    "ROUTE_MEASURE": frozenset({"location", "network", "object"}),
-    "ROUTE_MATRIX": frozenset({"location", "network", "object"}),
-    "SELECT_LEGS": frozenset({"field", "network"}),
-    "ROUTE_EXTRACT": frozenset({"field"}),
-    "ROUTE_STEPS": frozenset({"field"}),
-    "ROUTE_COMPARE": frozenset({"field", "object"}),
-    "ROUTE_OPTIMIZE": frozenset({"field", "network", "object"}),
-    "SCHEDULE": frozenset({"amount", "event", "field", "network"}),
-    "FILTER": frozenset({"field", "location", "object"}),
-    "SORT": frozenset({"amount", "field", "object"}),
-    "ORDINAL_SELECT": frozenset({"field", "object"}),
-    "EXTREME_SELECT": frozenset({"amount", "field", "object"}),
-    "AGGREGATE": frozenset({"amount", "field", "object", "proportion"}),
-    "MATCH_OPTIONS": frozenset({"amount", "event", "field", "network", "object", "proportion"}),
-    "MEASURE": frozenset(
-        {"amount", "event", "field", "location", "network", "object", "proportion"}
-    ),
-}
-
-
 @dataclass(frozen=True)
 class ValidationResult:
     topological_order: tuple[str, ...]
@@ -113,16 +84,15 @@ def validate_geoflow_graph(graph: GeoFlowGraph) -> ValidationResult:
         if transform is None:
             raise G1G5ValidationError("G3", f"unknown spatial transformation {edge.transformation}")
         output_types = {concepts[value].core_concept for value in edge.output_concepts}
-        accepted_outputs = _POLYMORPHIC_OUTPUTS.get(
-            edge.transformation.upper(), frozenset({transform.output_type})
-        )
+        accepted_outputs = accepted_output_types(edge.transformation)
         if not output_types <= accepted_outputs:
             raise G1G5ValidationError(
                 "G3",
-                f"{edge.id} ({edge.transformation}) produces {transform.output_type}, "
-                f"not {', '.join(sorted(output_types))}",
+                f"{edge.id} ({edge.transformation}) declares output type "
+                f"{', '.join(sorted(output_types - accepted_outputs))}, "
+                f"but produces {', '.join(sorted(accepted_outputs))}",
             )
-        accepted_inputs = _TRANSFORM_INPUTS.get(edge.transformation.upper())
+        accepted_inputs = accepted_input_types(edge.transformation)
         if accepted_inputs:
             incompatible = [
                 value

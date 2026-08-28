@@ -40,7 +40,10 @@ def test_factorization_cannot_see_the_question() -> None:
 
     parameters = set(inspect.signature(factorize_semantic_graph).parameters)
     assert "question" not in parameters
-    assert parameters == {"steps", "concepts", "options", "facts", "available"}
+    # Pinned as a whole so a question, an intent or a benchmark label cannot arrive under
+    # another name. `strict_types` is the lenient last attempt and says nothing about the
+    # question -- see `AGENTS.md` on which rules that pass is allowed to step aside from.
+    assert parameters == {"steps", "concepts", "options", "facts", "available", "strict_types"}
     assert "question" not in set(inspect.signature(resolve_operator).parameters)
 
 
@@ -603,3 +606,117 @@ def test_a_question_stating_nothing_resolvable_falls_back_to_a_measure_alone() -
 
     assert all((c.get("attributes") or {}).get("synthetic") for c in places)
     assert any(c["role"] == "measure" for c in analysis["concepts"])
+
+
+def test_a_ranking_over_a_ranking_measures_from_the_place_the_retrieval_searched() -> None:
+    """The binding used to be positional, on a comment claiming the shape guard made input 0 a
+    single place. `_ranks_by_distance_from_an_anchor` asks only for arity: a graph that ranks a
+    retrieval and then ranks the ranking has a collection in both slots, `anchor` was bound to
+    one of them, and `nearest` refused with `anchor has no resolved coordinates` -- taking every
+    step that referenced it down with it. What such a graph measures from is the place its
+    retrieval searched around, which the retrieval recorded.
+    """
+
+    graph = [
+        {"id": "a", "transform": "RESOLVE_PLACES", "inputs": [], "role": "extent"},
+        {"id": "found", "transform": "PLACE_SEARCH", "inputs": ["a"], "role": "support"},
+        {"id": "ranked", "transform": "SORT", "inputs": ["a", "found"], "role": "support"},
+        {"id": "again", "transform": "SORT", "inputs": ["found", "ranked"], "role": "measure"},
+    ]
+    steps = {step["id"]: step for step in _build(graph).graph}
+    again = steps["again"]
+    assert again["operator"] == "nearest"
+    # Not the collection it was handed, and not missing: the retrieval's own centre.
+    assert again["arguments"]["anchor"] == "$a.0.place"
+
+
+def test_the_anchor_is_still_read_from_the_first_input_when_that_is_a_place() -> None:
+    """The graphs that already worked must bind exactly as they did."""
+
+    graph = [
+        {"id": "a", "transform": "RESOLVE_PLACES", "inputs": [], "role": "extent"},
+        {"id": "found", "transform": "PLACE_SEARCH", "inputs": ["a"], "role": "support"},
+        {"id": "ranked", "transform": "SORT", "inputs": ["a", "found"], "role": "measure"},
+    ]
+    steps = {step["id"]: step for step in _build(graph).graph}
+    assert steps["ranked"]["operator"] == "nearest"
+    assert steps["ranked"]["arguments"]["anchor"] == "$a.0.place"
+    assert steps["ranked"]["arguments"]["candidates"] == "$found"
+
+
+def test_a_comparison_handed_two_places_is_a_route_to_measure() -> None:
+    """A planner reads `compare_routes` as "pick the best route" and writes ROUTE_COMPARE for
+    "A에서 B까지 가장 짧은 경로", with a graph that has computed no routes at all. Resolved as a
+    comparison it was expanded into a cost matrix and a tour, and a one-stop tour carries no
+    turn-by-turn guidance: `steps_analysis` returned one record and `select_by_index(3)` refused
+    it as "outside a collection of 1".
+    """
+
+    graph = [
+        {"id": "a", "transform": "RESOLVE_PLACES", "inputs": [], "role": "extent"},
+        {"id": "b", "transform": "RESOLVE_PLACES", "inputs": [], "role": "support"},
+        {"id": "route", "transform": "ROUTE_COMPARE", "inputs": ["a", "b"], "role": "support"},
+        {"id": "steps", "transform": "ROUTE_STEPS", "inputs": ["route"], "role": "measure"},
+    ]
+    steps = {step["id"]: step for step in _build(graph).graph}
+    assert steps["route"]["operator"] == "directions"
+    # And the node is typed by what that operator produces, so the route reader downstream can
+    # consume it: reading the transformation's declared `object` refused a runnable plan.
+    assert steps["route"]["output_type"] == "field"
+
+
+def test_a_comparison_over_measured_routes_is_still_a_comparison() -> None:
+    graph = [
+        {"id": "a", "transform": "RESOLVE_PLACES", "inputs": [], "role": "extent"},
+        {"id": "b", "transform": "RESOLVE_PLACES", "inputs": [], "role": "support"},
+        {"id": "r1", "transform": "ROUTE_MEASURE", "inputs": ["a", "b"], "role": "support"},
+        {"id": "r2", "transform": "ROUTE_MEASURE", "inputs": ["b", "a"], "role": "support"},
+        {"id": "best", "transform": "ROUTE_COMPARE", "inputs": ["r1", "r2"], "role": "measure"},
+    ]
+    steps = {step["id"]: step for step in _build(graph).graph}
+    assert steps["best"]["operator"] == "compare_routes"
+
+
+def test_a_measure_says_which_pair_it_is_between_even_from_one_geocode_batch() -> None:
+    """Lowering the Concept/Edge IR dropped the concepts each edge reads, so three route nodes
+    reading one `batch_geocode` all measured from its first place: a detour question answered
+    18345 m for a gold of 11.4 km with every stage reporting success.
+    """
+
+    from src.agent.factorization import geoflow_to_semantic_steps, plan_to_geoflow
+
+    analysis = {
+        "concepts": [
+            {"id": "start", "text": "유토피아모텔", "core_concept": "location", "role": "extent"},
+            {"id": "end", "text": "메종모텔", "core_concept": "location", "role": "support"},
+            {"id": "via", "text": "동덕아트갤러리", "core_concept": "location", "role": "support"},
+        ]
+    }
+    payload = {
+        "transformation_edges": [
+            {
+                "id": "t1",
+                "transformation": "RESOLVE_PLACES",
+                "input_concepts": ["start", "end", "via"],
+                "output_concepts": ["start", "end", "via"],
+            },
+            {
+                "id": "t2",
+                "transformation": "ROUTE_MEASURE",
+                "input_concepts": ["start", "end"],
+                "output_concepts": ["direct"],
+            },
+            {
+                "id": "t3",
+                "transformation": "ROUTE_MEASURE",
+                "input_concepts": ["via", "end"],
+                "output_concepts": ["leg"],
+            },
+        ]
+    }
+    lowered = geoflow_to_semantic_steps(plan_to_geoflow(analysis, payload))
+    steps = {step["id"]: step for step in lowered}
+    # The producing node stays a dependency; the concepts ride alongside it, which is where the
+    # step-shaped wire format always put them.
+    assert steps["t3"]["inputs"][0] == "t1"
+    assert "via" in steps["t3"]["inputs"] and "end" in steps["t3"]["inputs"]

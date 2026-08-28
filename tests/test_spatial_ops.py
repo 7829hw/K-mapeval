@@ -2720,7 +2720,7 @@ def test_a_lenient_pass_skips_our_own_rules_and_keeps_every_structural_one() -> 
         normalize_and_validate_graph(no_measure, max_steps=8, strict_types=False)
 
 
-def test_paper_mode_exposes_no_lenient_validation_parameter() -> None:
+def test_the_lenient_pass_reaches_both_halves_of_the_role_rule() -> None:
     """One rule applied to two graphs; both halves have to be skippable or neither is.
 
     Real analysis and plan from `seoul_kmapeval_v6_004`, one of three questions the first run on
@@ -2824,12 +2824,23 @@ def test_paper_mode_exposes_no_lenient_validation_parameter() -> None:
         "지금 노량진만나로 골목형상점가에 있습니다. 어제부터 배탈이 나서 계속 속이 안 좋습니다. "
         "여기서 세 번째로 가까운 내과는 다음 중 어디인가요?"
     )
-    with pytest.raises(ValueError, match="names no transformation"):
-        _factorize_validate_plan(
-            analysis, {"graph": graph}, question, extract_facts({}, question), 15
-        )
+    # Structural: a node naming no transformation is refused on both passes, because relaxing
+    # this port's own rules never relaxes what the graph has to be.
+    for strict in (True, False):
+        with pytest.raises(ValueError, match="names no transformation"):
+            _factorize_validate_plan(
+                analysis,
+                {"graph": graph},
+                question,
+                extract_facts({}, question),
+                15,
+                strict_types=strict,
+            )
 
-    assert "strict_types" not in inspect.signature(_factorize_validate_plan).parameters
+    # `AGENTS.md` pins the last attempt: the port's own type, role and argument-value rules are
+    # skippable, so the parameter has to exist and has to default to refusing.
+    parameter = inspect.signature(_factorize_validate_plan).parameters["strict_types"]
+    assert parameter.default is True
 
 
 def test_a_node_that_names_no_operator_is_the_planners_failure_not_a_crash() -> None:

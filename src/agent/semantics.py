@@ -23,6 +23,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from src.agent.geoflow import OPERATOR_CONTRACTS
 from src.tools.spatial import options_state_counts
 
 #: What a semantic node may carry besides its inputs. These are *semantic* parameters -- an
@@ -110,6 +111,28 @@ def _one_place_against_many(resolution: Resolution) -> bool:
     """
 
     return resolution.fans_out or (resolution.arity >= 3 and resolution.endpoint_count != 2)
+
+
+def _between_places_only(resolution: Resolution) -> bool:
+    """A comparison handed places rather than routes is a route to measure, not a choice.
+
+    "A에서 B까지 거리가 가장 짧은 경로로 운전합니다" is written `ROUTE_COMPARE` by a planner
+    reading `compare_routes` as "pick the best route", and the graph that says it has computed no
+    routes at all -- its two inputs are geocoded places. Resolved as a comparison it was expanded
+    into a cost matrix and a tour, and a one-node tour is not a route: `steps_analysis` returned a
+    single record and `select_by_index(3)` refused it as "outside a collection of 1", which is how
+    `routing_nth_turn` and `routing_turn_count_via` read 0 of 14 in every run of this stack.
+
+    Only when *every* input is a geocoder, which is the same guard `_needs_a_route_composed`
+    uses and for the same reason: `compare_routes` output is a route too, and composing a drive
+    from one of those to itself is a defect this file has already had once.
+    """
+
+    # Only the inputs something in the graph produced. A planner names `mode` and `constraint`
+    # beside the two places, and those are leaves the question supplied -- reading them as
+    # "not a geocoder" made this predicate false on every graph it exists for.
+    produced = [operator for operator in resolution.input_operators if operator]
+    return bool(produced) and all(operator in _GEOCODERS for operator in produced)
 
 
 def _pairwise(resolution: Resolution) -> bool:
@@ -304,6 +327,80 @@ def _finish(_: Resolution) -> bool:
     return True
 
 
+#: Transformations whose declared output type is one of several a graph may legitimately name.
+#: Read through `accepted_output_types` so canonicalization and validation cannot disagree about
+#: what a transformation is allowed to produce.
+_POLYMORPHIC_OUTPUTS = {
+    "RESOLVE_PLACES": frozenset({"location", "object"}),
+    "DISTANCE_MEASURE": frozenset({"amount", "field", "object"}),
+    "FILTER": frozenset({"field", "object"}),
+    "SORT": frozenset({"field", "object"}),
+    "ORDINAL_SELECT": frozenset({"location", "object"}),
+    "EXTREME_SELECT": frozenset({"amount", "location", "object"}),
+    "ROUTE_COMPARE": frozenset({"field", "object"}),
+    "ROUTE_OPTIMIZE": frozenset({"network", "object"}),
+    "AGGREGATE": frozenset({"amount", "proportion"}),
+    "MEASURE": frozenset({"amount", "event", "field", "network", "object", "proportion"}),
+}
+_TRANSFORM_INPUTS = {
+    "RESOLVE_PLACES": frozenset({"location", "object"}),
+    "PLACE_SEARCH": frozenset({"location", "object"}),
+    "PLACE_DETAILS": frozenset({"location", "object"}),
+    "DISTANCE_MEASURE": frozenset({"field", "location", "object"}),
+    "ROUTE_MEASURE": frozenset({"location", "network", "object"}),
+    "ROUTE_MATRIX": frozenset({"location", "network", "object"}),
+    "SELECT_LEGS": frozenset({"field", "network"}),
+    "ROUTE_EXTRACT": frozenset({"field"}),
+    # A route arrives typed by whichever transformation produced it: a FIELD from ROUTE_MEASURE,
+    # an OBJECT from ROUTE_COMPARE's polymorphic output, a NETWORK from ROUTE_OPTIMIZE. Reading
+    # its turns is the same operator in all three cases, and refusing two of them refuses a plan
+    # `steps_analysis` would have run.
+    "ROUTE_STEPS": frozenset({"field", "network", "object"}),
+    "ROUTE_COMPARE": frozenset({"field", "object"}),
+    # `tsp_tw` orders places. A place typed LOCATION -- which is what RESOLVE_PLACES,
+    # ORDINAL_SELECT and EXTREME_SELECT all emit -- is one.
+    "ROUTE_OPTIMIZE": frozenset({"field", "location", "network", "object"}),
+    "SCHEDULE": frozenset({"amount", "event", "field", "network"}),
+    # DISTANCE_MEASURE emits AMOUNT among its polymorphic outputs, and narrowing candidates by a
+    # measured separation is what `filter_by_distance` is for.
+    "FILTER": frozenset({"amount", "field", "location", "object"}),
+    "SORT": frozenset({"amount", "field", "object"}),
+    "ORDINAL_SELECT": frozenset({"field", "object"}),
+    "EXTREME_SELECT": frozenset({"amount", "field", "object"}),
+    # Counting places is an aggregation, and a place may be typed LOCATION.
+    "AGGREGATE": frozenset({"amount", "field", "location", "object", "proportion"}),
+    "MATCH_OPTIONS": frozenset({"amount", "event", "field", "network", "object", "proportion"}),
+    "MEASURE": frozenset(
+        {"amount", "event", "field", "location", "network", "object", "proportion"}
+    ),
+}
+
+def accepted_output_types(transformation: str) -> frozenset[str]:
+    """The core-concept types a transformation may name as its output.
+
+    The single source of truth for G3's output half. Canonicalization coerces a produced concept
+    into this set before validation reads it, so the two stages can never hold different opinions
+    about what `ROUTE_MEASURE` produces.
+    """
+
+    name = transformation.upper()
+    transform = TRANSFORMS.get(name)
+    if transform is None:
+        return frozenset()
+    return _POLYMORPHIC_OUTPUTS.get(name, frozenset({transform.output_type}))
+
+
+def accepted_input_types(transformation: str) -> frozenset[str] | None:
+    """The core-concept types a transformation may consume, or None where anything may be.
+
+    Read rather than duplicated because two stages complete graphs against it: the implicit
+    concept completion must not inject a concept this table then refuses, which is exactly what
+    `implicit_route` did to `ROUTE_MEASURE` on 36 questions in one run.
+    """
+
+    return _TRANSFORM_INPUTS.get(transformation.upper())
+
+
 #: The semantic vocabulary. Every transformation names a spatial relation the question asks
 #: about; none names a tool. Ordered as a reader would meet them: gather, measure, narrow, rank,
 #: aggregate, answer.
@@ -373,7 +470,7 @@ TRANSFORMS: dict[str, Transform] = {
     "ROUTE_COMPARE": Transform(
         "ROUTE_COMPARE",
         "Choose between road routes already computed.",
-        (("compare_routes", _always),),
+        (("directions", _between_places_only), ("compare_routes", _always)),
         "object",
     ),
     "ROUTE_OPTIMIZE": Transform(
@@ -671,6 +768,36 @@ class _Wiring:
             return None
         return references[0] if len(references) == 1 else references
 
+    def anchor_place(self) -> tuple[str | None, int]:
+        """The single place to measure *from*, and which input position it came from.
+
+        Position 0 is where it sits in a graph that resolves the anchor first, and reading it
+        positionally is right for those -- so that case is answered first and unchanged. It is
+        wrong for the graph that ranks a retrieval and then ranks the ranking: both of that
+        node's inputs are collections, `anchor` was bound to one of them, and the operator
+        refused with `anchor has no resolved coordinates`, taking every step that referenced it
+        down as well. What that graph measures from is the place its retrieval searched around,
+        which the retrieval recorded, so ask it rather than the input list.
+
+        Returns `-1` for the position when the anchor came from outside the inputs, so no input
+        is dropped from the candidates.
+        """
+
+        for position, producer in enumerate(self.producers):
+            if producer not in _COLLECTION_OPERATORS:
+                return self.place(position), position
+        return self.upstream_center(), -1
+
+    def gathered_except(self, skip: int) -> Any:
+        """Every input but the one already spoken for, as one slot's worth of evidence."""
+
+        references = [
+            self.items(position) for position in range(len(self.inputs)) if position != skip
+        ]
+        if not references:
+            return None
+        return references[0] if len(references) == 1 else references
+
     def upstream_center(self) -> str | None:
         """The place an input node searched around, as that node recorded it."""
 
@@ -820,14 +947,23 @@ def wire_arguments(
     if operator == "count_items":
         return {"items": wiring.gathered()} if arity else {}
     if operator == "nearest":
-        # Positional, and safe here because of what selects `nearest`: the shape guard only
-        # reaches it when the first input is already a single place and a later one is a set.
-        # `SET_MEASURE` removed that precondition -- it chose `nearest` on the planner's word --
-        # and binding by what each input produces did not replace it. See the ablation in
-        # `docs/REFERENCE_MAPPING.md`.
+        # The comment that used to sit here said this binding was safe because the shape guard
+        # only reaches `nearest` when the first input is already a single place. It does not:
+        # `_one_place_against_many` asks whether the measure fans out, never what input 0 holds,
+        # and the same comment admits `SET_MEASURE` removed the precondition. So the anchor is
+        # found rather than assumed. A graph whose input 0 *is* the place binds exactly as
+        # before; only the graphs that were failing take the new branch.
+        if arity < 2:
+            return {"candidates": wiring.gathered()} if arity else {}
+        anchor, position = wiring.anchor_place()
+        if anchor is None:
+            return {"candidates": wiring.gathered()}
+        if position == 0:
+            return {"anchor": anchor, "candidates": wiring.gathered(1)}
+        candidates = wiring.gathered_except(position)
         return (
-            {"anchor": wiring.place(0), "candidates": wiring.gathered(1)}
-            if arity >= 2
+            {"anchor": anchor, "candidates": candidates}
+            if candidates is not None
             else {"candidates": wiring.gathered()}
         )
     if operator == "sort_by":
@@ -1214,6 +1350,7 @@ def factorize_semantic_graph(
     options: Sequence[str],
     facts: Any,
     available: frozenset[str],
+    strict_types: bool = True,
 ) -> SemanticFactorization:
     """Map a semantic transformation graph onto executable operators.
 
@@ -1221,6 +1358,14 @@ def factorize_semantic_graph(
     relation is mechanical once the concept types and the transformation are known, so it is done
     here, once, the same way every time -- not asked of a language model per question from a
     prompt that had to list Kakao's category codes to make the answer possible.
+
+    `strict_types=False` is the last attempt before a question is given up on, and it steps aside
+    from this port's own heuristics -- upstream has none of them -- while every rule about what
+    the graph *is* still refuses. What it relaxes here is the unconsumed-input check: that rule
+    predicts one step would read less evidence than the graph handed it, which is worth refusing
+    a draft for so the repair round is told, but not worth refusing the question for. It was the
+    single largest cause of `graph_validation_failure` in a run at 28 of 100, and the step it
+    refuses is one the executor would have run.
     """
 
     # Synthetic concepts are excluded outright. The role completion inserts one, carrying the
@@ -1531,10 +1676,15 @@ def factorize_semantic_graph(
             )
             missed = [] if operator in _PARTIAL_CONSUMERS else unconsumed_inputs(inputs, arguments)
             if missed:
-                raise ValueError(
+                complaint = (
                     f"GeoFlow node {node_id!r} ({transform_name} -> {operator}) declares "
                     f"{len(inputs)} inputs and its wiring reads {len(inputs) - len(missed)}: "
                     f"{', '.join(missed)} would be gathered and never used"
+                )
+                if strict_types:
+                    raise ValueError(complaint)
+                diagnostics.append(
+                    {"node": node_id, "rule": "unconsumed_inputs", "detail": complaint}
                 )
             names = arguments.get("place_names") or []
             for name in names:
@@ -1543,7 +1693,22 @@ def factorize_semantic_graph(
                 resolved_counts[node_id] = len(names)
                 if len(aligned) == len(names):
                     resolved_concepts[node_id] = aligned
-            output_type = TRANSFORMS[transform_name.upper()].output_type
+            # What the node produces is what the operator that performs it produces, whenever
+            # that is one of the types the transformation may produce. The transformation's own
+            # declared type is a default for the operator that usually performs it, and a
+            # polymorphic transformation has more than one: `ROUTE_COMPARE` is typed `object`
+            # for `compare_routes`, and resolving it to `directions` -- which is what a
+            # comparison handed two places actually needs -- makes the node a route FIELD.
+            # Reading the default there refused the plan the executor could have run, which is
+            # exactly what `AGENTS.md` says a declared-type table must never do.
+            declared = TRANSFORMS[transform_name.upper()].output_type
+            produced = OPERATOR_CONTRACTS.get(operator)
+            output_type = (
+                produced.output_type
+                if produced is not None
+                and produced.output_type in accepted_output_types(transform_name)
+                else declared
+            )
 
         if (
             operator == "tsp_tw"

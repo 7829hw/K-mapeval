@@ -11,6 +11,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from src.agent.semantics import accepted_input_types
+
 CORE_CONCEPTS = frozenset(
     {"location", "object", "field", "event", "network", "amount", "proportion"}
 )
@@ -237,15 +239,23 @@ class GeoFlowGraph:
                 )
                 for index in range(first_route + 1, len(edges)):
                     edge = edges[index]
-                    if edge.transformation.upper() in {
-                        "ROUTE_MEASURE",
-                        "ROUTE_MATRIX",
-                        "ROUTE_OPTIMIZE",
-                        "SELECT_LEGS",
-                        "ROUTE_EXTRACT",
-                        "ROUTE_COMPARE",
-                        "AGGREGATE",
-                    }:
+                    # Only where the transformation actually consumes a route field. Handing
+                    # `implicit_route` to one that does not is this file completing a graph the
+                    # validator then refuses -- `ROUTE_MEASURE` and `ROUTE_MATRIX` take a place
+                    # and produce a route, they do not read one, and that contradiction alone
+                    # cost 36 questions in one hundred.
+                    accepted = accepted_input_types(edge.transformation)
+                    if (
+                        edge.transformation.upper()
+                        in {
+                            "ROUTE_OPTIMIZE",
+                            "SELECT_LEGS",
+                            "ROUTE_EXTRACT",
+                            "ROUTE_COMPARE",
+                            "AGGREGATE",
+                        }
+                        and (accepted is None or "field" in accepted)
+                    ):
                         edges[index] = TransformationEdge(
                             edge.id,
                             edge.transformation,

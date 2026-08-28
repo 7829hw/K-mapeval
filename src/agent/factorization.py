@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
+from src.agent.canonicalization import canonicalize_ir_payload
 from src.agent.concepts import (
     ConceptNode,
     FactorNode,
@@ -34,11 +35,10 @@ def plan_to_geoflow(analysis: Mapping[str, Any], payload: Mapping[str, Any]) -> 
     """Normalize either the Concept/Edge IR or the previous step-shaped wire format."""
 
     if payload.get("transformation_edges") is not None:
-        parsed = GeoFlowGraph.from_dict(payload)
-        return parsed.with_implicit_concepts()
+        return canonicalize_ir_payload(analysis, payload)
     nested = payload.get("geoflow")
     if isinstance(nested, Mapping):
-        return GeoFlowGraph.from_dict(nested).with_implicit_concepts()
+        return canonicalize_ir_payload(analysis, nested)
 
     raw_steps = payload.get("graph") if payload.get("graph") is not None else payload.get("steps")
     if not isinstance(raw_steps, list) or not raw_steps:
@@ -184,11 +184,22 @@ def geoflow_to_semantic_steps(graph: GeoFlowGraph) -> list[dict[str, Any]]:
         concept_ids = [
             value for value in edge.output_concepts if not graph.concepts_by_id[value].implicit
         ]
+        # The producing nodes first, then the concepts this edge reads that no node stands for.
+        # `_resolve_endpoints` and `_resolve_via` are built to read concept ids out of `inputs`
+        # -- that is how the step-shaped wire format said *which* pair a measure is between --
+        # and lowering the IR dropped them, so three `directions` nodes reading one geocode
+        # batch all measured from its first place: a detour question answered 18345 m for a
+        # gold of 11.4 km with every stage reporting success. Node ids are filtered out of
+        # `inputs` by `produced_by` membership downstream, so appending concepts changes no
+        # dependency.
+        named_concepts = [
+            value for value in edge.input_concepts if value not in dependencies
+        ]
         steps.append(
             {
                 "id": edge.id,
                 "transform": edge.transformation,
-                "inputs": dependencies,
+                "inputs": [*dependencies, *named_concepts],
                 "concept_ids": concept_ids,
                 "role": (
                     "measure"
@@ -209,6 +220,7 @@ def factorize_plan(
     options: Sequence[str],
     facts: Any,
     available: frozenset[str],
+    strict_types: bool = True,
 ) -> FactorizedPlan:
     geoflow = plan_to_geoflow(analysis, payload)
     validation = validate_geoflow_graph(geoflow)
@@ -218,6 +230,7 @@ def factorize_plan(
         options=list(options),
         facts=facts,
         available=available,
+        strict_types=strict_types,
     )
     factor_inputs = {edge.id: list(edge.factor_nodes) for edge in geoflow.transformation_edges}
     edges_by_id = {edge.id: edge for edge in geoflow.transformation_edges}

@@ -67,6 +67,14 @@ def _read_log(path: Path) -> dict[str, Any] | None:
         except json.JSONDecodeError:
             return None
     if {"question", "analyze", "compose"} <= set(found) and isinstance(found["compose"], dict):
+        # The planner answers in the Concept/Edge IR, whose edges alone do not rebuild the
+        # graph -- the concepts and factors they refer to are in `plan`. A log written before
+        # that key existed still replays through its step-shaped `graph`.
+        plan = found["compose"].get("plan")
+        if isinstance(plan, dict) and plan.get("transformation_edges"):
+            found["plan"] = plan
+            found["graph"] = plan["transformation_edges"]
+            return found
         graph = found["compose"].get("graph")
         if isinstance(graph, list) and graph:
             found["graph"] = graph
@@ -115,10 +123,19 @@ def _same_question(logged: str, asked: str) -> bool:
     return logged == asked
 
 
-def _ground(graph: list[dict[str, Any]], question: str, options: list[str], analysis: dict) -> Any:
+def _ground(
+    graph: list[dict[str, Any]],
+    question: str,
+    options: list[str],
+    analysis: dict,
+    plan: dict[str, Any] | None = None,
+) -> Any:
     """Call whichever signature this revision's grounding has."""
 
     from src.agent import spatial
+
+    if plan is not None:
+        graph = _semantic_steps(analysis, plan)
 
     parameters = inspect.signature(spatial._ground_graph_literals).parameters
     if "intent" in parameters:
@@ -144,6 +161,18 @@ def _ground(graph: list[dict[str, Any]], question: str, options: list[str], anal
         facts,
         retrieval_specs=retrieval_specs,
     )
+
+
+def _semantic_steps(analysis: dict[str, Any], plan: dict[str, Any]) -> list[dict[str, Any]]:
+    """The Concept/Edge IR as the transformation steps the rest of the replay expects.
+
+    Canonicalization and G1-G5 run inside `plan_to_geoflow`, so a plan this revision refuses
+    raises here and is recorded as the outcome it is.
+    """
+
+    from src.agent.factorization import geoflow_to_semantic_steps, plan_to_geoflow
+
+    return geoflow_to_semantic_steps(plan_to_geoflow(analysis, plan))
 
 
 def _factorize(
@@ -257,7 +286,11 @@ def replay(report_paths: list[Path]) -> dict[str, Any]:
             }
             try:
                 entry["grounded"] = _ground(
-                    found["graph"], item.question, list(item.options), found["analyze"]
+                    found["graph"],
+                    item.question,
+                    list(item.options),
+                    found["analyze"],
+                    plan=found.get("plan"),
                 )
             except Exception as error:  # a graph this revision refuses is itself an outcome
                 entry["error"] = f"{type(error).__name__}: {error}"

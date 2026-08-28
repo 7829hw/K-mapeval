@@ -2586,6 +2586,21 @@ def _verbatim_name(
         if literal and candidate.startswith(literal) and candidate != literal:
             if _TRAILING_CLAUSE.match(candidate[len(literal) :]):
                 return literal
+    # One syllable off a name the question states, at the same length: a transcription slip, not
+    # another place. `인사랑` came through as `인사상` and matched `인` in 부산 -- a 370 km leg in
+    # a Seoul itinerary, and a trip total of 400 km for a gold of 41.5 km. The length guard below
+    # skips every three-syllable name, which is most of them here, and the similarity threshold
+    # would not reach 0.67 either. Only when exactly one stated place is that close, so two names
+    # a single syllable apart leave both alone.
+    near = [
+        literal
+        for literal in {*(stated or ()), *_question_words(question)}
+        if len(literal) == len(candidate)
+        and literal != candidate
+        and sum(a != b for a, b in zip(literal, candidate, strict=True)) == 1
+    ]
+    if len(near) == 1:
+        return near[0]
     if len(candidate) < 4 or candidate in question:
         return name
     best = candidate
@@ -2595,6 +2610,27 @@ def _verbatim_name(
         if ratio > best_ratio:
             best, best_ratio = literal, ratio
     return best
+
+
+#: What separates one written name from the next. The arrow an itinerary is written with counts.
+_WORD_BREAK = re.compile(r"[\s,\.\(\)\[\]<>~!?\u2192\u2013\u2014>]+")
+
+
+def _question_words(question: str) -> list[str]:
+    """The question's own words, as delimiters separate them.
+
+    The slip this repairs is made by the Analysis stage rather than by the planner -- the concept
+    text itself came through as `인사상` for the question's `인사랑` -- so the name is in no
+    vocabulary built from the analysis, and the question is the only place left holding it.
+    Delimited words rather than every window of the right length, because a window can start
+    mid-name and one syllable from a fragment is not evidence of anything.
+    """
+
+    return [
+        word.strip("의을를은는이가와과로") or word
+        for word in _WORD_BREAK.split(question)
+        if word
+    ]
 
 
 def _question_spans(question: str, length: int) -> list[str]:

@@ -3443,3 +3443,26 @@ def test_a_detour_question_measures_two_routes_and_neither_is_filled_from_the_qu
     ]
     grounded = _ground_graph_literals(graph, question, [], facts)
     assert not any(step["arguments"].get("waypoints") for step in grounded)
+
+
+def test_one_syllable_off_a_name_the_question_wrote_is_that_name() -> None:
+    """`인사랑` came through the Analysis stage as `인사상` and matched `인` in 부산 -- a 370 km
+    leg in a Seoul itinerary, and a trip total of 400 km for a gold of 41.5 km. The slip is made
+    before the planner sees it, so the name is in no vocabulary built from the analysis and the
+    question is the only place left holding it. The length guard skips every three-syllable name,
+    which is most of them here, and the similarity threshold would not reach 0.67 either.
+    """
+
+    from src.agent.spatial import _verbatim_name
+
+    question = "인사랑 → 문암 미술관 → 창동로데오거리 순서로 이동합니다."
+    assert _verbatim_name("인사상", question, [], []) == "인사랑"
+
+
+def test_two_names_a_syllable_apart_are_both_left_alone() -> None:
+    """Uniqueness is the guard: where the question names two places that close, neither one is
+    evidence about the other."""
+
+    from src.agent.spatial import _verbatim_name
+
+    assert _verbatim_name("가나다", "가나라 가나마 근처?", [], []) == "가나다"

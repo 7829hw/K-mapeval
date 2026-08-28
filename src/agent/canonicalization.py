@@ -51,8 +51,16 @@ _ROLE_ORDER = ("sub_condition", "condition", "support", "measure")
 _NEEDS_LOCATED_PLACES = frozenset(
     {"ROUTE_MEASURE", "ROUTE_MATRIX", "ROUTE_OPTIMIZE", "DISTANCE_MEASURE"}
 )
+#: And the narrowings that measure: `within_radius` needs its candidates located as much as a
+#: route needs its ends. Kept separate because only a LOCATION-typed input qualifies here -- a
+#: FILTER reads a kind of place as often as a list of them.
+_NARROWS_BY_DISTANCE = frozenset({"FILTER"})
 #: The core concepts a place is typed with.
 _PLACE_TYPES = frozenset({"location", "object"})
+#: Factor types that make a narrowing a *distance* narrowing, which needs somewhere to measure
+#: from. The question states the radius and grounding binds it; what the graph has to supply is
+#: the place it is measured around.
+_RADIUS_FACTORS = frozenset({"radius_m", "radius"})
 
 
 def canonicalize_ir_payload(
@@ -419,13 +427,22 @@ class _Canonicalizer:
 
         wanted: list[str] = []
         for edge in self._edges:
-            if edge.transformation.upper() not in _NEEDS_LOCATED_PLACES:
-                continue
+            transform = edge.transformation.upper()
+            needs_places = transform in _NEEDS_LOCATED_PLACES
+            narrows = transform in _NARROWS_BY_DISTANCE
             for concept_id in edge.input_concepts:
                 node = self._concepts.get(concept_id)
-                if node is None or concept_id in self._producer:
+                if node is None or concept_id in self._producer or concept_id in wanted:
                     continue
-                if node.core_concept in _PLACE_TYPES and concept_id not in wanted:
+                # LOCATION is a particular place, whatever reads it -- the four candidates a
+                # radius question lists are typed that way, and unresolved they leave
+                # `within_radius` with nothing to measure. OBJECT is a *kind* of place as often
+                # as a set of them, so it is resolved only where a located place is required:
+                # geocoding `정형외과` because a search reads it would send the geocoder after a
+                # word.
+                if (narrows and node.core_concept == "location") or (
+                    needs_places and node.core_concept in _PLACE_TYPES
+                ):
                     wanted.append(concept_id)
         if not wanted:
             return
@@ -445,12 +462,86 @@ class _Canonicalizer:
         for concept_id in wanted:
             self._producer[concept_id] = edge_id
 
+    def _give_a_radius_filter_what_it_narrows(self) -> None:
+        """A narrowing by radius reads what was measured, and the graph has to hand it over.
+
+        "X에서 반경 300m 이내에 있는 은행은 아래 목록 중 몇 곳인가요" is drawn two ways and both
+        strand a branch. One measures each candidate from the anchor and then filters the
+        *candidates*, so every distance it computed is read by nothing and G5 refuses the graph
+        before grounding can say `FILTER by radius has no place to measure from`. The other
+        filters the listed places with no anchor anywhere in reach.
+
+        `filter_by_distance` says which is which: the radius is a stated fact that grounding
+        binds, and the measured set is whatever the measure steps produced. So the filter reads
+        the measurements the graph computed and left unread, or -- when it computed none -- the
+        located extent it would have measured from.
+
+        Fires only when the question states a radius, and only on a filter that holds neither,
+        so a narrowing that is already wired is untouched.
+        """
+
+        if not any(factor.factor_type in _RADIUS_FACTORS for factor in self._factors.values()):
+            return
+        consumed = {value for edge in self._edges for value in edge.input_concepts}
+        stranded = [
+            value
+            for edge in self._edges
+            if edge.transformation.upper() == "DISTANCE_MEASURE"
+            for value in edge.output_concepts
+            if value not in consumed
+        ]
+        leading = False
+        if not stranded:
+            leading = True
+            anchor = next(
+                (
+                    node.id
+                    for node in self._concepts.values()
+                    if node.functional_role in CONTEXTUAL_ROLES
+                    and node.core_concept in _PLACE_TYPES
+                ),
+                None,
+            )
+            if anchor is None:
+                return
+            # The *located* anchor: what resolving it produced, when the graph resolved it in
+            # its own node. `anchor` itself is a name until something geocodes it.
+            stranded = [
+                next(
+                    (
+                        edge.output_concepts[0]
+                        for edge in self._edges
+                        if edge.transformation.upper() == "RESOLVE_PLACES"
+                        and anchor in edge.input_concepts
+                    ),
+                    self._alias.get(anchor, anchor),
+                )
+            ]
+        for index, edge in enumerate(self._edges):
+            if edge.transformation.upper() != "FILTER":
+                continue
+            if any(value in edge.input_concepts for value in stranded):
+                continue
+            # The measured set joins what the filter already narrows; the extent goes in
+            # front, because "the place it is measured from" is the first input by convention
+            # and `within_radius` reads its centre there.
+            self._edges[index] = replace(
+                edge,
+                input_concepts=(
+                    (*stranded, *edge.input_concepts)
+                    if leading
+                    else (*edge.input_concepts, *stranded)
+                ),
+            )
+            return
+
     def build(self) -> GeoFlowGraph:
         self._seed()
         self._build_edges()
         if not self._edges:
             raise ValueError("GeoFlow response does not contain a non-empty graph")
         self._resolve_the_places_nothing_resolved()
+        self._give_a_radius_filter_what_it_narrows()
         self._retype_produced_concepts()
         self._propagate_roles()
         self._root_the_leaves_in_context()

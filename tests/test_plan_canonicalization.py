@@ -612,3 +612,60 @@ def test_a_kind_of_place_is_not_geocoded_because_a_search_reads_it() -> None:
         }
     )
     assert [edge.id for edge in graph.transformation_edges] == ["t1", "t2", "t3"]
+
+
+def test_a_radius_narrowing_reads_what_the_graph_measured() -> None:
+    """"X에서 반경 300m 이내에 있는 은행은 아래 목록 중 몇 곳인가요" is drawn two ways and both
+    strand a branch: one measures each candidate from the anchor and then filters the
+    *candidates*, so every distance it computed is read by nothing; the other filters the listed
+    places with no anchor in reach. `filter_by_distance` says which is which -- the radius is a
+    stated fact grounding binds, and the measured set is what the measure steps produced.
+    """
+
+    analysis = {
+        "concepts": [
+            {
+                "id": "anchor",
+                "text": "남예종예술실용전문학교 아트홀",
+                "core_concept": "location",
+                "functional_role": "extent",
+                "attributes": {"radius_m": 300},
+            },
+            {"id": "c1", "text": "A", "core_concept": "location", "functional_role": "support"},
+            {"id": "c2", "text": "B", "core_concept": "location", "functional_role": "support"},
+        ]
+    }
+    payload = {
+        "transformation_edges": [
+            {
+                "id": "t1",
+                "transformation": "RESOLVE_PLACES",
+                "input_concepts": ["anchor"],
+                "output_concepts": ["anchor_located"],
+            },
+            {
+                "id": "t2",
+                "transformation": "DISTANCE_MEASURE",
+                "input_concepts": ["anchor_located", "c1"],
+                "output_concepts": ["d1"],
+            },
+            {
+                "id": "t3",
+                "transformation": "FILTER",
+                "input_concepts": ["c1", "c2"],
+                "output_concepts": ["kept"],
+            },
+            {
+                "id": "t4",
+                "transformation": "AGGREGATE",
+                "input_concepts": ["kept"],
+                "output_concepts": ["count"],
+            },
+        ]
+    }
+    graph = plan_to_geoflow(analysis, payload)
+    validate_geoflow_graph(graph)
+    narrowing = next(item for item in graph.transformation_edges if item.id == "t3")
+    # The measurement the graph computed and left unread is what the narrowing narrows, so the
+    # branch that produced it reaches the measure instead of dangling.
+    assert "d1" in narrowing.input_concepts

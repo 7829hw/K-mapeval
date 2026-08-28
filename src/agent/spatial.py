@@ -1426,7 +1426,13 @@ def _extract_waypoint(question: str, stated: Sequence[str]) -> str | None:
         return None
     before = question[: match.start()].strip()
     candidates = [name for name in stated if name and before.endswith(name)]
-    return max(candidates, key=len) if candidates else None
+    if candidates:
+        return max(candidates, key=len)
+    # The Analysis stage drops the stop outright often enough to matter -- `모여집을 들러` came
+    # through with no concept for 모여집 at all -- and then no vocabulary built from it holds the
+    # name. The question's own last word before the marker is the place it names.
+    words = _question_words(before)
+    return words[-1] if words else None
 
 
 def _verbatim_concept_texts(analysis: dict[str, Any], question: str) -> tuple[str, ...]:

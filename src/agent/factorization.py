@@ -248,8 +248,56 @@ def factorize_plan(
     return FactorizedPlan(geoflow, validation, semantic, hyperedges)
 
 
+def route_through_the_stated_stop(graph: GeoFlowGraph, facts: Any) -> GeoFlowGraph:
+    """Send a lone route through the stop the question states, before G1-G5 reads the graph.
+
+    Grounding already binds `facts.via_place` onto a route that has no waypoints, but grounding
+    runs after validation, and these graphs do not survive that long: the planner resolves the
+    stop in its own node and then measures a route that ignores it, so the resolve node
+    contributes to nothing and G5 refuses the whole graph. Binding it here connects the branch
+    and sends the drive where the question said, in one move.
+
+    Only with exactly one ROUTE_MEASURE in the graph -- a detour question measures two and only
+    one goes through the stop, which is the graph's own structure to say -- and only onto a route
+    that declared no `via` of its own. The stop is matched to a concept by the text the Analysis
+    stage copied, never by where an input sat.
+    """
+
+    stated = str(getattr(facts, "via_place", "") or "").strip()
+    if not stated:
+        return graph
+    routes = [
+        edge
+        for edge in graph.transformation_edges
+        if edge.transformation.upper() == "ROUTE_MEASURE"
+    ]
+    if len(routes) != 1 or routes[0].attributes.get("via"):
+        return graph
+    stop = next(
+        (node.id for node in graph.concept_nodes if str(node.text or "").strip() == stated), None
+    )
+    if stop is None or stop in routes[0].attributes.get("via", ()):
+        return graph
+    edges = tuple(
+        replace(
+            edge,
+            # Kept among the inputs as well as recorded as `via`: G5 reads connectivity off the
+            # concept graph, where `via` lives in attributes, so a stop named only there still
+            # leaves its resolve node contributing to nothing.
+            input_concepts=tuple(dict.fromkeys((*edge.input_concepts, stop))),
+            attributes={**edge.attributes, "via": [stop]},
+        )
+        if edge is routes[0]
+        else edge
+        for edge in graph.transformation_edges
+    )
+    return GeoFlowGraph(graph.concept_nodes, edges, graph.factor_nodes, graph.metadata)
+
+
 def attach_grounding_factors(graph: GeoFlowGraph, facts: Any) -> GeoFlowGraph:
     """Promote deterministic typed facts to FactorNodes and connect them to hyperedges."""
+
+    graph = route_through_the_stated_stop(graph, facts)
 
     values = {
         "radius_m": getattr(facts, "radius_m", None),

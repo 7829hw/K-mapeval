@@ -744,3 +744,92 @@ def test_a_single_route_with_three_places_is_not_given_a_waypoint() -> None:
     )
     edge = next(item for item in graph.transformation_edges if item.id == "t1")
     assert not edge.attributes.get("via")
+
+
+def test_a_lone_route_is_connected_to_the_stated_stop_before_g5_reads_it() -> None:
+    """Grounding binds the stop too, but grounding runs after validation and these graphs do not
+    survive that long: the planner resolves the stop in its own node and measures a route that
+    ignores it, so the resolve node contributes to nothing and G5 refuses the graph.
+    """
+
+    from src.agent.factorization import attach_grounding_factors
+    from src.agent.spatial import extract_facts
+
+    analysis = {
+        "concepts": [
+            {"id": "a", "text": "변우석1호숲", "core_concept": "location", "role": "extent"},
+            {"id": "w", "text": "모여집", "core_concept": "location", "role": "support"},
+            {"id": "b", "text": "충무아트센터", "core_concept": "location", "role": "support"},
+        ]
+    }
+    payload = {
+        "transformation_edges": [
+            {
+                "id": "t1",
+                "transformation": "RESOLVE_PLACES",
+                "input_concepts": ["a", "w", "b"],
+                "output_concepts": ["a", "w", "b"],
+            },
+            {
+                "id": "t2",
+                "transformation": "ROUTE_MEASURE",
+                "input_concepts": ["a", "b"],
+                "output_concepts": ["route"],
+            },
+        ]
+    }
+    question = "변우석1호숲에서 모여집을 들러 충무아트센터까지 자동차로 이동합니다."
+    graph = attach_grounding_factors(
+        plan_to_geoflow(analysis, payload), extract_facts(analysis, question)
+    )
+    route = next(edge for edge in graph.transformation_edges if edge.id == "t2")
+    assert route.attributes["via"] == ["w"]
+    # In the inputs as well, because G5 reads connectivity off the concept graph and `via` lives
+    # in attributes.
+    assert "w" in route.input_concepts
+
+
+def test_a_detour_graph_is_not_filled_from_the_question() -> None:
+    """Two routes and only one goes through the stop; which one is the graph's own structure to
+    say."""
+
+    from src.agent.factorization import attach_grounding_factors
+    from src.agent.spatial import extract_facts
+
+    analysis = {
+        "concepts": [
+            {"id": "a", "text": "A모텔", "core_concept": "location", "role": "extent"},
+            {"id": "w", "text": "B갤러리", "core_concept": "location", "role": "support"},
+            {"id": "b", "text": "C역", "core_concept": "location", "role": "support"},
+        ]
+    }
+    payload = {
+        "transformation_edges": [
+            {
+                "id": "t1",
+                "transformation": "ROUTE_MEASURE",
+                "input_concepts": ["a", "b"],
+                "output_concepts": ["direct"],
+            },
+            {
+                "id": "t2",
+                "transformation": "ROUTE_MEASURE",
+                "input_concepts": ["a", "b", "w"],
+                "output_concepts": ["detour"],
+            },
+            {
+                "id": "t3",
+                "transformation": "AGGREGATE",
+                "input_concepts": ["direct", "detour"],
+                "output_concepts": ["cost"],
+            },
+        ]
+    }
+    question = "A모텔에서 C역까지, 곧장 가는 경우와 B갤러리를 경유해서 가는 경우의 차이는?"
+    graph = attach_grounding_factors(
+        plan_to_geoflow(analysis, payload), extract_facts(analysis, question)
+    )
+    edges = {edge.id: edge for edge in graph.transformation_edges}
+    # The subset rule already said which route has the stop; nothing here overrode it.
+    assert edges["t2"].attributes["via"] == ["w"]
+    assert not edges["t1"].attributes.get("via")

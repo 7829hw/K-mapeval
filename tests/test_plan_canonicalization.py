@@ -669,3 +669,78 @@ def test_a_radius_narrowing_reads_what_the_graph_measured() -> None:
     # The measurement the graph computed and left unread is what the narrowing narrows, so the
     # branch that produced it reaches the measure instead of dangling.
     assert "d1" in narrowing.input_concepts
+
+
+def test_two_routes_between_the_same_ends_differ_by_what_one_passes_through() -> None:
+    """A detour question measures the drive twice and the graph says so: one route reads the two
+    places, the other reads those two and one more. The difference between them is the waypoint,
+    and reading it that way needs no position -- one planner writes the extra input last and
+    another writes it in the middle. The general "middles are waypoints" rule is forbidden and
+    stays forbidden: there is no second route beside "A와 B 중 C에 더 가까운 곳".
+    """
+
+    payload = {
+        "concept_nodes": [
+            {"id": "a", "core_concept": "location", "functional_role": "extent"},
+            {"id": "b", "core_concept": "location", "functional_role": "support"},
+            {"id": "w", "core_concept": "location", "functional_role": "support"},
+            {"id": "direct", "core_concept": "field", "functional_role": "support"},
+            {"id": "detour", "core_concept": "field", "functional_role": "support"},
+            {"id": "cost", "core_concept": "amount", "functional_role": "measure"},
+        ],
+        "transformation_edges": [
+            {
+                "id": "t1",
+                "transformation": "ROUTE_MEASURE",
+                "input_concepts": ["a", "b"],
+                "output_concepts": ["direct"],
+            },
+            {
+                # The stop written between the ends, which is where a positional rule got it
+                # backwards: it routed to the stop and passed through the destination.
+                "id": "t2",
+                "transformation": "ROUTE_MEASURE",
+                "input_concepts": ["a", "b", "w"],
+                "output_concepts": ["detour"],
+            },
+            {
+                "id": "t3",
+                "transformation": "AGGREGATE",
+                "input_concepts": ["direct", "detour"],
+                "output_concepts": ["cost"],
+            },
+        ],
+    }
+    graph = _valid(payload)
+    edges = {edge.id: edge for edge in graph.transformation_edges}
+    assert edges["t2"].attributes["via"] == ["w"]
+    assert not edges["t1"].attributes.get("via")
+    # Kept among the inputs: taking it out left its resolve node contributing to nothing and G5
+    # refused the graph.
+    assert "w" in edges["t2"].input_concepts
+
+
+def test_a_single_route_with_three_places_is_not_given_a_waypoint() -> None:
+    """No second route to compare against, so nothing in the graph says which place is the
+    stop -- and guessing is the rule `AGENTS.md` forbids."""
+
+    graph = _valid(
+        {
+            "concept_nodes": [
+                {"id": "a", "core_concept": "location", "functional_role": "extent"},
+                {"id": "b", "core_concept": "location", "functional_role": "support"},
+                {"id": "c", "core_concept": "location", "functional_role": "support"},
+                {"id": "route", "core_concept": "field", "functional_role": "measure"},
+            ],
+            "transformation_edges": [
+                {
+                    "id": "t1",
+                    "transformation": "ROUTE_MEASURE",
+                    "input_concepts": ["a", "b", "c"],
+                    "output_concepts": ["route"],
+                }
+            ],
+        }
+    )
+    edge = next(item for item in graph.transformation_edges if item.id == "t1")
+    assert not edge.attributes.get("via")

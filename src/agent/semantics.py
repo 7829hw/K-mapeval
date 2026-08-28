@@ -1183,10 +1183,32 @@ def _resolve_via(
         return (), frozenset(), ()
 
     found = _place_references(declared, inputs, follow, produced_by, resolved_concepts)
+
+    def shares_its_node(node: str) -> bool:
+        """Whether the waypoint sits in a batch beside other places, or has the node to itself.
+
+        A position only tells the ends apart from the waypoint when they were resolved together.
+        When the graph geocoded the waypoint in its own node, that node *is* the waypoint, and
+        reporting a position instead left it in the running for the far end -- five of eight
+        detour graphs routed to the stop and passed through the destination.
+        """
+
+        return len(resolved_concepts.get(node, ())) > 1
+
     return (
         tuple(reference for reference, _, _ in found),
-        frozenset(position for _, _, position in found if position is not None),
-        tuple(dict.fromkeys(node for _, node, position in found if position is None)),
+        frozenset(
+            position
+            for _, node, position in found
+            if position is not None and shares_its_node(node)
+        ),
+        tuple(
+            dict.fromkeys(
+                node
+                for _, node, position in found
+                if position is None or not shares_its_node(node)
+            )
+        ),
     )
 
 

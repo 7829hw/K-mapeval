@@ -3388,3 +3388,15 @@ def test_a_name_that_merely_ends_in_a_particle_syllable_is_left_whole() -> None:
     question = "중계동학원가에서 신설동역 1호선까지"
     literals = _verbatim_concept_texts({"concepts": [{"text": "중계동학원가"}]}, question)
     assert literals == ("중계동학원가",)
+
+
+def test_a_name_the_question_states_verbatim_is_never_repaired() -> None:
+    """Adding clause-carrying concept texts to the repair vocabulary made this concrete:
+    `삼성출판박물관` is a substring of `삼성출판박물관을 경유해서 가는 경우`, so the shortened-name
+    branch "restored" the correct name into the clause and the geocoder found nothing."""
+
+    from src.agent.spatial import _verbatim_name
+
+    question = "포유모텔에서 학동역 7호선까지, 삼성출판박물관을 경유해서 가는 경우의 주행거리는?"
+    stated = ["삼성출판박물관", "삼성출판박물관을 경유해서 가는 경우"]
+    assert _verbatim_name("삼성출판박물관", question, [], stated) == "삼성출판박물관"

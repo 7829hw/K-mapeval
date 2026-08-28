@@ -535,6 +535,56 @@ class _Canonicalizer:
             )
             return
 
+    def _read_the_second_route_as_the_one_with_a_stop(self) -> None:
+        """Two routes between the same ends differ by what one of them passes through.
+
+        A detour question measures the drive twice, and the graph says so: `route_direct` reads
+        the two places, `route_via` reads those two and one more. The difference between them is
+        the waypoint, and reading it that way needs no position -- one planner wrote the extra
+        input last and another wrote it in the middle, and a positional rule got the second one
+        backwards, routing to the waypoint and passing through the destination.
+
+        `AGENTS.md` forbids the general version of this, and rightly: "A와 B 중 C에 더 가까운 곳"
+        has a middle too, and there is no second route beside it for this rule to compare
+        against. What fires here is a *pair* of ROUTE_MEASUREs whose inputs stand in a subset
+        relation, which is the shape "곧장 가는 경우와 X를 경유해서 가는 경우" is drawn in and
+        nothing else is. Without it both routes measured the same drive and the detour cost came
+        out as zero.
+        """
+
+        routes = [
+            (index, edge)
+            for index, edge in enumerate(self._edges)
+            if edge.transformation.upper() == "ROUTE_MEASURE" and not edge.attributes.get("via")
+        ]
+        for index, edge in routes:
+            places = {
+                value
+                for value in edge.input_concepts
+                if self._concepts[value].core_concept in _PLACE_TYPES
+            }
+            for other_index, other in routes:
+                if other_index == index:
+                    continue
+                ends = {
+                    value
+                    for value in other.input_concepts
+                    if self._concepts[value].core_concept in _PLACE_TYPES
+                }
+                if not ends or not ends < places:
+                    continue
+                through = [value for value in edge.input_concepts if value in places - ends]
+                if through:
+                    # Recorded beside the inputs, not moved out of them: taking the waypoint out
+                    # left its resolve node contributing to nothing and G5 refused the graph. The
+                    # endpoint reader still gets it wrong on one planner spelling out of four --
+                    # `[start, destination, waypoint]` reads the stop as the far end -- and that
+                    # is a smaller loss than refusing every detour graph outright.
+                    self._edges[index] = replace(
+                        edge, attributes={**edge.attributes, "via": through}
+                    )
+                break
+
     def build(self) -> GeoFlowGraph:
         self._seed()
         self._build_edges()
@@ -542,6 +592,7 @@ class _Canonicalizer:
             raise ValueError("GeoFlow response does not contain a non-empty graph")
         self._resolve_the_places_nothing_resolved()
         self._give_a_radius_filter_what_it_narrows()
+        self._read_the_second_route_as_the_one_with_a_stop()
         self._retype_produced_concepts()
         self._propagate_roles()
         self._root_the_leaves_in_context()

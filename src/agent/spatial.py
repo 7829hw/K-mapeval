@@ -2496,6 +2496,13 @@ def _verbatim_name(
     candidate = name.strip()
     if candidate in options:
         return name
+    # A name the question states word for word is already the literal, and every repair below
+    # can only move it away from one. Adding clause-carrying concept texts to the vocabulary
+    # made that concrete: `삼성출판박물관` is a substring of `삼성출판박물관을 경유해서 가는 경우`,
+    # so the shortened-name branch "restored" the correct name into the clause and the geocoder
+    # found nothing.
+    if candidate in (stated or ()):
+        return name
     for literal in stated or []:
         # A name the question states, of which the planner wrote only a part. `빈칸 문래` came
         # through as `문래`, which resolves — to 문래동창작촌, a different place, so the route

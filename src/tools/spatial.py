@@ -52,6 +52,22 @@ _MEASURED_DISTANCE = r"(\d[\d,]*(?:\.\d+)?)\s*(?P<unit>km|m)\b"
 _BARE_NUMBER = r"(\d[\d,]*(?:\.\d+)?)"
 
 
+def _tour_metric(total: float, metric: str) -> dict[str, float]:
+    """A tour's total under the name its metric is read by elsewhere.
+
+    `tsp_tw` reported the total only as `total_cost`, so a graph that asked a tour for its
+    distance -- `ROUTE_EXTRACT` over a `ROUTE_OPTIMIZE`, which is how "the shortest order, and
+    how far is it" is drawn -- reached `extract_distance` with no `distance_m` to read. The
+    number was always there; it was filed under a name nothing looks for. Naming it is what lets
+    the input-type table accept a tour without the refusal simply moving to execution.
+    """
+
+    name = MATRIX_METRICS[metric]
+    return {name: float(total), "distance_km": float(total) / 1000} if name == "distance_m" else {
+        name: float(total)
+    }
+
+
 class SpatialOperatorRegistry:
     """Deterministic operators; these never spend Kakao API calls."""
 
@@ -1260,6 +1276,7 @@ class SpatialOperatorRegistry:
         if best is not None:
             return {
                 **best,
+                **_tour_metric(best["total_cost"], metric),
                 "ordered_stops": SpatialOperatorRegistry._tour_names(nodes, best["order"]),
                 "fallback_used": False,
             }
@@ -1316,6 +1333,7 @@ class SpatialOperatorRegistry:
             "ordered_stops": SpatialOperatorRegistry._tour_names(nodes, order),
             "visited_count": visited_count,
             "total_cost": elapsed,
+            **_tour_metric(elapsed, metric),
             "travel_cost": elapsed - service,
             "service_cost": service,
             "feasible": not remaining,
@@ -1382,6 +1400,7 @@ def _walk_stated_order(
         "ordered_stops": SpatialOperatorRegistry._tour_names(nodes, order),
         "visited_count": visited_count,
         "total_cost": elapsed,
+        **_tour_metric(elapsed, metric),
         "travel_cost": elapsed - service,
         "service_cost": service,
         "feasible": not unvisited,

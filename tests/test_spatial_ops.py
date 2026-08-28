@@ -3622,3 +3622,28 @@ def test_a_tour_names_the_stops_it_visits_in_the_order_it_reaches_them() -> None
     assert tour["order"] == [0, 2, 1, 3, 0]
     # The start is named once and the drive home is not a second visit.
     assert tour["ordered_stops"] == ["제일모텔", "무계동천", "이마트 신도림점", "퐁피두센터 한화"]
+
+
+def test_a_tour_reports_its_total_under_the_name_that_reads_it() -> None:
+    """`tsp_tw` filed the total only as `total_cost`, so a graph asking a tour for its distance
+    -- ROUTE_EXTRACT over ROUTE_OPTIMIZE, which is how "the shortest order, and how far is it"
+    is drawn -- reached `extract_distance` with no `distance_m` to read. The number was always
+    there, under a name nothing looks for."""
+
+    from src.tools import SpatialOperatorRegistry
+
+    registry = SpatialOperatorRegistry()
+    nodes = [{"place": {"name": "A"}}, {"place": {"name": "B"}}, {"place": {"name": "C"}}]
+    matrix = [[0, 10, 3], [10, 0, 8], [3, 8, 0]]
+    tour = registry.tsp_tw(
+        nodes=nodes, distance_matrix=matrix, metric="distance", return_to_start=True
+    )
+    assert tour["distance_m"] == tour["total_cost"]
+    # And the readers that refused it now read it, which is what makes accepting a tour as a
+    # ROUTE_EXTRACT input a plan the executor can run rather than a refusal moved downstream.
+    assert registry.extract_distance(route=tour)["distance_m"] == tour["total_cost"]
+    assert registry.sum_amounts(amounts=[tour])["distance_m"] == tour["total_cost"]
+
+    timed = registry.tsp_tw(nodes=nodes, distance_matrix=matrix, metric="duration")
+    assert timed["duration_s"] == timed["total_cost"]
+    assert "distance_m" not in timed

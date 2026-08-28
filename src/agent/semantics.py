@@ -350,7 +350,12 @@ _TRANSFORM_INPUTS = {
     "ROUTE_MEASURE": frozenset({"location", "network", "object"}),
     "ROUTE_MATRIX": frozenset({"location", "network", "object"}),
     "SELECT_LEGS": frozenset({"field", "network"}),
-    "ROUTE_EXTRACT": frozenset({"field"}),
+    # A tour is a route collection with a total, and `tsp_tw` now files that total under
+    # `distance_m`/`duration_s` as well as `total_cost`, so `extract_distance` and
+    # `sum_route_metrics` read it. "The shortest order, and how far is it" is drawn as
+    # ROUTE_EXTRACT over ROUTE_OPTIMIZE and was refused for a type while the number sat in the
+    # payload.
+    "ROUTE_EXTRACT": frozenset({"field", "network"}),
     # A route arrives typed by whichever transformation produced it: a FIELD from ROUTE_MEASURE,
     # an OBJECT from ROUTE_COMPARE's polymorphic output, a NETWORK from ROUTE_OPTIMIZE. Reading
     # its turns is the same operator in all three cases, and refusing two of them refuses a plan
@@ -368,7 +373,7 @@ _TRANSFORM_INPUTS = {
     "ORDINAL_SELECT": frozenset({"field", "object"}),
     "EXTREME_SELECT": frozenset({"amount", "field", "object"}),
     # Counting places is an aggregation, and a place may be typed LOCATION.
-    "AGGREGATE": frozenset({"amount", "field", "location", "object", "proportion"}),
+    "AGGREGATE": frozenset({"amount", "field", "location", "network", "object", "proportion"}),
     "MATCH_OPTIONS": frozenset({"amount", "event", "field", "network", "object", "proportion"}),
     "MEASURE": frozenset(
         {"amount", "event", "field", "location", "network", "object", "proportion"}

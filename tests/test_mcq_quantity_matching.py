@@ -209,3 +209,23 @@ def test_the_written_unit_does_not_override_the_number() -> None:
         ["약 18.6km", "약 13.4km", "약 14.5km", "약 17.4km"],
     )
     assert selection.index == 2
+
+
+def test_a_refusal_written_into_the_value_is_still_a_refusal() -> None:
+    """The core writes `정보 없음` as its value as often as it leaves it empty, and that was
+    being read as a name matching no option."""
+
+    selection = MCQAdapter().select(
+        _answer("정보 없음", "약국의 친절도에 대한 정보는 포함되어 있지 않아 판단할 수 없습니다."),
+        ["안국온누리약국", "남영약국", "주어진 지도 정보로는 알 수 없음", "안국3층약국"],
+    )
+    assert selection.index == 2
+    assert selection.method == "grounded_decline"
+
+
+def test_a_place_name_is_not_read_as_a_refusal() -> None:
+    selection = MCQAdapter().select(
+        _answer("정우티하우스", "가장 조용한 카페는 정우티하우스입니다."),
+        ["러비케이크", "주어진 지도 정보로는 알 수 없음", "카페우야우", "정우티하우스"],
+    )
+    assert selection.index == 3

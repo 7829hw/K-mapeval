@@ -240,11 +240,20 @@ def _match_declined(
 
 
 def _declined(value: object) -> bool:
-    """No measurement at all -- not a measurement that failed to match an option."""
+    """No measurement at all -- not a measurement that failed to match an option.
+
+    The core writes its refusal into the value as often as it leaves it empty: `정보 없음` is the
+    same answer as `None` and was being read as a name that matched no option.
+    """
 
     if value is None:
         return True
-    return isinstance(value, str) and value.strip() in {"", "없음", "알 수 없음", "N/A", "null"}
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    return text in {"", "없음", "N/A", "null"} or (
+        len(text) <= 12 and (_CANNOT_KNOW in text or "정보 없" in text or "정보없" in text)
+    )
 
 
 def _match_ordering(text: str, options: Sequence[str]) -> int | None:

@@ -290,6 +290,13 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   operators, the ordinal template and a drawn ordinal. Three passes against a floor of 23.5: ReAct
   51.0, Spatial-Agent 72.0. It was run again after intent removal at `af51e93`: Spatial-Agent
   86.0/83.0/83.0 (mean 84.0). It is spent and is no longer a held-out claim.
+  Read again at `ca41713` while closing the concept-geoflow regression, six passes at
+  concurrency 32 and budget 15: 67/74/68/68/67/71, mean 69.2, with three passes at `ca41713`
+  itself reading 77/77/72 (mean 75.3) just before. Treat ~70 as the level and neither triple as
+  the number: this set swings 15 to 50 points *per family* between draws on mechanisms that
+  cannot reach them -- `unanswerable_rating` moved +50 and `nearby_within_radius_count` -29
+  across a change that only added one key to a `tsp_tw` payload. Six passes, not three, before
+  quoting a family here.
 - `dataset/seoul_kmapeval_v7h2_holdout_100.jsonl`: seed 481203. Spent — `src/` changed in response
   to what it showed. ReAct 45.7, Spatial-Agent 72.3 at `38566f3`, floor 25.5. Intent-free
   Spatial-Agent at `af51e93` read 75.0/86.0/85.0 (mean 82.0); this is a level, not a controlled

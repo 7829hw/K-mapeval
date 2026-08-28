@@ -3355,3 +3355,48 @@ rule that a family number belongs to the draw it was measured on.
 Against `af51e93`'s 82.1% the remaining gap is about 13 points, from 22. It sits where the replay
 says this change never reached: `nearby_within_radius_count` 22.2, `nearby_cuisine_subtype` 38.9,
 `poi_distance_difference` 62.6 -- retrieve-then-narrow and pairwise-measure shapes, not routes.
+
+## Concept-GeoFlow regression, and what closing it changed
+
+`876c772` rewrote the planner's wire format to the Concept/Edge IR and left behind the
+conventions that made the previous one work. It scored 14/100 on
+`dataset/seoul_kmapeval_v7a_mcq_100.jsonl`; `58c0aad` before it read 76.95 on
+`seoul_kmapeval_v7a_mcq_300`. `reports/final_validation_876c772.md` records the state it was
+found in.
+
+The repairs divide into three kinds, and the division is the useful part.
+
+**Completion the step format had and the IR did not.** `plan_to_geoflow` completed the
+step-shaped reply — Analysis concepts in scope, factors derived from their attributes, a
+dangling reference dropped, a missing output typed by its transformation — and the IR path did
+none of it. `src/agent/canonicalization.py` is that completion for the IR: every repair is
+additive and last-resort, so a draft that already passes canonicalizes to itself, and a produced
+concept's type comes from the vocabulary rather than from the planner. It also resolves the
+places a measure reads when the graph never said to, hands a radius narrowing what it narrows,
+and reads a detour's second route as the one with a stop — that last from the subset relation
+between two routes' inputs, never from where an input sat.
+
+**Conventions the prompt used to state.** `via`, "copy a place name verbatim", "the first input
+of a search or a route is the place it is measured from", and "an itinerary is one ROUTE_MATRIX"
+were all in the old `GRAPH_PROMPT` and none survived the rewrite. Restoring them helped;
+`AGENTS.md`'s warning against tuning prompts still holds, and the one addition that was a
+taxonomy rather than a convention — the semantic factor vocabulary — cost 9 points and was
+reverted.
+
+**Stages that could not see their own input.** `retrieve_macro_templates` ranked against factors
+derived from concept attributes alone, so `ROUTE-OPTIMIZE` was never offered for the itinerary
+questions that state a time budget and stays. Grounding read `len(names) == len(options) + 1` as
+proof that a batch is [anchor, *options] long after MCQ matching left the core and `options`
+became always empty. `tsp_tw` computed an order and reported only indices, and a total only as
+`total_cost`.
+
+`MCQAdapter` reconciles by rounding rather than nearness, matches an ordering by the order the
+answer names it in, and reads a decline against `알 수 없음` only when nothing else matched, the
+core produced no value at all, and no step raised. That last guard is what keeps it from
+becoming the escape hatch `AGENTS.md` records: measured, it fires 13 times and is right 10.
+
+Held out at `ca41713`, six passes at concurrency 32 and budget 15:
+`seoul_kmapeval_v7h3_holdout_100` reads 69.2, against 72.0 for that set at `8797217` and 84.0 at
+`af51e93`. The step budget is not what separates them —
+`reports/step_budget_ablation_354e3dd.md` shows budget 30 leaving the overall flat while lifting
+one family 38 points.

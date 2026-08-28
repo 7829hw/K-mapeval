@@ -14,6 +14,11 @@ measured and written up:
   ladder. Both were three-way questions printed as four-way ones.
 - **The gold written into its own question**, which the option-listing families risk by design.
 - **Duplicate options**, where two rows of the option set are the same string.
+- **A `context` field on a generated row.** MapEval-Textual ships the annotator's collected
+  evidence beside the question and MapEval-API is that file with the field removed, which is the
+  arrangement this port measures in: every run answers from live Kakao. A generated row carrying
+  one is an answer key sitting in the dataset. `dataset/seoul_mapeval_v1_mcq_100.jsonl` predates
+  the rule and is exempt -- it carries no `mapeval_class`, which is what tells the two apart.
 
 None of these is visible in an accuracy, and the no-tool floor only catches the ones a model
 happens to exploit. Run this after every build, before the floor:
@@ -77,6 +82,13 @@ def audit(path: Path) -> list[str]:
         by_family[row.get("template_id") or row.get("classification") or "?"].append(row)
 
     for row in rows:
+        # A row a generator here wrote states its MapEval-API class; a legacy MapEval-Textual row
+        # does not, and its `context` is retained for provenance.
+        if row.get("mapeval_class") and "context" in row:
+            findings.append(
+                f"{row['id']}: carries a `context` field -- the evidence a question is answered "
+                "from is live Kakao, and a stored one is an answer key"
+            )
         options = row["options"]
         if len(set(options)) != len(options):
             findings.append(f"{row['id']}: duplicate options {options}")

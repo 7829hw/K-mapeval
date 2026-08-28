@@ -55,6 +55,7 @@ from pathlib import Path
 from benchmark_core import (
     Builder,
     Place,
+    candidate_groups,
     distance_m,
     eul,
     eun,
@@ -479,10 +480,9 @@ def poi_distance_difference(
     """
 
     landmarks = pool.of("AT4", "CT1", "SW8", "MT1")
-    rng.shuffle(landmarks)
     made: list[dict] = []
     used: set[str] = set()
-    for anchor, near, far in itertools.combinations(landmarks[:150], 3):
+    for anchor, near, far in candidate_groups(landmarks, 3, rng, count):
         if len(made) >= count:
             break
         if any(place.place_id in used for place in (anchor, near, far)):
@@ -538,10 +538,9 @@ def poi_farthest_of_three(
     """
 
     landmarks = pool.of("AT4", "CT1", "SW8", "MT1")
-    rng.shuffle(landmarks)
     made: list[dict] = []
     used: set[str] = set()
-    for anchor, a, b, c in itertools.combinations(landmarks[:55], 4):
+    for anchor, a, b, c in candidate_groups(landmarks, 4, rng, count):
         if len(made) >= count:
             break
         if any(place.place_id in used for place in (anchor, a, b, c)):
@@ -600,11 +599,10 @@ def routing_detour_cost(
 
     origins = pool.of("SW8", "AD5")
     waypoints = pool.of("AT4", "CT1", "MT1")
-    rng.shuffle(origins)
     rng.shuffle(waypoints)
     made: list[dict] = []
     used: set[str] = set()
-    for origin, destination in itertools.combinations(origins[:80], 2):
+    for origin, destination in candidate_groups(origins, 2, rng, count):
         if len(made) >= count:
             break
         if origin.place_id in used or destination.place_id in used:
@@ -678,11 +676,10 @@ def routing_nth_turn(
     """
 
     places = pool.of("SW8", "AT4", "CT1")
-    rng.shuffle(places)
     made: list[dict] = []
     used: set[str] = set()
     routes: list[tuple[Place, Place, list]] = []
-    for origin, destination in itertools.combinations(places[:140], 2):
+    for origin, destination in candidate_groups(places, 2, rng, count * 3):
         if len(routes) >= count * 3:
             break
         if origin.place_id in used or destination.place_id in used:
@@ -758,11 +755,10 @@ def routing_turn_count_via(
     ops = SpatialOperatorRegistry()
     places = pool.of("SW8", "AT4", "CT1")
     stops = pool.of("MT1", "AD5")
-    rng.shuffle(places)
     rng.shuffle(stops)
     made: list[dict] = []
     used: set[str] = set()
-    for origin, destination in itertools.combinations(places[:110], 2):
+    for origin, destination in candidate_groups(places, 2, rng, count):
         if len(made) >= count:
             break
         if origin.place_id in used or destination.place_id in used:

@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import json
 import math
+import random
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -23,10 +24,12 @@ from src.tools.spatial import haversine_meters  # noqa: E402
 
 __all__ = [  # re-exported so the generator imports one module
     "CATEGORY_NOUNS",
+    "MAPEVAL_API_CLASS_MIX",
     "Builder",
     "Place",
     "Route",
     "RouteStep",
+    "candidate_groups",
     "cardinal",
     "distance_m",
     "eul",
@@ -41,6 +44,19 @@ __all__ = [  # re-exported so the generator imports one module
 ]
 
 POOL_PATH = Path(__file__).with_name("seoul_kakao_pool.json")
+
+# What MapEval-API's own annotators wrote, counted off `mapeval-api/dataset.json`: 300 questions
+# split by task category. Every family quota in this repository is this mix at a hundred rows,
+# which is why they come to 28 / 21 / 22 / 22 / 7 rather than to round numbers -- and why a build
+# that ships short in one family is not just a smaller benchmark but a differently proportioned
+# one. `docs/REFERENCE_MAPPING.md` records the count and the file it came from.
+MAPEVAL_API_CLASS_MIX = {
+    "nearby": 83,
+    "poi": 64,
+    "routing": 66,
+    "trip": 67,
+    "unanswerable": 20,
+}
 
 # A name an agent cannot look back up is not a usable option, however good the geometry is.
 ROUND_TRIP_TOLERANCE_M = 200.0
@@ -67,6 +83,48 @@ NAME_REJECT_TOKENS = (
     "코스", "둘레길", "자락길", "산책로", "명예도로", "문화의거리", "먹자골목",
     "출입구", "주차장", "입구", "방면", "정류장", "환승", "본점영업부",
 )
+
+
+def candidate_groups(
+    items: Sequence[Any],
+    size: int,
+    rng: random.Random,
+    count: int,
+    *,
+    floor: int = 24,
+) -> Iterator[tuple[Any, ...]]:
+    """Offer disjoint tuples of `size` items until a family has had its chances.
+
+    What this replaces is `itertools.combinations(items[:N], size)`, and that scan has two defects
+    that only show once a build is asked for more rows than the constant `N` was sized for. Every
+    family using it retires the places it spends into a `used` set, so `N` caps the family at
+    `N // size` rows however many are asked for: `poi_farthest_of_three` scanned 55 landmarks four
+    at a time and could never produce a fourteenth row, which is why `--count 300` came back 281 to
+    283 across five draws. And raising `N` does not fix it -- the enumeration is combinatorial
+    while `used` skips nearly all of it, so 360 landmarks taken four at a time is 1.7 billion
+    tuples to walk for thirty rows.
+
+    Drawing disjoint groups from a reshuffled list instead is linear in what it offers, spends the
+    whole pool rather than its first `N` entries, and grows with `count` the way `_scan_limit`
+    does. The tuple order within a group is the shuffle's, so a caller that treats its first item
+    as an anchor still gets one drawn at random.
+    """
+
+    if size < 1 or len(items) < size:
+        return
+    # Eight offers per row the family owes: the geometric filters in front of the Kakao
+    # round-trips reject most groups, and a family that runs out of offers is a family that
+    # silently ships short.
+    budget = max(floor, count * 3) * 8
+    offered = 0
+    order = list(items)
+    while offered < budget:
+        rng.shuffle(order)
+        for start in range(0, len(order) - size + 1, size):
+            if offered >= budget:
+                return
+            offered += 1
+            yield tuple(order[start : start + size])
 
 
 def load_pool() -> list[dict[str, Any]]:

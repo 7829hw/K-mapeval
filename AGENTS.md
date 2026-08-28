@@ -137,6 +137,19 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   architecture won it. So a family or class number belongs to the draw it was measured on: quote
   it across draws, or quote it as one draw's. Read it as lift over that draw's own floor, because
   a redraw moves the floor too.
+- `--count N` builds exactly N questions, and the family quotas are MapEval-API's own class mix
+  counted off `mapeval-api/dataset.json` -- nearby 83, poi 64, routing 66, trip 67, unanswerable 20
+  per 300. Both halves matter and only one of them was true: `apportion` split the count exactly
+  while `poi_farthest_of_three` scanned a 55-landmark slice four at a time and could never draw a
+  fourteenth row, so all five 300-row draws came back 281-283 with `poi` at 16% of the file
+  instead of 21%. A scan bound is `candidate_groups`/`_scan_limit`, never a constant; a family
+  that still comes up short is frozen at what it drew and its rows go to families of the same
+  class, so the file keeps both the count and the mix; and a build that cannot reach the count
+  exits non-zero rather than writing a smaller file. Do not read a `poi` number off a set built
+  before this and one built after as the same measurement.
+- A generated row never carries a `context` field. MapEval-API is MapEval-Textual with exactly
+  that field removed, every run here answers from live Kakao, and `data/audit_dataset.py` fails a
+  row that has one. Only `dataset/seoul_mapeval_v1_mcq_100.jsonl` keeps its own, for provenance.
 - Run `python data/audit_dataset.py <dataset>` after every build and before the floor. It exits
   non-zero on a second answer key: a gold sitting at a fixed rank once the options are sorted, an
   option that can never be the answer, a gold whose text appears in its own question, duplicate
@@ -168,8 +181,9 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   rank gaps fall under `ORDINAL_MARGIN_M` and the second searches a sparse subtype where a fifth
   do. One audit failure is a draw; five in one family and none in its twin is a generator defect,
   and the lever is the pool or the margin, not the scan. Run today, `data/audit_dataset.py` exits
-  non-zero on 13 of the 16 sets in `dataset/` — every one of them for `nearby_kth_nearest` alone
-  — and only `v7a`, `v7b` and `v7h3` are clean. So do not read "passes the audit" off a benchmark
+  non-zero on 14 of the 17 sets in `dataset/` — every one of them for `nearby_kth_nearest` alone
+  — and only `v7a`, `v7b` and `v7h3` are clean. `v8` is the sixth draw in a row this family has
+  skewed, at 17 of 24. So do not read "passes the audit" off a benchmark
   entry written before the k-balance rule existed; re-run it. Until the pool or the margin
   changes, `nearby_kth_nearest` is not quotable on any of those 13, and nothing else in them is
   affected.
@@ -211,6 +225,22 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
 - Run every benchmark at `--concurrency 32`. It is what every recorded v7 run used, and a report at
   another concurrency is a different run condition — check `metadata.concurrency` before setting
   two numbers beside each other.
+- `dataset/seoul_kmapeval_v8_mcq_300.jsonl`: the first draw that is 300 questions rather than
+  281-283, built at `81efc7b` plus the builder fix and run at `81efc7b` itself — `src/` was not
+  touched, so it is **held out**: nothing under `src/` has been tuned against it. 300 rows, floor
+  26.7 (22.2 excluding `unanswerable_*`), ReAct 46.3/48.0/44.3 (mean 46.2), Spatial-Agent
+  73.3/71.7/71.7 (mean 72.2) over three passes a side at concurrency 32, gap 26.0 — outside either
+  agent's own spread (3.7 and 1.7). It is the first set whose class mix is the one the quotas
+  encode: nearby 84 / poi 63 / routing 66 / trip 66 / unanswerable 21, against MapEval-API's
+  83/64/66/67/20 per 300. Earlier draws carried `poi` at 45-46 rows because
+  `poi_farthest_of_three` capped at 13, so this is also the first `poi` number measured at
+  upstream's proportion: ReAct 27.0, Spatial-Agent 82.5, the widest class gap on the set at 55.6.
+  Two families invert, and both are ladders the floor already answers well —
+  `nearby_within_radius_count` ReAct 77.8 against 41.7, `trip_feasible_count_five` 69.8 against
+  46.0 — as does the `unanswerable` class, 88.9 against 57.1. **Fails `data/audit_dataset.py`** on
+  `nearby_kth_nearest` (17 of 24 at k=2), so that family alone is not quotable; the overall,
+  every class and every other family stand. Keep it held out: fix any bug this run exposes against
+  a set in `dataset/` and rebuild under a new seed before quoting it again.
 - `dataset/seoul_kmapeval_v7d_mcq_300.jsonl`: the fifth 300-question draw, built and run at
   `c7d49cb` (= `a50096a` plus the context-provider deletion, a path these runs never took). 281
   rows. Floor 27.4 (21.9 excluding `unanswerable_*`), ReAct 47.6, Spatial-Agent 80.4 over three
@@ -349,7 +379,7 @@ Python 3.11 or newer is required.
 python -m venv .venv
 source .venv/bin/activate
 pip install -e '.[dev]'
-cp example.env .env
+cp .env.example .env
 
 pytest
 ruff check .

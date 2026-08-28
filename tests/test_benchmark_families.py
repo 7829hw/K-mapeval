@@ -16,6 +16,7 @@ DATA = Path(__file__).resolve().parents[1] / "data"
 if str(DATA) not in sys.path:
     sys.path.insert(0, str(DATA))
 
+from benchmark_core import MAPEVAL_API_CLASS_MIX, candidate_groups  # noqa: E402
 from build_mapeval_v6_benchmark import (  # noqa: E402
     ORDINAL_SCAN_FLOOR,
     _scan_limit,
@@ -206,3 +207,133 @@ def test_the_stored_label_beats_the_derivation_where_they_disagree() -> None:
     assert resolved["unanswerable"] == 21
     assert derived["unanswerable"] == 0
     assert derived["nearby"] - resolved["nearby"] == 21
+
+
+# --------------------------------------------------------------------------------------------
+# The scan that hunts for candidates has to grow with the build too.
+# --------------------------------------------------------------------------------------------
+
+
+def test_a_group_scan_offers_enough_disjoint_tuples_for_a_big_build() -> None:
+    """`itertools.combinations(items[:55], 4)` could never hand a family a fourteenth row.
+
+    Every family that spends its places retires them into a `used` set, so a constant slice caps
+    the family at `slice // size` rows however many are asked for. That is why `--count 300` came
+    back 281 to 283 across five draws, every one of them short in `poi_farthest_of_three`, and why
+    the `poi` class landed at 16% of those files against the 21% its quota encodes.
+    """
+
+    items = list(range(600))
+    rng = random.Random(0)
+    groups = list(candidate_groups(items, 4, rng, 30))
+    # Disjoint within a group, so a row never spends the same place twice.
+    assert all(len(set(group)) == 4 for group in groups)
+    # And enough distinct ones to fill thirty rows many times over, which the 55-item slice --
+    # thirteen disjoint quadruples in total -- could not do at any budget.
+    spent: set[int] = set()
+    rows = 0
+    for group in groups:
+        if any(item in spent for item in group):
+            continue
+        spent.update(group)
+        rows += 1
+    assert rows >= 30
+
+
+def test_a_group_scan_stays_linear_in_what_it_offers() -> None:
+    """Raising the slice instead would have made the enumeration combinatorial.
+
+    360 landmarks taken four at a time is 1.7 billion tuples, and `used` skips nearly all of them,
+    so the fix cannot be a bigger constant.
+    """
+
+    rng = random.Random(0)
+    offered = list(candidate_groups(list(range(600)), 4, rng, 30))
+    assert len(offered) == max(24, 30 * 3) * 8
+
+
+def test_a_group_scan_spends_the_whole_pool_not_its_first_entries() -> None:
+    """The slice also decided *which* places a family could ever draw from."""
+
+    rng = random.Random(0)
+    seen = {item for group in candidate_groups(list(range(600)), 2, rng, 40) for item in group}
+    assert len(seen) == 600
+
+
+# --------------------------------------------------------------------------------------------
+# The class mix, which is what the family quotas are for.
+# --------------------------------------------------------------------------------------------
+
+
+def _family_classes(rows: list[dict], families: list[str]) -> dict[str, str]:
+    """Which MapEval-API class each family writes, read off a set the family actually built.
+
+    Derived rather than declared: a second table naming the class of every family is a table that
+    drifts from the rows. The `unanswerable` family writes one template per missing attribute
+    (`unanswerable_rating`, `unanswerable_opening_hours`, ...), so a family with no template of
+    its own name is matched against the templates it prefixes.
+    """
+
+    by_template = {row["template_id"]: row["mapeval_class"] for row in rows}
+    resolved: dict[str, str] = {}
+    for family in families:
+        if family in by_template:
+            resolved[family] = by_template[family]
+            continue
+        prefixed = {
+            mapeval_class
+            for template, mapeval_class in by_template.items()
+            if template.startswith(f"{family}_")
+        }
+        assert len(prefixed) == 1, family
+        resolved[family] = prefixed.pop()
+    return resolved
+
+
+def test_the_standard_builders_quotas_are_upstreams_class_mix() -> None:
+    """MapEval-API is nearby 83 / poi 64 / routing 66 / trip 67 / unanswerable 20 over 300 rows.
+
+    The quotas are that mix at a hundred, and they have to stay it: pooling a class measured at a
+    different proportion against upstream's 71.07% compares two different benchmarks. Counted off
+    `mapeval-api/dataset.json`; see `docs/REFERENCE_MAPPING.md`.
+    """
+
+    import build_kmapeval_dataset
+
+    rows = [
+        json.loads(line)
+        for line in (
+            Path(__file__).resolve().parents[1]
+            / "dataset"
+            / "seoul_kmapeval_v7d_mcq_300.jsonl"
+        ).read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    families = [name for name, _, _ in build_kmapeval_dataset.FAMILIES]
+    classes = _family_classes(rows, families)
+    quotas: Counter[str] = Counter()
+    for name, _, quota in build_kmapeval_dataset.FAMILIES:
+        quotas[classes[name]] += quota
+
+    assert set(quotas) == set(MAPEVAL_API_CLASS_MIX)
+    upstream_total = sum(MAPEVAL_API_CLASS_MIX.values())
+    for mapeval_class, upstream in MAPEVAL_API_CLASS_MIX.items():
+        share = 100 * upstream / upstream_total
+        assert abs(quotas[mapeval_class] - share) <= 1, (mapeval_class, quotas[mapeval_class])
+
+
+@pytest.mark.parametrize(
+    "path",
+    [path for path in DATASETS if path.name != "seoul_mapeval_v1_mcq_100.jsonl"],
+    ids=lambda path: path.name,
+)
+def test_no_generated_row_carries_the_annotators_context(path: Path) -> None:
+    """MapEval-API is MapEval-Textual with `context` removed, and that is what is measured here.
+
+    Every run answers from live Kakao; a stored evidence block beside the question would be an
+    answer key. `dataset/seoul_mapeval_v1_mcq_100.jsonl` keeps its own for provenance and is not
+    in this list.
+    """
+
+    for row in _rows(path):
+        assert "context" not in row, f"{path.name}:{row['id']}"

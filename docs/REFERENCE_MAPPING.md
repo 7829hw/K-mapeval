@@ -3544,3 +3544,104 @@ finding — a stage that cannot see its own input — and the same repair would 
 undone deliberately: handing a fact to the template that would win a family with it is a family
 patch by effect, and the export also feeds `attach_grounding_factors`, so widening it changes
 grounding and not only ranking.
+
+## `--count` was a request, not a count, and it moved the class mix
+
+`--count 300` produced 281, 282, 282, 283 and 283 rows on the five draws in `dataset/`. The
+apportionment was never the problem — `apportion` splits the quotas by largest remainder and sums
+to exactly what was asked for — and neither was any single unlucky draw: every one of the five is
+short in the same family.
+
+| family | apportioned | drawn (v7, v7a, v7b, v7c, v7d) |
+| --- | --- | --- |
+| `poi_farthest_of_three` | 30 | 13 / 12 / 13 / 12 / 13 |
+| every other family | as apportioned | as apportioned, but for `nearby_subtype_kth` 28 once |
+
+Thirteen is not a coincidence. The family scanned `itertools.combinations(landmarks[:55], 4)` and
+retires all four of a row's places into a `used` set, so 55 landmarks is 13 disjoint quadruples and
+the fourteenth row could not exist at any `--count`. The same constant-slice scan sits in four
+other families (`poi_distance_difference` at 150, `routing_detour_cost` at 80, `routing_nth_turn`
+at 140, `routing_turn_count_via` at 110); none of them binds at 300 rows, and all of them bind
+somewhere above it. It is the defect `AGENTS.md` already records for `nearby_kth_nearest` — a scan
+bound that does not grow with `count` — in a second place.
+
+**What it cost is not the seventeen rows.** The quotas are MapEval-API's own class mix, counted off
+`mapeval-api/dataset.json`: nearby 83, poi 64, routing 66, trip 67, unanswerable 20 over 300
+questions. `poi` is the only class with one wide family and one narrow one, so seventeen rows off
+`poi_farthest_of_three` came off `poi` entire: those files carry 45 or 46 `poi` rows against the 63
+the quotas encode, 16% of the set instead of 21%. Upstream's 71.07% is a mean over its own mix, and
+a mean over a different one is not comparable to it.
+
+Two changes, in `data/benchmark_core.py` and `data/builder_cli.py`:
+
+- **`candidate_groups(items, size, rng, count)`** replaces the five constant-slice scans. It offers
+  disjoint tuples drawn from a reshuffled pool, budgeted at `max(24, count * 3) * 8` offers, so it
+  grows with the build the way `_scan_limit` already did and spends the whole pool rather than its
+  first *N* entries. Raising the constant instead is not available: 360 landmarks taken four at a
+  time is 1.7 billion tuples and `used` skips nearly all of them.
+- **Top-up rounds.** A family that still comes up short — because the city genuinely ran out of
+  anchors it can use, which no scan bound fixes — is frozen at what it drew and its remaining rows
+  are handed to families that filled their share, *of the same MapEval-API class first*. So the
+  file holds the count the caller asked for and keeps the mix. A redraw runs under its own stream
+  (`f"{seed}:{name}:{attempt}"`) and rows are deduplicated on question text. If after three rounds
+  the pool still cannot supply the count, the build exits non-zero naming the short families rather
+  than writing a file that is quietly smaller than the number on its command line.
+
+`data/audit_dataset.py` gained one more check while this was being fixed: a generated row must not
+carry a `context` field. No builder here has written one since v1 — MapEval-API is MapEval-Textual
+with exactly that field removed, and every run here answers from live Kakao — so the check pins
+what is already true rather than changing it. The v1 legacy file keeps its own for provenance and
+is exempt, which its missing `mapeval_class` is what identifies.
+
+**What this does to the earlier draws.** Nothing: v7 through v7d are the files they were, and their
+recorded accuracies are what the code scored on them. But their `poi` class was measured on 45 rows
+where the quotas asked for 63, so a `poi` number from one of those files and a `poi` number from a
+set built after this fix are not the same measurement, and the overall accuracies sit on slightly
+different mixes. Read them as this document already requires family numbers to be read — as
+belonging to the draw they were measured on.
+
+## v8: the first draw that is the size it was asked for, and the first `poi` at upstream's share
+
+Built by `data/build_kmapeval_dataset.py --count 300` with the two fixes above, run at `81efc7b`
+with nothing under `src/` touched, so it is held out. Three passes a side, concurrency 32,
+`--react-tools reference`, temperature 0, `MAX_REASONING_STEPS` 15.
+
+| | passes | mean | spread |
+| --- | --- | --- | --- |
+| no-tool floor | 80/300 | **26.7** | — |
+| floor excluding `unanswerable_*` | 62/279 | **22.2** | — |
+| ReAct | 46.3 / 48.0 / 44.3 | **46.2** | 3.7 |
+| Spatial-Agent | 73.3 / 71.7 / 71.7 | **72.2** | 1.7 |
+
+Gap 26.0, outside either agent's own spread. That sits at the low end of the 27-33 the five
+281-283-row draws reported, and the reason is visible in the class table rather than in the
+overall: the class whose row count changed is the class that moved.
+
+| class | rows | rows on v7-v7d | ReAct | Spatial-Agent | gap |
+| --- | --- | --- | --- | --- | --- |
+| nearby | 84 | 82-84 | 55.2 | 77.8 | 22.6 |
+| poi | **63** | **45-46** | 27.0 | 82.5 | **55.6** |
+| routing | 66 | 66 | 36.4 | 69.2 | 32.8 |
+| trip | 66 | 66 | 49.5 | 63.1 | 13.6 |
+| unanswerable | 21 | 21 | 88.9 | 57.1 | -31.7 |
+
+`poi` is the first measurement of that class at the proportion the quotas encode — 21% of the set
+rather than 16% — and it is the widest class gap here, ReAct 27.0 against Spatial-Agent 82.5. Both
+its families agree and neither is close: `poi_distance_difference` 26.3 / 81.8 and
+`poi_farthest_of_three` 27.8 / 83.3, +55.6 apiece. Against a floor of 26.7 the baseline is not
+measuring on `poi` at all — 27.0 is the floor — which is the same reading v7d recorded for
+`distance` and `routing`, now on the class upstream weights second-heaviest.
+
+**Three families invert, and all three are cheap to guess.** `nearby_within_radius_count` (ReAct
+77.8, Spatial-Agent 41.7), `trip_feasible_count_five` (69.8 / 46.0) and the whole `unanswerable`
+class (88.9 / 57.1). All three are ladders or refusals whose floor is already high — 5/12, 10/21
+and 18/21 respectively on the no-tool run — so what they measure is closer to a prior over four
+fixed strings than to a map. `trip` as a class is dragged by exactly this: it is 63.1 for
+Spatial-Agent against 70.8 and 71.4 on its two non-ladder families.
+
+**One draw, one caveat.** `data/audit_dataset.py` exits non-zero on `nearby_kth_nearest`, 17 of 24
+rows at k=2. That is the sixth consecutive draw this family has skewed and the second-best of the
+six; the cause is recorded in `AGENTS.md` — it anchors on Seoul's four densest chain categories,
+where half of consecutive rank gaps fall under `ORDINAL_MARGIN_M` — and the lever is the pool or
+the margin, not the scan this change fixed. That family's 44.4 / 77.8 is not quotable; nothing
+else on the set is affected.

@@ -114,6 +114,11 @@ it passes through, in the order it reaches them. "A에서 B를 들러 C까지" i
 with B in via, never two routes and never a route that forgets B. Leave via out when the route
 passes through nothing; it is never inferred from where an input happens to sit.
 
+An itinerary's legs come from one ROUTE_MATRIX over its stops, not one ROUTE_MEASURE per leg. A
+five-stop trip written leg by leg spends five routes, five extracts and six aggregates and does
+not fit {max_steps} transformations, so it is refused before it runs. Stays and time budgets are
+factors on that itinerary, not places to add up.
+
 A drive between two stated places is one ROUTE_MEASURE, whatever the question asks about it.
 "Shortest", "fastest" and "by distance" are objectives on that one route -- say them as factors,
 not as a different transformation. ROUTE_MATRIX and ROUTE_OPTIMIZE are for an itinerary of three

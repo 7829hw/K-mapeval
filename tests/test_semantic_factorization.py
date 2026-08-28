@@ -749,3 +749,34 @@ def test_an_aggregate_computes_the_relation_its_factor_names() -> None:
     assert measure({"aggregate": "count"}) == "count_items"
     # The default stays a sum, which is why the factor has to be said rather than inferred.
     assert measure({}) == "sum_amounts"
+
+
+def test_retrieval_ranks_templates_against_the_questions_own_facts() -> None:
+    """`ROUTE-OPTIMIZE` exists for "how many of these stops fit the time I have", and its whole
+    affinity is the time budget and the stays. Retrieval was ranking against the factors
+    derivable from the Analysis stage's concept attributes alone, which is an empty list on every
+    itinerary question here -- so that template was never offered for the questions it is for,
+    and the planner unrolled the trip leg by leg into 22 transformations against a budget of 15.
+    """
+
+    from dataclasses import dataclass
+
+    from src.agent.factorization import grounding_factor_nodes
+    from src.agent.retrieval import retrieve_macro_templates
+
+    @dataclass
+    class _Facts:
+        time_budget_s: float = 7200.0
+        stays: tuple[tuple[str, float], ...] = (("A", 3600.0), ("B", 3600.0))
+
+    concepts = [
+        {"id": "anchor", "core_concept": "location", "functional_role": "extent"},
+        {"id": "stops", "core_concept": "object", "functional_role": "support"},
+        {"id": "count", "core_concept": "amount", "functional_role": "measure"},
+    ]
+    without = [t.name for t in retrieve_macro_templates(concepts, [])]
+    with_facts = [
+        t.name for t in retrieve_macro_templates(concepts, grounding_factor_nodes(_Facts()))
+    ]
+    assert "ROUTE-OPTIMIZE" not in without
+    assert "ROUTE-OPTIMIZE" in with_facts

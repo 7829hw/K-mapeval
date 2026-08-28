@@ -294,10 +294,14 @@ def route_through_the_stated_stop(graph: GeoFlowGraph, facts: Any) -> GeoFlowGra
     return GeoFlowGraph(graph.concept_nodes, edges, graph.factor_nodes, graph.metadata)
 
 
-def attach_grounding_factors(graph: GeoFlowGraph, facts: Any) -> GeoFlowGraph:
-    """Promote deterministic typed facts to FactorNodes and connect them to hyperedges."""
+def grounding_factor_nodes(facts: Any) -> tuple[FactorNode, ...]:
+    """The question's typed facts as explicit factor vertices.
 
-    graph = route_through_the_stated_stop(graph, facts)
+    Shared with macro-template retrieval, which had been ranking templates against the factors
+    derivable from the Analysis stage's concept attributes alone -- an empty list on every
+    itinerary question, so `ROUTE-OPTIMIZE`, whose whole affinity is the time budget and the
+    stays, was never retrieved for the questions that state exactly those.
+    """
 
     values = {
         "radius_m": getattr(facts, "radius_m", None),
@@ -308,8 +312,7 @@ def attach_grounding_factors(graph: GeoFlowGraph, facts: Any) -> GeoFlowGraph:
         "return_to_start": getattr(facts, "returns_to_start", None),
         "fixed_order": getattr(facts, "stated_order", None),
     }
-    existing = {factor.factor_type for factor in graph.factor_nodes}
-    added = [
+    return tuple(
         FactorNode(
             id=f"factor_fact_{name}",
             factor_type=name,
@@ -317,7 +320,17 @@ def attach_grounding_factors(graph: GeoFlowGraph, facts: Any) -> GeoFlowGraph:
             attributes={"source": "typed_question_fact"},
         )
         for name, value in values.items()
-        if name not in existing and value not in (None, "", (), [], False)
+        if value not in (None, "", (), [], False)
+    )
+
+
+def attach_grounding_factors(graph: GeoFlowGraph, facts: Any) -> GeoFlowGraph:
+    """Promote deterministic typed facts to FactorNodes and connect them to hyperedges."""
+
+    graph = route_through_the_stated_stop(graph, facts)
+    existing = {factor.factor_type for factor in graph.factor_nodes}
+    added = [
+        factor for factor in grounding_factor_nodes(facts) if factor.factor_type not in existing
     ]
     if not added:
         return graph

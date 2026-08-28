@@ -18,6 +18,7 @@ from src.agent.concepts import ConceptNode, factor_nodes_from_concepts
 from src.agent.factorization import (
     attach_grounding_factors,
     factorize_plan,
+    grounding_factor_nodes,
     plan_to_geoflow,
 )
 from src.agent.geoflow import (
@@ -309,7 +310,14 @@ class SpatialAgent(BenchmarkAgent):
                 ConceptNode.from_dict(value, fallback_id=f"c{index + 1}")
                 for index, value in enumerate(runtime_analysis.get("concepts") or ())
             ]
-            typed_factors = factor_nodes_from_concepts(typed_concepts)
+            # The question's own typed facts rank templates too. Without them retrieval saw an
+            # empty factor list on every itinerary question, so `ROUTE-OPTIMIZE` -- whose whole
+            # affinity is the time budget and the stays -- was never offered for the questions
+            # that state exactly those, and the planner unrolled the trip leg by leg instead.
+            typed_factors = (
+                *factor_nodes_from_concepts(typed_concepts),
+                *grounding_factor_nodes(facts),
+            )
             retrieved_templates = retrieve_macro_templates(
                 runtime_analysis.get("concepts") or [], typed_factors
             )

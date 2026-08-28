@@ -177,8 +177,16 @@ def retrieve_macro_templates(
     factor_types = {factor.factor_type for factor in factors}
     scored: list[tuple[int, str, MacroTemplate]] = []
     for key, template in MACRO_TEMPLATES.items():
-        accepted = set().union(*(port.core_concepts for port in template.input_ports))
-        score = 2 * len(cores & accepted)
+        # What the fragment *computes over*, not what its ports permit. Ranking on the union of
+        # the input ports made declaring a port a ranking advantage: `TIME-WINDOW-REVERSE` needs
+        # a second, temporal port for its clock input, and that alone scored it 3 where every
+        # rival scored 2 on any question carrying an `amount` or an `event` -- which is most of
+        # them. Measured over 332 recorded analyses it was offered 79 times, including 22 of 30
+        # straight-line distance questions and every `unanswerable_opening_hours` row, while
+        # `ROUTE-STEP-EXTRACT` was offered zero times for the 28 turn-count rows whose shape it
+        # is, because it tied two route templates that sort ahead of it by key name.
+        computed_over = {node.core_concept for node in template.concept_nodes}
+        score = 2 * len(cores & computed_over)
         score += 4 * len(factor_types & template.factor_affinity)
         if "network" in cores and "ROUTE" in template.name:
             score += 4

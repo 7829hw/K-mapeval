@@ -3440,5 +3440,107 @@ ahead of `MULTI-ROUTE-COMPARE` and `OBJECT-FIELD-MEASURE` on the alphabetical ti
 prompt a tied question receives is different. Nothing about grounding, factorization or the
 operator set moved, so `data/replay_grounding.py` cannot measure this: templates change the
 planner's *vocabulary of shapes*, and graphs recorded before a shape was retrievable never use it.
-Reading it costs a run. No benchmark has been run against this change and no accuracy is claimed
-for it.
+Reading it costs a run, which is what the next section is.
+
+### Measured: ten templates against five, same revision
+
+`seoul_kmapeval_v7h3_holdout_100`, Spatial-Agent only, three passes a side at concurrency 32 and
+budget 15, the two arms differing only in `src/agent/templates.py` and the example-store rows in
+`src/agent/retrieval.py`.
+
+| arm | passes | mean | terminal failures over 300 rows |
+| --- | --- | --- | --- |
+| ten templates | 66 / 67 / 70 | **67.7** | 44 parse, 33 graph-validation, 10 provider |
+| five templates | 70 / 72 / 62 | **68.0** | 45 parse, 33 graph-validation, 11 provider |
+
+The overall difference is -0.3 points against a five-pass spread that puts this set's own three
+passes 10 points apart in the baseline arm alone, so it is not a difference. The failure
+counts are the readable half: the five added priors changed neither the number of graphs the
+validator refused nor the number of answers that failed to parse, which is what "the planner can
+use these fragments" looks like. Every family number moved — `trip_feasible_count_five` +23.8,
+`unanswerable_price_level` -66.7 on three rows — and none of them is quotable: `AGENTS.md`
+requires six passes before a family is quoted on this set, and the `unanswerable_*` families are
+three rows each, where one question is 33 points.
+
+The prompt really did change. Over the 290 questions of the ten-template arm that reached
+retrieval, `GEOCODE-BATCH-COMPARE` was offered 95 times and `TIME-WINDOW-REVERSE` 79 — so more
+than half the set was planned from a prior that did not exist before, and the score did not move.
+That is the same shape as the intent-removal result above: a large change in what the planner is
+shown, no change in what it scores.
+
+**Three of the five were never retrieved once.** `LOCATION-BEARING-CLASSIFY` and
+`PLACE-ATTRIBUTE-QUERY` have no family in this set, which is expected. `ROUTE-STEP-EXTRACT` does
+— `routing_nth_turn` and `routing_turn_count_via` are 28 of the 100 rows and its edges are
+exactly their shape — and it is *structurally unreachable* for them: on a turn-count concept set
+it ties `MULTI-ROUTE-COMPARE` and `ROUTE-OPTIMIZE` at the same score, both sort ahead of it
+alphabetically, and the two slots are gone. Its `metric` affinity cannot break the tie because
+`MULTI-ROUTE-COMPARE` claims `metric` too. The template exists and cannot be offered for the
+questions it describes. That is a retrieval-scorer defect, not a template defect, and fixing it
+by hand-weighting a family would be the family patch `AGENTS.md` forbids; it is recorded here
+rather than tuned around.
+
+
+### The retrieval scorer ranked on declared ports, and two defects fell out of it
+
+Chasing the flat result above found the mechanism, and it is not in the templates.
+`retrieve_macro_templates` scored fit as `2 * |question cores ∩ union(input port core_concepts)|`.
+A port says what a fragment may be *handed*; taking the union made **declaring a port a ranking
+advantage**.
+
+*D1 — port inflation.* `TIME-WINDOW-REVERSE` needs a second, temporal input port because its clock
+input is an `event`. That alone scored it 3 where every rival scored 2 on any question carrying an
+`amount` or an `event`, which is most of them. Replayed over the 332 recorded analyses it was
+offered 79 times — 22 of the 30 `poi_farthest_of_three` rows, a straight-line distance family, and
+all three `unanswerable_opening_hours` rows. Its overlap with what it actually computes over is 1
+on those questions, the lowest of the ten.
+
+*D2 — an unreachable fragment.* `ROUTE-STEP-EXTRACT` was offered zero times for the 28
+`routing_nth_turn` + `routing_turn_count_via` rows whose shape it is: it tied `MULTI-ROUTE-COMPARE`
+and `ROUTE-OPTIMIZE` and lost both slots to the alphabetical tie-break on the dict key. This
+predates the five additions — under the old scorer `MULTI-SEGMENT-AGGREGATE` and
+`OBJECT-FIELD-MEASURE` could not retrieve themselves from their own concept sets either.
+
+**The fix is one term.** Rank on the core concepts of the fragment's own `concept_nodes` — what it
+computes over — and leave the ports as the I/O declaration composition needs them to be. Both
+defects close. Three regression tests in `tests/test_plan_conformance.py` pin it, and all three
+fail against the old term.
+
+**Footprint**, replayed offline over the recorded analyses at no LLM or Kakao cost: 256 of 332 rows
+are offered a different pair. `TIME-WINDOW-REVERSE` 90 → 11, `ROUTE-STEP-EXTRACT` 0 → 33,
+`PLACE-ATTRIBUTE-QUERY` 0 → 121, `GEOCODE-BATCH-COMPARE` 114 → 58.
+
+### Measured: six passes a side
+
+`seoul_kmapeval_v7h3_holdout_100`, Spatial-Agent only, concurrency 32, budget 15.
+
+| arm | passes | mean | graph-validation failures / 600 |
+| --- | --- | --- | --- |
+| five templates, old scorer | 70 / 72 / 62 / 77 / 68 / 67 | 69.3 | 61 |
+| ten templates, fixed scorer | 69 / 71 / 74 / 64 / 73 / 73 | **70.7** | 51 |
+
+**+1.4 is not a result.** The baseline's own six passes span 62 to 77, so the interval swallows the
+difference several times over. Neither the ten templates nor the scorer fix moves this set's
+overall accuracy, and the fix is not justified by it — it is justified by D1 and D2, which are
+provable from the scorer alone and are pinned by tests that need no benchmark.
+
+What the family split does show is that the fix moved what its footprint said it would. The two
+families `ROUTE-STEP-EXTRACT` newly reaches are the two that gain most among the routing families:
+`routing_nth_turn` 61.9 → 73.8 and `routing_turn_count_via` 42.9 → 54.8, both +11.9. `trip_total_distance`
++19.0 and `trip_feasible_count_five` +14.3 come with `TIME-WINDOW-REVERSE` no longer taking the
+second slot on itinerary questions. Against them, `poi_distance_difference` -13.6 and
+`nearby_subtype_kth` -10.0 — and those are the residual defect below, not noise about which nothing
+can be said. Six passes is what `AGENTS.md` requires before quoting a family on this set; it is
+still one draw.
+
+**The residual defect, recorded and not acted on.** Type overlap barely separates shapes. A
+`nearby_kth_nearest` question and `PLACE-ATTRIBUTE-QUERY` have the same core-concept signature,
+`{location, object}`, so the generic fragment wins the generic questions — the fix changes which
+template free-rides (`GEOCODE-BATCH-COMPARE` 114 → `PLACE-ATTRIBUTE-QUERY` 121), not that one does,
+and `poi_distance_difference` is where that cost shows. The signal that would separate them is in
+the typed facts retrieval never sees: `GroundingFacts` carries `turn_field`, `listed_places`,
+`compared_pair`, `target_subtype` and `via_place`, and `grounding_factor_nodes` exports seven fact
+types that do not include any of them. That is the same shape as the recorded `ROUTE-OPTIMIZE`
+finding — a stage that cannot see its own input — and the same repair would apply. It is left
+undone deliberately: handing a fact to the template that would win a family with it is a family
+patch by effect, and the export also feeds `attach_grounding_factors`, so widening it changes
+grounding and not only ranking.

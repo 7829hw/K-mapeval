@@ -231,7 +231,12 @@ def test_a_turn_count_question_retrieves_the_shape_that_reads_a_step_list() -> N
     paraphrase = [template["name"] for template in retrieve_templates(analysis, "무관한 문장")]
 
     assert names == paraphrase
-    assert "Route-Step-Extract" not in names
+    # `ROUTE-STEP-EXTRACT` is in the macro catalogue now, so this pins *why* it is offered or
+    # not: the typed concepts and factors, never the words "주행 안내" or "좌회전". This
+    # analysis types every stop as a bare `location` extent and names no measure, so the
+    # ranking cannot tell a turn count from anything else -- which is a fact about the
+    # analysis, not about the wording.
+    assert set(names) == set(paraphrase)
 
 
 # ---------------------------------------------------------------------------------------------

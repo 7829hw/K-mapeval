@@ -5,7 +5,7 @@
 | MapEval `Evaluator2.py` structured ReAct loop | `src/agent/react.py` | Removes the localhost backend, sleeps, and remote writes. Uses user-requested 0-based `^^N^^` answers. |
 | MapEval tools/backend | `src/tools/registry.py`, `src/tools/map.py`, `src/tools/kakao.py` | Provider injection replaces the separate HTTP backend; tools expose normalized JSON. |
 | Spatial information theory analysis | `normalize_analysis`, `src/agent/concepts.py` | Preserves all seven core-concept labels and six roles. Runtime intent classification and dataset labels are absent; missing concepts are completed from typed facts and marked implicit/synthetic. |
-| Concept transformation drafting | `src/agent/templates.py`, `src/agent/composition.py`, Spatial-Agent `compose` | Five reusable Appendix-E-level graph fragments expose typed I/O ports. Retrieval reads typed concepts and factors, and templates are priors rather than hard constraints. The planner authors transformation edges and refers to the Analysis stage's concepts by id; it declares only concepts that stage does not carry. |
+| Concept transformation drafting | `src/agent/templates.py`, `src/agent/composition.py`, Spatial-Agent `compose` | Appendix E's ten reusable macro fragments expose typed I/O ports. Retrieval reads typed concepts and factors, and templates are priors rather than hard constraints. The planner authors transformation edges and refers to the Analysis stage's concepts by id; it declares only concepts that stage does not carry. |
 | Concept graph `G` | `GeoFlowGraph`, `ConceptNode`, `TransformationEdge` | Vertices are concepts with `core_concept`, `functional_role`, and `attributes`; directed hyperedges are transformations. The executable operator graph is a later representation. |
 | Factors and operator-concept hypergraph `G'` | `FactorNode`, `attach_grounding_factors`, `factorize_semantic_graph` | Radius, ordinal, direction, time budget, stays, route objective, fixed order, and return-to-start are explicit factor vertices connected to transformation/operator hyperedges. Tool selection remains deterministic from types, factors, and contracts. |
 | Five GeoFlow constraints | `src/agent/canonicalization.py`, `src/agent/validation.py`, `normalize_and_validate_graph` | Deterministic canonicalization completes the drafted graph's references before G1–G5 read it: the Analysis stage's concepts and their derived factors are in scope, an undeclared output is typed by the transformation that produces it, a redefined concept is renamed and later readers follow it, and a produced concept's type comes from the vocabulary rather than the planner. Every completion is additive and last-resort, so a draft that already passes canonicalizes to itself. G1–G5 then refuse strictly on both the draft and the repair. This port's own output-type, role-ordering and argument-value checks are skipped (`strict_types=False`) on a last attempt over the repaired graph and then the original; a graph still invalid there becomes `graph_validation_failure`. |
@@ -3400,3 +3400,45 @@ Held out at `ca41713`, six passes at concurrency 32 and budget 15:
 `af51e93`. The step budget is not what separates them —
 `reports/step_budget_ablation_354e3dd.md` shows budget 30 leaving the overall flat while lifting
 one family 38 points.
+
+
+## The five Appendix E macro families the typed catalogue was missing
+
+`src/agent/templates.py` carried five of Appendix E's ten macro templates —
+`FILTER-AGGREGATE-MEASURE`, `OBJECT-FIELD-MEASURE`, `ROUTE-OPTIMIZE`, `MULTI-ROUTE-COMPARE`,
+`MULTI-SEGMENT-AGGREGATE`. The other five existed only in `TEMPLATES` in `src/agent/geoflow.py`,
+which that file's own comment marks as offline replay/regression compatibility: the Spatial-Agent
+runtime never retrieves it, so no planner prompt has ever carried a bearing, an attribute lookup,
+a turn-count or an arrival-time shape. A question of one of those shapes was composed from
+whichever of the five ranked highest.
+
+The missing five are now typed fragments beside the others, written in the semantic vocabulary of
+`src/agent/semantics.py` and carrying no operator, no argument and no provider category:
+
+| Template | Transformation edges | Factor affinity |
+|---|---|---|
+| `GEOCODE-BATCH-COMPARE` | `RESOLVE_PLACES -> DISTANCE_MEASURE -> EXTREME_SELECT` | `measure`, `extreme` |
+| `LOCATION-BEARING-CLASSIFY` | `RESOLVE_PLACES -> FILTER (a stated sector) -> MEASURE` | `direction` |
+| `ROUTE-STEP-EXTRACT` | `ROUTE_MEASURE -> ROUTE_STEPS -> MEASURE` | `metric` |
+| `PLACE-ATTRIBUTE-QUERY` | `PLACE_SEARCH -> PLACE_DETAILS -> MEASURE` | none |
+| `TIME-WINDOW-REVERSE` | `ROUTE_MEASURE -> SCHEDULE -> MEASURE` | `stays`, `stay_duration_s` |
+
+`TIME-WINDOW-REVERSE` is the one that needed new ports: its contextual input is an `event` typed
+`temporal_extent` and its measure is an `event`, and neither fits `_SPATIAL_INPUT` or
+`_MEASURE_OUTPUT`. `PLACE-ATTRIBUTE-QUERY` declares an empty `factor_affinity` deliberately —
+no radius, ordinal, direction, budget or route objective characterizes "what kind of place is
+this", and inventing one for it would be a family patch wearing a template's clothes.
+
+Each of the ten composes through `compose_templates` into a graph that passes G1–G5 strictly,
+pinned per template in `tests/test_plan_conformance.py`, and each has a worked demonstration in
+`default_example_store()` with one factor bound.
+
+**What this changes and what it does not.** Retrieval is unchanged: the same typed scorer over the
+same concepts and factors, now ranking ten candidates instead of five for the same two slots. That
+is not a neutral addition — on a question whose concepts tie, `GEOCODE-BATCH-COMPARE` now sorts
+ahead of `MULTI-ROUTE-COMPARE` and `OBJECT-FIELD-MEASURE` on the alphabetical tie-break, so the
+prompt a tied question receives is different. Nothing about grounding, factorization or the
+operator set moved, so `data/replay_grounding.py` cannot measure this: templates change the
+planner's *vocabulary of shapes*, and graphs recorded before a shape was retrievable never use it.
+Reading it costs a run. No benchmark has been run against this change and no accuracy is claimed
+for it.

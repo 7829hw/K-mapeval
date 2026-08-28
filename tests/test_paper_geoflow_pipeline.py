@@ -42,12 +42,25 @@ def test_concepts_factors_and_transformations_are_distinct_ir_members() -> None:
 
 
 def test_catalogue_contains_only_reusable_port_typed_macros() -> None:
+    """Appendix E's ten macro families, and nothing this port invented.
+
+    The catalogue carried five of them and the planner never saw the other five, so a bearing
+    question, an attribute lookup, a turn-count and an arrival-time question were all composed
+    from whichever of the five ranked highest. Each name below is a *shape* -- typed ports and
+    transformation edges -- and none carries an operator recipe or a benchmark family.
+    """
+
     assert {template.name for template in MACRO_TEMPLATES.values()} == {
         "FILTER-AGGREGATE-MEASURE",
         "OBJECT-FIELD-MEASURE",
         "ROUTE-OPTIMIZE",
         "MULTI-ROUTE-COMPARE",
         "MULTI-SEGMENT-AGGREGATE",
+        "GEOCODE-BATCH-COMPARE",
+        "LOCATION-BEARING-CLASSIFY",
+        "ROUTE-STEP-EXTRACT",
+        "PLACE-ATTRIBUTE-QUERY",
+        "TIME-WINDOW-REVERSE",
     }
     assert all(
         template.input_ports and template.output_ports for template in MACRO_TEMPLATES.values()

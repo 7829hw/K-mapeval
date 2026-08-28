@@ -88,6 +88,11 @@ def default_example_store() -> QuestionGraphExampleStore:
         "route_optimize": "여러 위치를 잇는 네트워크 경로를 최적화한다.",
         "multi_route_compare": "여러 네트워크 경로의 측정값을 비교한다.",
         "multi_segment_aggregate": "연속 경로 구간들의 측정값을 합산한다.",
+        "geocode_batch_compare": "질문이 이름을 댄 장소들을 위치로 바꾸고 직선 거리를 비교한다.",
+        "location_bearing_classify": "기준 장소에서 대상 장소가 어느 방위 구역에 있는지 가른다.",
+        "route_step_extract": "계산된 경로의 턴 단위 안내에서 한 수치를 읽는다.",
+        "place_attribute_query": "찾은 장소에 저장된 속성을 조회한다.",
+        "time_window_reverse": "이동 소요 시간으로 도착·출발 시각을 되짚는다.",
     }
     factors = {
         "filter_aggregate_measure": ("FILTER", FactorNode("example_radius", "radius_m", 500)),
@@ -106,6 +111,26 @@ def default_example_store() -> QuestionGraphExampleStore:
         "multi_segment_aggregate": (
             "AGGREGATE",
             FactorNode("example_metric", "metric", "distance"),
+        ),
+        "geocode_batch_compare": (
+            "EXTREME_SELECT",
+            FactorNode("example_compare_extreme", "extreme", "min"),
+        ),
+        "location_bearing_classify": (
+            "FILTER",
+            FactorNode("example_direction", "direction", "east"),
+        ),
+        "route_step_extract": (
+            "ROUTE_STEPS",
+            FactorNode("example_step_key", "key", "left_turns"),
+        ),
+        "place_attribute_query": (
+            "PLACE_DETAILS",
+            FactorNode("example_attribute_key", "key", "category"),
+        ),
+        "time_window_reverse": (
+            "SCHEDULE",
+            FactorNode("example_schedule_measure", "measure", "arrival"),
         ),
     }
     rows = [

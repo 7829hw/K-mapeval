@@ -65,6 +65,12 @@ _SPATIAL_INPUT = TemplatePort(
 _MEASURE_OUTPUT = TemplatePort(
     "measure", frozenset({"amount", "object", "field", "proportion"}), frozenset({"measure"})
 )
+_TEMPORAL_INPUT = TemplatePort(
+    "temporal_input",
+    frozenset({"event", "amount"}),
+    frozenset({"temporal_extent", "support"}),
+)
+_SCHEDULE_OUTPUT = TemplatePort("schedule", frozenset({"event", "amount"}), frozenset({"measure"}))
 
 
 def _concept(node_id: str, core: str, role: str) -> ConceptNode:
@@ -153,6 +159,94 @@ MACRO_TEMPLATES: dict[str, MacroTemplate] = {
             _edge("aggregate", "AGGREGATE", ("legs",), "measure"),
         ),
         frozenset({"metric", "fixed_order", "return_to_start"}),
+    ),
+    "geocode_batch_compare": MacroTemplate(
+        "GEOCODE-BATCH-COMPARE",
+        (_SPATIAL_INPUT,),
+        (_MEASURE_OUTPUT,),
+        (
+            _concept("names", "object", "extent"),
+            _concept("places", "object", "support"),
+            _concept("separation", "amount", "support"),
+            _concept("measure", "object", "measure"),
+        ),
+        (
+            _edge("resolve", "RESOLVE_PLACES", ("names",), "places"),
+            _edge("separations", "DISTANCE_MEASURE", ("places",), "separation"),
+            _edge("compare", "EXTREME_SELECT", ("separation",), "measure"),
+        ),
+        frozenset({"measure", "extreme"}),
+    ),
+    "location_bearing_classify": MacroTemplate(
+        "LOCATION-BEARING-CLASSIFY",
+        (_SPATIAL_INPUT,),
+        (_MEASURE_OUTPUT,),
+        (
+            _concept("names", "object", "extent"),
+            _concept("sector", "field", "condition"),
+            _concept("places", "object", "support"),
+            _concept("oriented", "object", "support"),
+            _concept("measure", "object", "measure"),
+        ),
+        (
+            _edge("resolve", "RESOLVE_PLACES", ("names",), "places"),
+            TransformationEdge("classify", "FILTER", ("places", "sector"), ("oriented",)),
+            _edge("measure", "MEASURE", ("oriented",), "measure"),
+        ),
+        frozenset({"direction"}),
+    ),
+    "route_step_extract": MacroTemplate(
+        "ROUTE-STEP-EXTRACT",
+        (_SPATIAL_INPUT,),
+        (_MEASURE_OUTPUT,),
+        (
+            _concept("endpoints", "object", "extent"),
+            _concept("network", "network", "support"),
+            _concept("route", "field", "support"),
+            _concept("steps", "field", "support"),
+            _concept("measure", "amount", "measure"),
+        ),
+        (
+            TransformationEdge("route", "ROUTE_MEASURE", ("endpoints", "network"), ("route",)),
+            _edge("steps", "ROUTE_STEPS", ("route",), "steps"),
+            _edge("measure", "MEASURE", ("steps",), "measure"),
+        ),
+        frozenset({"metric"}),
+    ),
+    "place_attribute_query": MacroTemplate(
+        "PLACE-ATTRIBUTE-QUERY",
+        (_SPATIAL_INPUT,),
+        (_MEASURE_OUTPUT,),
+        (
+            _concept("area", "location", "extent"),
+            _concept("places", "object", "support"),
+            _concept("details", "object", "support"),
+            _concept("measure", "object", "measure"),
+        ),
+        (
+            _edge("search", "PLACE_SEARCH", ("area",), "places"),
+            _edge("details", "PLACE_DETAILS", ("places",), "details"),
+            _edge("measure", "MEASURE", ("details",), "measure"),
+        ),
+        frozenset(),
+    ),
+    "time_window_reverse": MacroTemplate(
+        "TIME-WINDOW-REVERSE",
+        (_SPATIAL_INPUT, _TEMPORAL_INPUT),
+        (_SCHEDULE_OUTPUT,),
+        (
+            _concept("endpoints", "object", "extent"),
+            _concept("window", "event", "temporal_extent"),
+            _concept("route", "field", "support"),
+            _concept("clock", "event", "support"),
+            _concept("measure", "event", "measure"),
+        ),
+        (
+            _edge("route", "ROUTE_MEASURE", ("endpoints",), "route"),
+            TransformationEdge("schedule", "SCHEDULE", ("route", "window"), ("clock",)),
+            _edge("measure", "MEASURE", ("clock",), "measure"),
+        ),
+        frozenset({"stays", "stay_duration_s"}),
     ),
 }
 

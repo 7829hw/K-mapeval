@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from typing import Any
@@ -1313,6 +1313,11 @@ class GroundingFacts:
     #: enters. The scans above find a place only in the phrasings they know; this finds the rest,
     #: and it is what a planner's `지민숲의 위치` has to be repaired back to.
     stated_literals: tuple[str, ...] = ()
+    #: The place the question says the drive goes through -- "X를 들러", "X를 경유해서". Stated in
+    #: the sentence exactly as a radius or a routing preference is, and read the same way. It is
+    #: not a waypoint inferred from where an input sat: `via` on a route node remains the only
+    #: thing that may say that, and this only fills a route the graph left without one.
+    via_place: str | None = None
 
     def stated_stay(self, name: str) -> float:
         """The stay stated for exactly this place, or zero when the question states none."""
@@ -1394,8 +1399,29 @@ def extract_facts(analysis: dict[str, Any], question: str) -> GroundingFacts:
         trip_destination=_extract_trip_destination(question),
         trip_origin=_stated_departure(question, anchor, stays),
         route_objective="distance" if _asks_for_distance(question) else None,
-        stated_literals=_verbatim_concept_texts(analysis, question),
+        stated_literals=(literals := _verbatim_concept_texts(analysis, question)),
+        via_place=_extract_waypoint(question, literals),
     )
+
+
+#: How a question says a drive passes through somewhere.
+_VIA_MARKER = re.compile(r"(?:을|를)\s*(?:들러|들려|거쳐|경유)")
+
+
+def _extract_waypoint(question: str, stated: Sequence[str]) -> str | None:
+    """The place the question sends the route through, as the question wrote it.
+
+    Read back to a stated place rather than captured by the pattern: the text in front of the
+    marker runs back through whatever else the sentence said -- "곧장 가는 경우와 동덕아트갤러리"
+    -- and only the tail of it is a place. The longest stated place that ends there is the one.
+    """
+
+    match = _VIA_MARKER.search(question)
+    if match is None:
+        return None
+    before = question[: match.start()].strip()
+    candidates = [name for name in stated if name and before.endswith(name)]
+    return max(candidates, key=len) if candidates else None
 
 
 def _verbatim_concept_texts(analysis: dict[str, Any], question: str) -> tuple[str, ...]:
@@ -1600,6 +1626,17 @@ def _ground_graph_literals(
     # `tsp_tw distance_matrix must be square`, which names neither the place nor the problem.
     question_places = list(facts.stated_places())
     indexed_references = _indexed_references_by_root(steps)
+    # A route the question sends through somewhere, on a graph that measures exactly one route
+    # and gave it no waypoints. Bound like the radius is: the question states it outright, and a
+    # drive that ignores a stated stop measures a different drive -- `routing_turn_count_via`
+    # was counting the turns of the route that skipped it. Only with one route in the graph,
+    # because a detour question measures two and only one of them goes through the stop; that
+    # one is told apart by the graph's own structure, not from here.
+    lone_route = next(
+        iter(step for step in steps if step.get("operator") in {"directions", "travel_time"}), None
+    )
+    if sum(1 for step in steps if step.get("operator") in {"directions", "travel_time"}) != 1:
+        lone_route = None
     grounded: list[dict[str, Any]] = []
     for step in steps:
         operator = step.get("operator")
@@ -1850,6 +1887,13 @@ def _ground_graph_literals(
                 arguments["mode"] = "radius_set" if radius_m is not None else "nearest"
             grounded.append({**step, "arguments": arguments})
             continue
+        if (
+            lone_route is not None
+            and step is lone_route
+            and facts.via_place
+            and not arguments.get("waypoints")
+        ):
+            arguments["waypoints"] = [facts.via_place]
         if operator != "batch_geocode":
             # `arguments` is the copy every branch above edits; appending the original step here
             # threw those edits away, which is how a bound routing priority never reached the

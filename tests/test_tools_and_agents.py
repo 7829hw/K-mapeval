@@ -3400,3 +3400,46 @@ def test_a_name_the_question_states_verbatim_is_never_repaired() -> None:
     question = "포유모텔에서 학동역 7호선까지, 삼성출판박물관을 경유해서 가는 경우의 주행거리는?"
     stated = ["삼성출판박물관", "삼성출판박물관을 경유해서 가는 경우"]
     assert _verbatim_name("삼성출판박물관", question, [], stated) == "삼성출판박물관"
+
+
+def test_a_lone_route_is_sent_through_the_stop_the_question_states() -> None:
+    """"A에서 W를 들러 B까지" states the stop as plainly as it states a radius, and a drive that
+    ignores it measures a different drive -- `routing_turn_count_via` was counting the turns of
+    the route that skipped it. This is not a waypoint read off where an input sat: `via` on a
+    route node remains the only thing allowed to say that, and this only fills a route the graph
+    left without one.
+    """
+
+    from src.agent.spatial import _ground_graph_literals, extract_facts
+
+    question = "영산양재홀에서 캠퍼스호텔을 들러 임성기기념관까지 자동차로 이동합니다."
+    analysis = {
+        "concepts": [
+            {"id": "a", "text": "영산양재홀", "concept_type": "location"},
+            {"id": "w", "text": "캠퍼스호텔", "concept_type": "location"},
+            {"id": "b", "text": "임성기기념관", "concept_type": "location"},
+        ]
+    }
+    facts = extract_facts(analysis, question)
+    assert facts.via_place == "캠퍼스호텔"
+    graph = [
+        {"id": "r", "operator": "directions", "arguments": {"origin": "$a", "destination": "$b"}}
+    ]
+    grounded = _ground_graph_literals(graph, question, [], facts)
+    assert grounded[0]["arguments"]["waypoints"] == ["캠퍼스호텔"]
+
+
+def test_a_detour_question_measures_two_routes_and_neither_is_filled_from_the_question() -> None:
+    """Two routes and only one goes through the stop. Which one is told apart by the graph's own
+    structure -- the subset relation between their inputs -- and never from here."""
+
+    from src.agent.spatial import _ground_graph_literals, extract_facts
+
+    question = "A에서 B까지 갈 때, 곧장 가는 경우와 캠퍼스호텔을 경유해서 가는 경우의 차이는?"
+    facts = extract_facts({"concepts": [{"id": "w", "text": "캠퍼스호텔"}]}, question)
+    graph = [
+        {"id": "r1", "operator": "directions", "arguments": {"origin": "$a", "destination": "$b"}},
+        {"id": "r2", "operator": "directions", "arguments": {"origin": "$a", "destination": "$b"}},
+    ]
+    grounded = _ground_graph_literals(graph, question, [], facts)
+    assert not any(step["arguments"].get("waypoints") for step in grounded)

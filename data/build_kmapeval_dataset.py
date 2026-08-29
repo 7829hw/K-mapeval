@@ -38,11 +38,34 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from benchmark_core import Builder  # noqa: E402
 from build_mapeval_benchmark import Pool, finalize  # noqa: E402
-from build_mapeval_v6_benchmark import V6_ORDERED_FAMILIES  # noqa: E402
-from build_mapeval_v7_benchmark import FAMILIES, SEED  # noqa: E402
+from build_mapeval_v6_benchmark import (  # noqa: E402
+    V6_ORDERED_FAMILIES,
+    trip_feasible_count_four,
+)
+from build_mapeval_v7_benchmark import FAMILIES as V7_FAMILIES  # noqa: E402
+from build_mapeval_v7_benchmark import SEED  # noqa: E402
 from builder_cli import run_builder  # noqa: E402
 
 OUT_PATH = Path(__file__).resolve().parents[1] / "dataset" / "kmapeval_dataset.jsonl"
+
+# The standard builder draws the four-stop feasibility family: same four live rungs, taken down at
+# the bottom (0 to 3) rather than the top, and one leg fewer to route. It was written to bring the
+# family under the planner's step budget and it does not -- 37% of Spatial-Agent attempts still end
+# `graph_validation_failure` against the five-stop version's 39%, because what exceeds the budget
+# is which rendering the planner picks, not how many stops it is rendering. See the family's own
+# docstring. It is kept because it is no worse and costs one leg less to build, not because it
+# fixed anything. The versioned builders still draw the five-stop one; they exist to reproduce
+# their benchmarks of record.
+FAMILIES = [
+    ("trip_feasible_count_four", trip_feasible_count_four, quota)
+    if name == "trip_feasible_count_five"
+    else (name, function, quota)
+    for name, function, quota in V7_FAMILIES
+]
+
+ORDERED_FAMILIES = (V6_ORDERED_FAMILIES - {"trip_feasible_count_five"}) | {
+    "trip_feasible_count_four"
+}
 
 
 def main() -> None:
@@ -51,7 +74,7 @@ def main() -> None:
         open_builder=Builder.open,
         make_pool=Pool,
         finalize=finalize,
-        ordered=V6_ORDERED_FAMILIES,
+        ordered=ORDERED_FAMILIES,
         # v7's own seed, so that asking this builder for a hundred questions on that seed still
         # refuses to relabel the tuned set under another id prefix.
         canonical_seed=SEED,

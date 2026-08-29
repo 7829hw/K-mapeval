@@ -187,6 +187,13 @@ def test_the_standard_builder_draws_the_families_the_baseline_can_finish() -> No
     names = {name for name, _, _ in build_kmapeval_dataset.FAMILIES}
     assert {"trip_optimal_order", "trip_total_distance"} <= names
     assert not {"trip_optimal_order_four", "trip_total_distance_four"} & names
+    # And the four-stop feasibility family: same four live rungs taken down at the bottom, one
+    # leg fewer to route. It did *not* fix the planner budget failure it was written for -- 37%
+    # against the five-stop version's 39% -- and is kept for costing a leg less, not for that.
+    assert "trip_feasible_count_four" in names
+    assert "trip_feasible_count_five" not in names
+    # A ladder family's options carry meaning in their order, so it must not be shuffled.
+    assert "trip_feasible_count_four" in build_kmapeval_dataset.ORDERED_FAMILIES
     assert sum(quota for *_, quota in build_kmapeval_dataset.FAMILIES) == 100
 
 

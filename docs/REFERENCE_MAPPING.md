@@ -3797,3 +3797,57 @@ where it can be demonstrated exactly, and explicitly *not* a point on the accura
 **v9 is spent.** `src/` changed in response to what it showed, so 45.4 / 70.4 belongs to `d95a9bc`
 and the numbers here are a level for the code after it. Build a fresh set before quoting a held-out
 number again.
+
+## v10h: a held-out three hundred, and a family whose number is the budget's
+
+`data/build_kmapeval_dataset.py --count 300 --seed 1787980480`, built and run at `4381dfd` with
+nothing under `src/` changed after it — the first genuinely held-out set here that is also exactly
+the size asked for, passes `data/audit_dataset.py` clean, and carries upstream's class mix. Three
+questions in common with v9 out of three hundred.
+
+| | passes | mean | spread |
+| --- | --- | --- | --- |
+| no-tool floor | 77/300 | **25.7** | — |
+| floor excluding `unanswerable_*` | 56/279 | **20.1** | — |
+| ReAct | 47.3 / 47.7 / 48.0 / 48.7 | **47.9** | 1.3 |
+| Spatial-Agent | 72.0 / 72.7 / 73.7 / 73.7 | **73.0** | 1.7 |
+
+Four passes a side rather than three: a second single pass ran concurrently with the three-pass
+run, so both are in `reports/` and all four are used. Gap 25.1, an order of magnitude outside
+either agent's spread, and one `iteration_limit` in twelve hundred ReAct rows. For scale, upstream
+Spatial-Agent reports 71.07% on MapEval-API — a different benchmark in a different language, so
+not a comparison, but the same neighbourhood.
+
+The class picture reproduces v8 and v9 on an independent draw. `poi` is again the widest gap and
+again the place the baseline does not measure — ReAct 24.2 against Spatial-Agent 86.5, with ReAct
+at its own floor on both of that class's families (`poi_distance_difference` 25.8,
+`poi_farthest_of_three` 22.5). `unanswerable` again inverts, ReAct 95.2 against 57.1.
+
+**And one family that is not measuring what it looks like.** `trip_feasible_count_four` reads
+ReAct 89.3 against Spatial-Agent 36.9 — the widest inversion on the set, and Spatial-Agent *below*
+that family's 38.1% no-tool floor. It is the budget. Conditional on producing a graph at all,
+Spatial-Agent answers it 58.5% of the time; 37% of its attempts end `graph_validation_failure`
+before anything executes, and those zeros are the whole difference.
+
+This was the family the four-stop version was written to fix, and it did not fix it:
+
+| | attempts | died on validation | drafts that failed |
+| --- | --- | --- | --- |
+| `trip_feasible_count_five` (v9) | 147 | 57 = **39%** | 17–18 edges |
+| `trip_feasible_count_four` (v10h) | 84 | 31 = **37%** | 18–19 edges |
+
+Dropping a leg moved neither the rate nor the size of the failing drafts. The draft sizes are
+bimodal in both versions — a cluster at 4 to 15 that fits and a cluster at 18 to 19 that does not
+— so what exceeds `MAX_REASONING_STEPS=15` is *which of two renderings the planner picks* for a
+temporal-feasibility question, not how many stops it is rendering. The over-budget drafts spend
+more of everything: 2.15 `RESOLVE_PLACES` per graph against 1.05, 4.15 `FILTER` against 2.05, 4.79
+`ROUTE_MEASURE` against 3.59. The repair round is already told the count and the limit and returns
+the count it was given.
+
+So the dataset lever this project used for ReAct's four-stop families does not exist here, and the
+real one is the planner's rendering — merging the per-place `RESOLVE_PLACES` nodes a compact draft
+already writes as one, for instance, which is a redundancy the executor runs as several calls
+rather than a capability the agent lacks. That is a change to one architecture and owes its own
+footprint before it ships. Recorded, not acted on. The four-stop family is kept because it costs a
+leg less to build, not because it repaired anything, and until the planner side is addressed this
+family's Spatial-Agent number should be read as the budget's rather than as spatial reasoning.

@@ -1020,6 +1020,124 @@ def trip_total_distance_four(
 
 
 
+def trip_feasible_count_four(
+    builder: Builder, pool: Pool, rng: random.Random, count: int
+) -> list[dict]:
+    """The same question one stop shorter, with the ladder taken down at the bottom instead.
+
+    Four stops with rungs 0 through 3 keeps four live rungs and routes one leg fewer than
+    `trip_feasible_count_five`. The stop count and the ladder are tied: with N stops the top rung
+    is always dead, because the family rejects any row whose count the stay times alone already
+    give and travel plus stays fitting all N implies stays alone fit all N. A ladder topping out
+    at four therefore needs five stops, and taking the *bottom* down instead is what buys the leg.
+    Zero is not reachable for free either -- the same rejection keeps only the rows where the stays
+    alone would have allowed a stop and the driving is what takes it away, so "방문할 수 없음" is an
+    answer about the map exactly like the others. Measured on the v10h draw, the four rungs came
+    out 6 / 5 / 5 / 5.
+
+    **This was written to fit the planner's budget and it does not, so do not read it that way.**
+    `trip_feasible_count_five` is the one family `MAX_REASONING_STEPS` binds: over seven
+    Spatial-Agent passes on v9, 57 of its 147 attempts ended `graph_validation_failure` on drafts
+    of 17 and 18 transformation edges against a budget of 15, with the repair round returning the
+    count it was given and grounding adding nothing (the checked count equals the authored count
+    on 69 of 83 logs). Dropping a leg moved that not at all: on v10h this version fails 31 of 84,
+    37% against the five-stop version's 39%, and its failing drafts sit at the same 18 and 19
+    edges. The draft sizes are bimodal in both -- a cluster that fits at 4 to 15 and a cluster that
+    does not at 18 to 19 -- so what exceeds the budget is which of two renderings the planner
+    picks for a temporal-feasibility question, not how many stops it is rendering. The lever is
+    the planner, not the family, and it is a change to one architecture that owes its own
+    footprint. Until then read this family's Spatial-Agent number as the budget's: conditional on
+    producing a graph at all it scores 58.5%, comfortably over the 38.1% no-tool floor, and only
+    the ~37% of attempts that never produce one drag the overall below that floor.
+    """
+
+    bases = pool.of("AD5")
+    sights = pool.of("AT4", "CT1", "MT1")
+    rng.shuffle(bases)
+    rng.shuffle(sights)
+    words = ["방문할 수 없음", "한 곳", "두 곳", "세 곳"]
+    produced_counts: dict[int, int] = {0: 0, 1: 0, 2: 0, 3: 0}
+    made: list[dict] = []
+    used: set[str] = set()
+    for base in bases:
+        if len(made) >= count:
+            break
+        if base.place_id in used or not builder.resolves_to(base):
+            continue
+        near = [place for place in sights if 1500 < distance_m(base, place) < 9000]
+        chosen = take_resolvable(builder, near, 4)
+        if len(chosen) < 4:
+            continue
+        stays = [rng.choice([1.0, 1.5]) * 3600 for _ in chosen]
+        chain = [base, *chosen]
+        legs = [
+            builder.route(a, b, priority="DISTANCE")
+            for a, b in zip(chain, chain[1:], strict=False)
+        ]
+        if any(route is None for route in legs):
+            continue
+
+        def fits(budget: float, factor: float, legs=legs, stays=stays) -> int:
+            spent = 0.0
+            for index, route in enumerate(legs):
+                spent += route.duration_s * factor + stays[index]
+                if spent > budget:
+                    return index
+            return len(legs)
+
+        by_count: dict[int, tuple[float, int]] = {}
+        # From one hour, because the zero rung needs a budget under the first leg plus its stay.
+        for candidate in range(3600, int(11 * 3600), 900):
+            true_count = fits(candidate, 1.0)
+            if not 0 <= true_count <= 3 or true_count in by_count:
+                continue
+            if fits(candidate, 0.7) != true_count or fits(candidate, 1.3) != true_count:
+                continue  # the answer would depend on the traffic
+            stays_only = 0.0
+            no_travel = 0
+            for stay in stays:
+                stays_only += stay
+                if stays_only > candidate:
+                    break
+                no_travel += 1
+            if no_travel == true_count:
+                continue  # answerable without the map, which is the flaw being repaired
+            by_count[true_count] = (candidate, no_travel)
+        if not by_count:
+            continue
+        chosen_count = min(by_count, key=lambda value: (produced_counts[value], value))
+        budget, no_travel = by_count[chosen_count]
+        produced_counts[chosen_count] += 1
+        visits = ", ".join(
+            f"{eul(place.name)} {stay / 3600:g}시간"
+            for place, stay in zip(chosen, stays, strict=False)
+        )
+        made.append(
+            {
+                "question": (
+                    f"지금 {base.name}에 있습니다. {visits} 동안 적힌 순서대로 둘러보려 합니다. "
+                    f"총 {budget / 3600:g}시간이 있고 자동차로 이동합니다. 몇 곳을 방문할 수 "
+                    "있나요?"
+                ),
+                "options": words,
+                "answer": chosen_count,
+                "classification": "trip",
+                "mapeval_class": "trip",
+                "template_id": "trip_feasible_count_four",
+                "gold_evidence": {
+                    "base": base.name,
+                    "stops": [place.name for place in chosen],
+                    "stay_s": stays,
+                    "travel_s": [route.duration_s for route in legs],
+                    "budget_s": budget,
+                    "count_without_travel": no_travel,
+                },
+            }
+        )
+        used.add(base.place_id)
+    return made
+
+
 def trip_feasible_count_five(
     builder: Builder, pool: Pool, rng: random.Random, count: int
 ) -> list[dict]:

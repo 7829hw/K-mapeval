@@ -268,6 +268,12 @@ def test_a_group_scan_spends_the_whole_pool_not_its_first_entries() -> None:
 # --------------------------------------------------------------------------------------------
 
 
+#: The class of a family no shipped set carries yet, so the mix can be checked the build before
+#: its first draw exists. Every other family is read off the rows, and this map is asserted to
+#: hold nothing that could be.
+UNSHIPPED_FAMILY_CLASSES: dict[str, str] = {}
+
+
 def _family_classes(rows: list[dict], families: list[str]) -> dict[str, str]:
     """Which MapEval-API class each family writes, read off a set the family actually built.
 
@@ -277,7 +283,12 @@ def _family_classes(rows: list[dict], families: list[str]) -> dict[str, str]:
     its own name is matched against the templates it prefixes.
     """
 
-    by_template = {row["template_id"]: row["mapeval_class"] for row in rows}
+    # v1, v2 and v3 predate both labels, so they carry no evidence about a family's class.
+    by_template = {
+        row["template_id"]: row["mapeval_class"]
+        for row in rows
+        if row.get("template_id") and row.get("mapeval_class")
+    }
     resolved: dict[str, str] = {}
     for family in families:
         if family in by_template:
@@ -288,9 +299,27 @@ def _family_classes(rows: list[dict], families: list[str]) -> dict[str, str]:
             for template, mapeval_class in by_template.items()
             if template.startswith(f"{family}_")
         }
-        assert len(prefixed) == 1, family
-        resolved[family] = prefixed.pop()
+        if prefixed:
+            assert len(prefixed) == 1, family
+            resolved[family] = prefixed.pop()
+            continue
+        assert family in UNSHIPPED_FAMILY_CLASSES, family
+        resolved[family] = UNSHIPPED_FAMILY_CLASSES[family]
     return resolved
+
+
+def test_the_unshipped_family_table_holds_only_families_no_set_carries() -> None:
+    """It exists so a new family can be checked before its first draw, and for nothing else."""
+
+    shipped = {
+        row["template_id"]
+        for path in DATASETS
+        for row in _rows(path)
+        if row.get("template_id")
+    }
+    assert not (set(UNSHIPPED_FAMILY_CLASSES) & shipped), (
+        "a family with rows in dataset/ must have its class read off them, not declared"
+    )
 
 
 def test_the_standard_builders_quotas_are_upstreams_class_mix() -> None:
@@ -303,15 +332,10 @@ def test_the_standard_builders_quotas_are_upstreams_class_mix() -> None:
 
     import build_kmapeval_dataset
 
-    rows = [
-        json.loads(line)
-        for line in (
-            Path(__file__).resolve().parents[1]
-            / "dataset"
-            / "seoul_kmapeval_v7d_mcq_300.jsonl"
-        ).read_text(encoding="utf-8").splitlines()
-        if line
-    ]
+    # Every set, not one of them: a family the builder draws today may have shipped first in the
+    # newest file, and pinning one filename makes the check fail on the build that adds a family
+    # rather than on the one that misclassifies it.
+    rows = [row for path in DATASETS for row in _rows(path)]
     families = [name for name, _, _ in build_kmapeval_dataset.FAMILIES]
     classes = _family_classes(rows, families)
     quotas: Counter[str] = Counter()

@@ -233,6 +233,30 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
 - Run every benchmark at `--concurrency 32`. It is what every recorded v7 run used, and a report at
   another concurrency is a different run condition — check `metadata.concurrency` before setting
   two numbers beside each other.
+- `dataset/seoul_kmapeval_v10h_holdout_300.jsonl`: seed 1787980480, built and run at `4381dfd`
+  with nothing under `src/` changed after it — **held out**, exactly 300 rows, passes
+  `data/audit_dataset.py` clean, upstream's class mix, `nearby_kth_nearest` 8/8/8, three questions
+  in common with v9. Floor 25.7 (20.1 excluding `unanswerable_*`), ReAct 47.9, Spatial-Agent 73.0
+  over **four** passes a side at concurrency 32 — a second single pass ran concurrently with the
+  three-pass run and all four are in `reports/` — gap 25.1 against spreads of 1.3 and 1.7. One
+  `iteration_limit` in twelve hundred ReAct rows. The class picture reproduces v8 and v9 on an
+  independent draw: `poi` the widest gap at 24.2 against 86.5 with ReAct at its own floor,
+  `unanswerable` inverted at 95.2 against 57.1. **One family is not quotable as reasoning**:
+  `trip_feasible_count_four` reads ReAct 89.3 against Spatial-Agent 36.9, below that family's
+  38.1% floor, because 37% of Spatial-Agent's attempts end `graph_validation_failure` before
+  anything executes; conditional on producing a graph it answers 58.5%. See the next bullet.
+- The one family `MAX_REASONING_STEPS` binds is the feasibility family, and **the dataset lever
+  does not fix it**. `trip_feasible_count_five` lost 57 of 147 attempts (39%) to
+  `graph_validation_failure` on v9; the four-stop version written to fix that lost 31 of 84 (37%)
+  on v10h, with its failing drafts at the same 18–19 transformation edges. Draft sizes are bimodal
+  in both — a cluster at 4–15 that fits and one at 18–19 that does not — so what exceeds the budget
+  is which of two renderings the planner picks, not how many stops it renders. The over-budget
+  drafts spend more of everything (2.15 `RESOLVE_PLACES` a graph against 1.05, 4.15 `FILTER`
+  against 2.05), and the repair round is already told the count and the limit and returns what it
+  was given. The real lever is the planner's rendering — merging per-place `RESOLVE_PLACES` nodes,
+  say, which removes a redundancy rather than adding a capability — and that is a change to one
+  architecture owing its own footprint. Recorded, not acted on; the four-stop family is kept for
+  costing a leg less, not for having repaired anything.
 - `dataset/seoul_kmapeval_v9_mcq_300.jsonl`: the first set in `dataset/` that
   `data/audit_dataset.py` passes at 300 rows — exact count, upstream's class mix, and
   `nearby_kth_nearest` at 8/8/8 over k. Built at `d95a9bc` plus the ordinal-pool fix and run at

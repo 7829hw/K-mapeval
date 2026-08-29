@@ -3864,3 +3864,46 @@ steering the planner toward the folded rendering is a change to one architecture
 footprint, and it is also the weaker fix, since the folded rendering at five stops still costs 17.
 Until the stop count comes down, read this family's Spatial-Agent number as the budget's rather
 than as spatial reasoning.
+
+## Splitting the step budget, and what the shared one was costing
+
+`MAX_REASONING_STEPS` held ReAct and Spatial-Agent to one number. The 15 is documented above as
+langchain's `initialize_agent` default by way of `mapeval-api/Evaluator2.py` — which is a fact
+about **ReAct**. Nothing in either upstream sets a GeoFlow graph to 15 transformation edges;
+binding the second to the first was this repository's housekeeping, and the units are not the same
+thing: a ReAct step is one tool call, a Spatial-Agent step is one edge of a declarative graph that
+has to write down structure a loop never states. `REACT_MAX_STEPS` and `SPATIAL_MAX_STEPS` now
+default to `MAX_REASONING_STEPS` and are recorded separately in every report.
+
+Measured on `dataset/seoul_kmapeval_v10h_holdout_300.jsonl`, same rows, same code, concurrency 32:
+
+| | budget 15 | budget 30 | |
+| --- | --- | --- | --- |
+| ReAct | 47.3 / 47.7 / 48.0 / 48.7 → **47.9** | 46.0 / 46.7 / 47.0 → **46.6** | −1.3 |
+| Spatial-Agent | 72.0 / 72.7 / 73.7 / 73.7 → **73.0** | 73.7 / 76.3 / 77.7 → **75.9** | +2.9 |
+
+**Do not read either accuracy as the result.** ReAct's −1.3 sits inside spreads of 1.3 and 1.0, and
+Spatial-Agent's +2.9 inside a spread of 4.0. The result is in the counts, which are not accuracies
+and do not carry the endpoint's noise:
+
+- **ReAct is not budget-bound on this set at all.** One `iteration_limit` in 1,200 rows at 15, and
+  **zero in 900** at 30. Doubling the baseline's budget bought it nothing, which is what a family
+  set built to fit fifteen iterations should do — v7 exists for exactly that reason.
+- **Spatial-Agent was, entirely through the accounting.** At 15, `trip_feasible_count_four` lost
+  37% of its attempts to `graph_validation_failure`; at 30 it loses 19%, and **not one** of the
+  remaining refusals is the step budget — they are the paper's own G1, G3, G5, acyclicity and
+  data-availability constraints. The family's accuracy goes 36.9 → 50.8, from below its 38.1%
+  no-tool floor to comfortably above it. That is the prediction from `3N + 2` / `4N + 2` edges,
+  confirmed by removing the constraint rather than by rewriting the family.
+
+So the shared budget was refusing about a fifth of one family's graphs before anything executed,
+and buying the baseline nothing in exchange. Other families moved in both directions —
+`routing_turn_count_via` +22.2 and `nearby_within_radius_count` −16.0 on 21 and 12 rows, the
+two-row `unanswerable_*` families by 25 and 29 points — and none of those is a mechanism a step
+budget reaches; they are this set's per-family swing, which is why the claim rests on the refusal
+counts.
+
+**The configuration of record is therefore asymmetric, and deliberately so.** ReAct stays at 15,
+because that is upstream's baseline and because 30 demonstrably buys it nothing. Spatial-Agent
+goes to 30, because 15 was never upstream's and was measuring how verbosely a correct graph
+happened to be written. A run at any other pairing is an ablation and its report says which.

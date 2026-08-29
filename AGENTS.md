@@ -71,6 +71,14 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   - What the old rule got right and still holds: a budget change moves accuracy, so any run that
     is not at the configuration of record must say so, and a family that cannot be finished within
     its architecture's budget measures the budget. Report both numbers beside any accuracy.
+  - **The configuration of record is `REACT_MAX_STEPS=15`, `SPATIAL_MAX_STEPS=30`**, and it is
+    asymmetric on evidence. Measured on v10h, same rows and code: doubling ReAct's budget bought
+    it *nothing* — one `iteration_limit` in 1,200 rows at 15, zero in 900 at 30 — while at
+    Spatial-Agent 15 the feasibility family lost 37% of its attempts to `graph_validation_failure`
+    and at 30 loses 19%, **none of which is the step budget** (the rest are the paper's G1/G3/G5,
+    acyclicity and data availability). That family goes 36.9 → 50.8, from under its 38.1% no-tool
+    floor to over it. Read the overall accuracies as noise: ReAct 47.9 → 46.6 and Spatial-Agent
+    73.0 → 75.9, against spreads of 1.3 and 4.0. The claim is the refusal counts, not the points.
 - Report metadata must carry `llm_temperature`, `max_reasoning_steps`, `react_max_steps`,
   `spatial_max_steps`, `react_parallel_tool_calls` and `react_forces_final_answer`. An accuracy
   without them is not comparable to anything.
@@ -246,7 +254,7 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   operator returns, not just that it returned: `metric="distance"` was documented, bound and
   refusing bad input for a whole run while quietly still returning seconds, because
   `distance_matrix` emits a duration matrix beside the routes and `_matrix_argument` preferred it.
-- Run every benchmark at `--concurrency 32`. It is what every recorded v7 run used, and a report at
+- Run every benchmark at `REACT_MAX_STEPS=15`, `SPATIAL_MAX_STEPS=30` and `--concurrency 32`. It is what every recorded v7 run used, and a report at
   another concurrency is a different run condition — check `metadata.concurrency` before setting
   two numbers beside each other.
 - `dataset/seoul_kmapeval_v10h_holdout_300.jsonl`: seed 1787980480, built and run at `4381dfd`

@@ -245,18 +245,19 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   `trip_feasible_count_four` reads ReAct 89.3 against Spatial-Agent 36.9, below that family's
   38.1% floor, because 37% of Spatial-Agent's attempts end `graph_validation_failure` before
   anything executes; conditional on producing a graph it answers 58.5%. See the next bullet.
-- The one family `MAX_REASONING_STEPS` binds is the feasibility family, and **the dataset lever
-  does not fix it**. `trip_feasible_count_five` lost 57 of 147 attempts (39%) to
-  `graph_validation_failure` on v9; the four-stop version written to fix that lost 31 of 84 (37%)
-  on v10h, with its failing drafts at the same 18–19 transformation edges. Draft sizes are bimodal
-  in both — a cluster at 4–15 that fits and one at 18–19 that does not — so what exceeds the budget
-  is which of two renderings the planner picks, not how many stops it renders. The over-budget
-  drafts spend more of everything (2.15 `RESOLVE_PLACES` a graph against 1.05, 4.15 `FILTER`
-  against 2.05), and the repair round is already told the count and the limit and returns what it
-  was given. The real lever is the planner's rendering — merging per-place `RESOLVE_PLACES` nodes,
-  say, which removes a redundancy rather than adding a capability — and that is a change to one
-  architecture owing its own footprint. Recorded, not acted on; the four-stop family is kept for
-  costing a leg less, not for having repaired anything.
+- The one family `MAX_REASONING_STEPS` binds is the feasibility family, and the lever is the stop
+  count — one stop further than has been taken. A faithful rendering of "how many of N stops fit
+  the budget" costs `3N + 2` transformation edges when the planner folds each leg's duration into
+  the running total and `4N + 2` when it extracts it separately; both are correct graphs and the
+  planner writes both. That predicts 17 and 22 edges at five stops and 14 and 18 at four, which is
+  exactly where the drafts pile up, so against a budget of 15 five stops fits neither rendering,
+  four fits one (68% of drafts under budget against 50%, `graph_validation_failure` 37% against
+  39%), and **three would fit both**, at 11 and 14. The ladder follows the stop count, because
+  rung N is always dead: three stops means rungs 0 to 2 and a three-option question. Do not reach
+  for the planner or the budget first — raising `MAX_REASONING_STEPS` is an ablation and moves
+  both architectures, and steering the planner's rendering is a change to one of them owing its
+  own footprint, while the stop count is the same dataset lever v7 used on ReAct's four-stop
+  families.
 - `dataset/seoul_kmapeval_v9_mcq_300.jsonl`: the first set in `dataset/` that
   `data/audit_dataset.py` passes at 300 rows — exact count, upstream's class mix, and
   `nearby_kth_nearest` at 8/8/8 over k. Built at `d95a9bc` plus the ordinal-pool fix and run at

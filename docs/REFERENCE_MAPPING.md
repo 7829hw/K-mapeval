@@ -3836,18 +3836,31 @@ This was the family the four-stop version was written to fix, and it did not fix
 | `trip_feasible_count_five` (v9) | 147 | 57 = **39%** | 17–18 edges |
 | `trip_feasible_count_four` (v10h) | 84 | 31 = **37%** | 18–19 edges |
 
-Dropping a leg moved neither the rate nor the size of the failing drafts. The draft sizes are
-bimodal in both versions — a cluster at 4 to 15 that fits and a cluster at 18 to 19 that does not
-— so what exceeds `MAX_REASONING_STEPS=15` is *which of two renderings the planner picks* for a
-temporal-feasibility question, not how many stops it is rendering. The over-budget drafts spend
-more of everything: 2.15 `RESOLVE_PLACES` per graph against 1.05, 4.15 `FILTER` against 2.05, 4.79
-`ROUTE_MEASURE` against 3.59. The repair round is already told the count and the limit and returns
-the count it was given.
+**Correction to the first reading of this.** Dropping a leg looked like it moved nothing, and the
+first write-up here concluded the dataset lever did not exist and the planner's rendering was the
+only one. Both halves were wrong, and the arithmetic is why: a leg costs three to four
+transformation edges, not the two that reading assumed.
 
-So the dataset lever this project used for ReAct's four-stop families does not exist here, and the
-real one is the planner's rendering — merging the per-place `RESOLVE_PLACES` nodes a compact draft
-already writes as one, for instance, which is a redundancy the executor runs as several calls
-rather than a capability the agent lacks. That is a change to one architecture and owes its own
-footprint before it ships. Recorded, not acted on. The four-stop family is kept because it costs a
-leg less to build, not because it repaired anything, and until the planner side is addressed this
-family's Spatial-Agent number should be read as the budget's rather than as spatial reasoning.
+The draft sizes are bimodal in both versions because the planner writes two faithful renderings of
+the same question. Folding each leg's duration into the running total costs `3N + 2` edges;
+extracting it as its own `ROUTE_EXTRACT` costs `4N + 2`. Both are correct graphs.
+
+| stops | folded `3N+2` | explicit `4N+2` | drafts under the 15-edge budget | `graph_validation_failure` |
+| --- | --- | --- | --- | --- |
+| 5 (v9) | 17 | 22 | 73/146 = 50% | 57/147 = 39% |
+| 4 (v10h) | **14** | 18 | 57/84 = 68% | 31/84 = 37% |
+| 3 | **11** | **14** | — | — |
+
+Those predicted values are exactly where the drafts pile up: v9's cluster at 17 and 22, v10h's at
+14 and 18. So the stop count does not shift one cluster down, it decides *how many of the two
+renderings fit at all* — five stops fits neither, four fits one, three fits both. Dropping one leg
+was a half-measure, and dropping two is the lever. The ladder follows: rung N is always dead, so
+three stops means rungs 0 to 2 and a three-option question, with the no-tool floor for that family
+rising from 25% to 33% accordingly.
+
+That is the same dataset lever v7 used on ReAct's four-stop families, and it is the one to reach
+for first. Raising `MAX_REASONING_STEPS` is an ablation and moves both architectures at once;
+steering the planner toward the folded rendering is a change to one architecture that owes its own
+footprint, and it is also the weaker fix, since the folded rendering at five stops still costs 17.
+Until the stop count comes down, read this family's Spatial-Agent number as the budget's rather
+than as spatial reasoning.

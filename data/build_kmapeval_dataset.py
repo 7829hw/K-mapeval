@@ -50,12 +50,12 @@ OUT_PATH = Path(__file__).resolve().parents[1] / "dataset" / "kmapeval_dataset.j
 
 # The standard builder draws the four-stop feasibility family: same four live rungs, taken down at
 # the bottom (0 to 3) rather than the top, and one leg fewer to route. It was written to bring the
-# family under the planner's step budget and it does not -- 37% of Spatial-Agent attempts still end
-# `graph_validation_failure` against the five-stop version's 39%, because what exceeds the budget
-# is which rendering the planner picks, not how many stops it is rendering. See the family's own
-# docstring. It is kept because it is no worse and costs one leg less to build, not because it
-# fixed anything. The versioned builders still draw the five-stop one; they exist to reproduce
-# their benchmarks of record.
+# family under the planner's step budget and it only half does -- 68% of drafts come in under 15
+# transformation edges against the five-stop version's 50%, and 37% of Spatial-Agent attempts
+# still end `graph_validation_failure`. A faithful rendering costs `3N + 2` edges or `4N + 2`
+# depending on whether the planner extracts each leg's duration separately, so four stops fits one
+# of the two renderings and three would fit both. See the family's own docstring. The versioned
+# builders still draw the five-stop one; they exist to reproduce their benchmarks of record.
 FAMILIES = [
     ("trip_feasible_count_four", trip_feasible_count_four, quota)
     if name == "trip_feasible_count_five"

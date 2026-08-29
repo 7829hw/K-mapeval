@@ -1042,13 +1042,17 @@ def trip_feasible_count_four(
     count it was given and grounding adding nothing (the checked count equals the authored count
     on 69 of 83 logs). Dropping a leg moved that not at all: on v10h this version fails 31 of 84,
     37% against the five-stop version's 39%, and its failing drafts sit at the same 18 and 19
-    edges. The draft sizes are bimodal in both -- a cluster that fits at 4 to 15 and a cluster that
-    does not at 18 to 19 -- so what exceeds the budget is which of two renderings the planner
-    picks for a temporal-feasibility question, not how many stops it is rendering. The lever is
-    the planner, not the family, and it is a change to one architecture that owes its own
-    footprint. Until then read this family's Spatial-Agent number as the budget's: conditional on
-    producing a graph at all it scores 58.5%, comfortably over the 38.1% no-tool floor, and only
-    the ~37% of attempts that never produce one drag the overall below that floor.
+    edges. The draft sizes are bimodal in both, and the two modes are two faithful renderings of
+    the same question: `3N + 2` transformation edges when the planner folds the leg's duration
+    into the running total, `4N + 2` when it extracts it as its own `ROUTE_EXTRACT`. That predicts
+    17 and 22 at five stops and 14 and 18 at four, which is exactly where the drafts pile up, and
+    it says the stop count decides how many *renderings* fit rather than shifting one cluster:
+    five stops fits neither mode under a budget of 15, four fits one of the two (68% of drafts
+    against 50%), and **three would fit both**, at 11 and 14. So the lever is the stop count after
+    all -- one more stop off, with the ladder then running 0 to 2 -- and dropping only one was the
+    half-measure. Until that is done, read this family's Spatial-Agent number as the budget's:
+    conditional on producing a graph at all it scores 58.5%, comfortably over the 38.1% no-tool
+    floor, and only the ~37% of attempts that never produce one drag the overall below it.
     """
 
     bases = pool.of("AD5")

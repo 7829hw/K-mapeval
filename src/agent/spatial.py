@@ -479,6 +479,7 @@ class SpatialAgent(BenchmarkAgent):
             concept_state: dict[str, Any] = {}
             execution_log: list[dict[str, Any]] = []
             tool_names = {schema["function"]["name"] for schema in self.tools.schemas()}
+            step_sources = _step_sources(steps)
             for index, step in enumerate(steps, 1):
                 if not isinstance(step, dict):
                     continue
@@ -486,6 +487,8 @@ class SpatialAgent(BenchmarkAgent):
                 operator = str(step.get("operator") or "")
                 raw_arguments = step.get("arguments") or {}
                 try:
+                    if operator in _TOTALLING_OPERATORS:
+                        raw_arguments = _drop_subsumed_addends(raw_arguments, step_sources)
                     arguments = _resolve_references(raw_arguments, results)
                     # A place written as a name is the place this plan already resolved. The
                     # local operators spend no API call, so a name they are handed is only a
@@ -621,8 +624,19 @@ class SpatialAgent(BenchmarkAgent):
                 failure_type = "provider_failure"
                 failure_message = provider_failure
             else:
-                failure_type = "answer_parse_failure"
-                failure_message = "No valid 0-based option found during evaluation"
+                # Not a parse failure: nothing was parsed. This architecture never writes a
+                # `^^N^^` for the parser to read -- `response_text` is the MCQ adapter's
+                # selection or it is empty -- so reaching here means the adapter matched the
+                # grounded answer to none of the options. Measured on v9, that is what it says:
+                # of 43 such rows not one carried a value that lands on any option at any
+                # plausible unit scaling, so the refusal is the anti-least-bad-match rule
+                # working and the question is simply answered wrongly. Filing it as a parse
+                # failure reads in a report as a formatting defect and sends the next reader
+                # to the parser.
+                failure_type = "grounded_answer_unmatched"
+                failure_message = (
+                    "The grounded answer matched none of the options offered"
+                )
         return AgentResult(
             agent_type=self.agent_type,
             predicted_intent=None,
@@ -929,6 +943,103 @@ _REFERENCE_ALIASES = {
     "value": "distance_m",
     "meters": "distance_m",
 }
+
+
+#: Operators whose list argument is a total. Adding a measurement to the thing it was measured
+#: from is double counting, and only for these does dropping the source change what is meant.
+_TOTALLING_OPERATORS = frozenset({"sum_amounts", "sum_route_metrics"})
+
+
+def _reference_root(value: Any) -> str | None:
+    """The step id a reference points at, or None when the value is not a reference."""
+
+    if not isinstance(value, str):
+        return None
+    reference, _ = split_reference_arithmetic(canonical_reference(value))
+    if not reference.startswith("$"):
+        return None
+    return reference[1:].partition(".")[0] or None
+
+
+def _step_sources(steps: Sequence[Any]) -> dict[str, set[str]]:
+    """Which steps each step read, so a total can tell a leg from the route it came off."""
+
+    sources: dict[str, set[str]] = {}
+    for index, step in enumerate(steps, 1):
+        if not isinstance(step, dict):
+            continue
+        step_id = str(step.get("id") or f"s{index}")
+        found: set[str] = set()
+        stack: list[Any] = [step.get("arguments") or {}]
+        while stack:
+            current = stack.pop()
+            if isinstance(current, dict):
+                stack.extend(current.values())
+            elif isinstance(current, list):
+                stack.extend(current)
+            else:
+                root = _reference_root(current)
+                if root is not None:
+                    found.add(root)
+        sources[step_id] = found
+    return sources
+
+
+def _derives_from(step_id: str, ancestor: str, sources: dict[str, set[str]]) -> bool:
+    """Whether `step_id` was computed from `ancestor`, however many steps back."""
+
+    seen: set[str] = set()
+    stack = list(sources.get(step_id, ()))
+    while stack:
+        current = stack.pop()
+        if current == ancestor:
+            return True
+        if current in seen:
+            continue
+        seen.add(current)
+        stack.extend(sources.get(current, ()))
+    return False
+
+
+def _drop_subsumed_addends(arguments: Any, sources: dict[str, set[str]]) -> Any:
+    """Remove an addend that another addend in the same list was measured from.
+
+    Measured on v9: every one of the seven `trip_total_distance` questions that ended unmatched
+    overshot the gold by *exactly its own first leg*, and the plan says why --
+    `sum_amounts(amounts=["$t4", "$t7", "$t10", "$t3"])` where `$t4` is
+    `extract_distance(route="$t3")`. The raw route and the distance taken off it are the same
+    measurement written twice, so the total came to four addends for a three-leg drive.
+    `sum_amounts` cannot see that: by the time it runs both are dicts carrying `distance_m`.
+    The executor can, because it still holds the unresolved references and every step's own
+    arguments.
+    """
+
+    if not isinstance(arguments, dict):
+        return arguments
+    trimmed = dict(arguments)
+    for key, value in arguments.items():
+        if not isinstance(value, list) or len(value) < 2:
+            continue
+        roots = [_reference_root(item) for item in value]
+        kept: list[Any] = []
+        seen: set[str] = set()
+        for index, item in enumerate(value):
+            root = roots[index]
+            if root is None:
+                kept.append(item)
+                continue
+            if root in seen:
+                continue
+            if any(
+                other is not None and other != root and _derives_from(other, root, sources)
+                for other in roots
+            ):
+                continue
+            seen.add(root)
+            kept.append(item)
+        if kept and len(kept) != len(value):
+            trimmed[key] = kept
+    return trimmed
 
 
 def _resolve_references(value: Any, results: dict[str, Any]) -> Any:

@@ -419,9 +419,40 @@ class CalculateFinishTimeArgs(BaseModel):
         return self
 
 
+#: How a planner writes several places into one string: an itinerary arrow, or a comma and a
+#: space. The space matters -- `종로5,6가동 주민센터` and `7,900파스타 용두역점` are single Kakao
+#: names carrying a bare comma, and seven of the pool's 12,138 names are of that shape.
+_LISTED_PLACES = re.compile(r"\s*(?:→|->|=>)\s*|,\s+")
+
+
 class BatchGeocodeArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
     place_names: list[str] = Field(min_length=1, max_length=30)
+
+    @field_validator("place_names", mode="before")
+    @classmethod
+    def split_names_written_as_one_string(cls, value: object) -> object:
+        """One element naming several places is several names, because this argument takes them.
+
+        Measured on v9: three `PlaceNotFoundError`s were a whole option list arriving as a single
+        name -- `'CU 마곡아르디에점, CU 강서발산역점, GS25 강서등촌점, GS25 마곡루체점'` -- and two
+        more were an itinerary, `'쥬인스테이 → 삼모아트센터'`. `place_names` is the plural
+        argument, so what the planner meant is not in doubt and reading it costs no evidence the
+        run had not already gathered. A single-name argument keeps failing: there the composite
+        is genuinely ambiguous and inventing a choice would be the least-bad match.
+        """
+
+        if not isinstance(value, list):
+            return value
+        split: list[object] = []
+        for item in value:
+            if not isinstance(item, str):
+                split.append(item)
+                continue
+            parts = [part.strip() for part in _LISTED_PLACES.split(item)]
+            named = [part for part in parts if part]
+            split.extend(named if len(named) > 1 else [item])
+        return split
     anchor: str | Place | None = Field(
         default=None,
         description="Optional anchor used to disambiguate nearby places",

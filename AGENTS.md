@@ -236,7 +236,12 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
 - `dataset/seoul_kmapeval_v9_mcq_300.jsonl`: the first set in `dataset/` that
   `data/audit_dataset.py` passes at 300 rows — exact count, upstream's class mix, and
   `nearby_kth_nearest` at 8/8/8 over k. Built at `d95a9bc` plus the ordinal-pool fix and run at
-  `d95a9bc`; `src/` untouched, so it is **held out**. Floor 26.3 (21.9 excluding
+  `d95a9bc`. **Now spent**: the run exposed the double-counted trip leg and the composite place
+  name and `src/` changed for both, so the numbers below belong to `d95a9bc`. Spatial-Agent after
+  those fixes reads 71.0/73.0/69.0 (mean 71.0) on the same rows — flat against 71.2 before, and
+  justified by a replay rather than by that number; see `docs/REFERENCE_MAPPING.md`. ReAct is
+  untouched by either fix (`batch_geocode` is not on its five-tool surface and the executor rule
+  is Spatial-Agent's), so its 45.4 still stands. Floor 26.3 (21.9 excluding
   `unanswerable_*`), ReAct 44.7/47.7/44.0 (mean 45.4), Spatial-Agent 69.0/72.3/70.0 (mean 70.4)
   over three passes a side at concurrency 32, gap 25.0 — outside either agent's spread (3.7 and
   3.3). The reason to prefer it over v8 is what the ordinal fix exposed: split by k,

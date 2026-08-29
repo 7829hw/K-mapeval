@@ -2028,7 +2028,9 @@ def test_generation_does_not_accept_a_declared_index_without_matching_text() -> 
 
     evaluate = next(stage for stage in result.trace if stage["stage"] == "mcq_adapt")
     assert result.predicted_answer is None
-    assert result.failure_type == "answer_parse_failure"
+    # Not a parse failure: this architecture never writes a `^^N^^` for the parser to read, so
+    # the only way here is the adapter matching none of the options.
+    assert result.failure_type == "grounded_answer_unmatched"
     assert evaluate["selection_method"] == "unresolved"
 
 

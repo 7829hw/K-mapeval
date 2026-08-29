@@ -3724,3 +3724,71 @@ Spatial-Agent 76.7, the baseline below its own floor on both of that class's fam
 high-floor ladder does. Read v8 and v9 as two draws, not as a before and after: the only thing that
 changed between them under `src/` is nothing, and the family numbers move by the usual per-draw
 range.
+
+## Three defects behind Spatial-Agent's failure buckets, and what fixing two of them did not do
+
+A v9 pass reported `answer_parse_failure` 43, `graph_validation_failure` 19, `provider_failure` 10
+— 72 of 300 rows. Read one at a time they are three unrelated things, and only two are defects.
+
+**`answer_parse_failure` is a misnomer on this path.** Spatial-Agent never writes a `^^N^^` for
+`parse_answer` to read: `response_text` is the MCQ adapter's selection or it is empty. Reaching
+that branch means only that the adapter matched the grounded answer to none of the options. Read
+charitably — the bare value as written, ×1000 and ÷1000 — **none of the 43 lands on any option**,
+so the refusal is the anti-least-bad-match rule working and the question is simply answered
+wrongly. It is now `grounded_answer_unmatched`. ReAct's `answer_parse_failure` keeps its name; there
+a model really did write something the parser could not read.
+
+**Inside it, one real defect with a clean fingerprint.** All seven `trip_total_distance` rows in
+that bucket overshot the gold by *exactly their own first leg*:
+
+| id | agent | gold | excess | legs |
+| --- | --- | --- | --- | --- |
+| v9_239 | 39913 | 35187 | 4726 | **4726**, 11299, 19162 |
+| v9_246 | 30497 | 24629 | 5868 | **5868**, 11299, 7462 |
+| v9_248 | 29561 | 20965 | 8596 | **8596**, 11327, 1042 |
+| v9_249 | 45741 | 36371 | 9370 | **9370**, 22433, 4568 |
+
+The plan says why: `sum_amounts(amounts=["$t4", "$t7", "$t10", "$t3"])` where `$t4` is
+`extract_distance(route="$t3")`. A route and the distance taken off it are one measurement written
+twice, so a three-leg drive totalled from four addends. `sum_amounts` cannot see it — by the time
+it runs both are dicts carrying `distance_m` — but the executor still holds the unresolved
+references and every step's arguments, so `_drop_subsumed_addends` drops an addend another addend
+was measured from. Correct rows of the family carry exactly three addends; the seven carry four.
+
+**`provider_failure` is a composite arriving where a name belongs.** Five of ten: three option
+lists (`'CU 마곡아르디에점, CU 강서발산역점, GS25 강서등촌점, GS25 마곡루체점'`) and two itineraries
+(`'쥬인스테이 → 삼모아트센터'`). `place_names` is the plural argument, so a `field_validator` splits
+an element on an itinerary arrow or a comma *followed by a space* — the space matters, because
+`종로5,6가동 주민센터` and `7,900파스타 용두역점` are single Kakao names and all seven comma-bearing
+names in the 12,138-place pool write it without one. A single-name argument still fails: there the
+composite is genuinely ambiguous. The three `'Located Hotel Isabel'` rows are left alone — repairing
+a translated name is an ability added to one architecture, not a wiring fix.
+
+**`graph_validation_failure` is mostly the step budget.** Seven of nineteen are
+`exceeds MAX_REASONING_STEPS=15` on graphs of 17 to 23 transformations, and eleven of nineteen are
+`trip_feasible_count_five`. That is Spatial-Agent's version of the `iteration_limit` v6's four-stop
+families spent on ReAct: a family that cannot be said within the budget measures the budget. The
+repair is to shrink the family, as v7 did, not to raise a budget that is one number for both
+architectures. Nothing was changed for it.
+
+**What the two fixes did to the score: nothing measurable.** Spatial-Agent on v9, concurrency 32:
+
+| | passes | mean |
+| --- | --- | --- |
+| before (4 passes) | 69.0 / 72.3 / 70.0 / 71.7 | **71.2** |
+| after (3 passes) | 71.0 / 73.0 / 69.0 | **71.0** |
+
+−0.2, and the after-passes alone span 4.0. `trip_total_distance` went 78.6 → 84.1 and
+`routing_detour_cost` 64.6 → 58.3 — the two families the rule fires on, moving opposite ways — while
+`unanswerable_review_count` moved +20.8 on two rows and `unanswerable_subjective` −11.8, on
+mechanisms neither fix can reach. So the benchmark says what it said before.
+
+The justification is the replay, which needs no endpoint and no quota. Over every v9 spatial log
+carrying a `sum_amounts` the rule fires on, recomputing the total without the subsumed addend
+**corrects 20 and breaks none**: 20 fixed, 40 wrong either way, 0 correct totals lost. That is the
+same shape as the intent-removal entry above — the claim is what the mechanism does, demonstrated
+where it can be demonstrated exactly, and explicitly *not* a point on the accuracy.
+
+**v9 is spent.** `src/` changed in response to what it showed, so 45.4 / 70.4 belongs to `d95a9bc`
+and the numbers here are a level for the code after it. Build a fresh set before quoting a held-out
+number again.

@@ -3778,6 +3778,11 @@ architectures. Nothing was changed for it.
 | before (4 passes) | 69.0 / 72.3 / 70.0 / 71.7 | **71.2** |
 | after (3 passes) | 71.0 / 73.0 / 69.0 | **71.0** |
 
+A caveat about the stamps, because `reports/` cannot settle this on its own: the fixes were still
+uncommitted when the after-passes ran, so all seven reports record `code_revision` `a483090` and
+only the timestamp separates them — `test_20260829T035625Z` and earlier are before, `043229Z`,
+`044356Z` and `045511Z` are after, and the code they ran is what `c4d0428` holds.
+
 −0.2, and the after-passes alone span 4.0. `trip_total_distance` went 78.6 → 84.1 and
 `routing_detour_cost` 64.6 → 58.3 — the two families the rule fires on, moving opposite ways — while
 `unanswerable_review_count` moved +20.8 on two rows and `unanswerable_subjective` −11.8, on

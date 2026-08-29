@@ -51,13 +51,29 @@ main.py -> Evaluator -> ReactAgent | SpatialAgent -> ToolRegistry -> MapProvider
   iteration and a forced stop that carries no answer. Do not execute parallel tool calls or add a
   final "answer now" call under `reference`; each is a capability the paper's baseline lacks.
   `native` keeps both and is an ablation.
-- `MAX_REASONING_STEPS` is the one step budget, and every architecture answers under it: ReAct
-  loop iterations, Spatial-Agent graph nodes. It defaults to 15 because that is langchain's own
-  default and therefore the reference baseline's. Raising it is an ablation and has to be
-  reported; do not raise it in response to a benchmark miss.
-- Report metadata must carry `llm_temperature`, `max_reasoning_steps`,
-  `react_parallel_tool_calls` and `react_forces_final_answer`. An accuracy without them is not
-  comparable to anything.
+- The step budget is **per architecture**, because the two do not count the same thing. A ReAct
+  step is one loop iteration, which is one tool call; a Spatial-Agent step is one transformation
+  edge of an authored GeoFlow graph. `REACT_MAX_STEPS` and `SPATIAL_MAX_STEPS` each default to
+  `MAX_REASONING_STEPS` when unset, so one line still governs both, and every report records all
+  three.
+  - **ReAct's 15 is upstream's and is not ours to move.** langchain's `initialize_agent` default
+    is what `mapeval-api/Evaluator2.py` runs, so 15 *is* the reference baseline. Changing it makes
+    the run an ablation and it has to be labelled one; never change it in response to a benchmark
+    miss.
+  - **Spatial-Agent's budget has no upstream value.** Nothing in either upstream sets a GeoFlow
+    graph to 15 edges — holding both sides to one number was this repository's housekeeping, and
+    it was a category error. A declarative graph spends edges on structure a loop never writes
+    down: a faithful rendering of "how many of N stops fit the budget" costs `3N + 2` edges, or
+    `4N + 2` when the planner extracts each leg's duration separately, so five stops costs 17 to
+    22 edges to say what ReAct says in about ten calls. That refused 37–39% of the family before
+    anything executed, while conditional on producing a graph it scored 58.5% against a 38.1%
+    floor — the budget was measuring the accounting, not the reasoning.
+  - What the old rule got right and still holds: a budget change moves accuracy, so any run that
+    is not at the configuration of record must say so, and a family that cannot be finished within
+    its architecture's budget measures the budget. Report both numbers beside any accuracy.
+- Report metadata must carry `llm_temperature`, `max_reasoning_steps`, `react_max_steps`,
+  `spatial_max_steps`, `react_parallel_tool_calls` and `react_forces_final_answer`. An accuracy
+  without them is not comparable to anything.
 - Every question records what it cost: `llm_calls`, `prompt_tokens`, `completion_tokens`,
   `total_tokens`, `reasoning_tokens`, `reasoning_chars`, in the log line, the report row and the
   run statistics. `reasoning_tokens` is only ever what the server reported — leave it null when it

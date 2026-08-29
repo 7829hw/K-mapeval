@@ -39,17 +39,29 @@ class Settings(BaseSettings):
     # question-level retries on top a single question could hold a worker for nearly five hours --
     # twelve workers doing it is a run that stops finishing rather than a run that is slow.
     llm_retry_time_budget_seconds: float = Field(default=600.0, gt=0)
-    # One budget for every architecture: how many reasoning steps a question may take. For ReAct
-    # that is loop iterations, for Spatial-Agent the nodes its authored graph may hold. 15 is
-    # langchain's own default, which is what `mapeval-api/Evaluator2.py` runs -- it calls
-    # `initialize_agent` with no `max_iterations` -- so the reference baseline has to have it.
-    # The 30 this repository used was argued from `mapeval-api/mapeval_api_evaluator.py`, a file
-    # untracked in the upstream checkout, so a local adapter rather than upstream code.
-    #
-    # This used to be two settings, 8 here and 15 in `REACT_MAX_ITERATIONS`, which meant the
-    # number in force depended on which agent and which tool surface was running and no single
-    # `.env` line said what it was. Reports record the one that applied.
+    # The default budget, and the value each architecture takes when it is not given its own.
     max_reasoning_steps: int = Field(default=15, ge=1, le=60)
+    # ...but the two architectures do not count the same thing, so they get their own settings.
+    #
+    # A ReAct step is one loop iteration, which is one tool call: 15 is langchain's own default,
+    # which is what `mapeval-api/Evaluator2.py` runs -- it calls `initialize_agent` with no
+    # `max_iterations` -- so the *reference baseline* has to have it, and lowering or raising it
+    # makes the run an ablation rather than the paper's baseline.
+    #
+    # A Spatial-Agent step is one transformation edge of an authored GeoFlow graph, and nothing
+    # upstream sets that to 15. Holding both to one number was this repository's own housekeeping,
+    # and it is a category error: a declarative graph spends edges on structure the ReAct loop
+    # never has to write down. Measured on the feasibility family, a faithful rendering of "how
+    # many of N stops fit the budget" costs `3N + 2` edges, or `4N + 2` when the planner extracts
+    # each leg's duration separately -- so five stops costs 17 or 22 edges to say what ReAct says
+    # in about ten calls, and 37% to 39% of those questions were refused before anything executed.
+    # That measured the accounting, not the reasoning: conditional on producing a graph at all the
+    # family scores 58.5% against a 38.1% no-tool floor.
+    #
+    # Unset, each falls back to `max_reasoning_steps`, so a single `.env` line still governs both.
+    # Both resolved values are recorded in every report.
+    react_max_steps: int | None = Field(default=None, ge=1, le=60)
+    spatial_max_steps: int | None = Field(default=None, ge=1, le=60)
     benchmark_concurrency: int = Field(default=4, ge=1, le=32)
     # Extra attempts for a single question the endpoint failed to serve. The client already retries
     # each request; this catches the case where the endpoint stayed down for a whole question, so
@@ -73,6 +85,20 @@ class Settings(BaseSettings):
         if self.llm_base_url is not None and not self.llm_base_url.strip():
             self.llm_base_url = None
         return self
+
+    @property
+    def react_steps(self) -> int:
+        """ReAct's loop-iteration budget: its own setting, or the shared default."""
+
+        return self.max_reasoning_steps if self.react_max_steps is None else self.react_max_steps
+
+    @property
+    def spatial_steps(self) -> int:
+        """Spatial-Agent's transformation-edge budget: its own setting, or the shared default."""
+
+        return (
+            self.max_reasoning_steps if self.spatial_max_steps is None else self.spatial_max_steps
+        )
 
     def search_center(self) -> tuple[float, float] | None:
         """`KAKAO_SEARCH_CENTER` as (latitude, longitude), or None when unset."""

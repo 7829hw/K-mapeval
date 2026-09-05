@@ -147,4 +147,5 @@ pytest
 ruff check .
 ```
 
-원본 코드와의 대응 및 의도적인 차이는 `docs/REFERENCE_MAPPING.md`에 정리되어 있습니다.
+원본 코드와의 대응 및 의도적인 차이는 [REFERENCE_MAPPING.md](docs/REFERENCE_MAPPING.md)에,
+과거 실험 결과와 revision별 해석은 [EXPERIMENT_HISTORY.md](docs/EXPERIMENT_HISTORY.md)에 정리되어 있습니다.
